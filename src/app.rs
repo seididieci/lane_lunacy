@@ -61,7 +61,7 @@ impl App {
         self.previous = Instant::now();
 
         println!(
-            "Controls: W / Up = throttle | S / Down = brake | A / Left & D / Right = steer | E = gear up | Q = gear down | 1/2/3 = EASY/NORMAL/HARD"
+            "Controls: W / Up = throttle | S / Down = brake | A / Left & D / Right = steer | E = gear up | Q = gear down | R = restart | 1/2/3 = EASY/NORMAL/HARD"
         );
     }
 }
@@ -117,6 +117,12 @@ impl ApplicationHandler for App {
                     PhysicalKey::Code(KeyCode::KeyQ) => {
                         if pressed && !kb.repeat {
                             self.input.gear_down = true;
+                        }
+                    }
+                    PhysicalKey::Code(KeyCode::KeyR) => {
+                        if pressed && !kb.repeat {
+                            self.game.restart();
+                            println!("Run restarted");
                         }
                     }
                     PhysicalKey::Code(KeyCode::Digit1) => {

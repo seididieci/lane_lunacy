@@ -94,4 +94,12 @@ impl DifficultyLevel {
             DifficultyLevel::Hard => "HARD",
         }
     }
+
+    pub fn score_multiplier(self) -> f32 {
+        match self {
+            DifficultyLevel::EasyArcade => 1.0,
+            DifficultyLevel::Normal => 1.5,
+            DifficultyLevel::Hard => 2.0,
+        }
+    }
 }

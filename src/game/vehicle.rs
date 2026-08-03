@@ -24,6 +24,15 @@ impl Vehicle {
         }
     }
 
+    pub fn reset(&mut self) {
+        self.distance = 0.0;
+        self.offset = 0.0;
+        self.speed = 0.0;
+        self.steer = 0.0;
+        self.gear = 1;
+        self.heading = 0.0;
+    }
+
     pub fn update(&mut self, dt: f32, input: &Input) {
         if input.gear_up {
             self.gear = (self.gear + 1).min(5);

@@ -82,21 +82,32 @@ pub fn build_hud_vertices(game: &Game, atlas: &FontAtlas, aspect: f32) -> Vec<Hu
     let green = [0.2, 1.0, 0.3];
     let yellow = [1.0, 0.9, 0.3];
     let red = [1.0, 0.2, 0.2];
+    let dim = [0.72, 0.78, 0.82];
+    let right_x = 0.95;
 
     let px_to_ndc_x = |em: f32| em / atlas.raster_px / aspect;
 
-    // Speed value (large, centered lower)
-    let speed_em = 0.14;
-    let speed_str = format!("{:.0}", game.speed_kmh);
-    let sw = text_width(atlas, &speed_str, px_to_ndc_x(speed_em));
-    draw_text(&mut out, atlas, &speed_str, -sw / 2.0, -0.6, speed_em, aspect, white);
+    let right_text = |out: &mut Vec<HudVertex>,
+                      text: &str,
+                      y: f32,
+                      em: f32,
+                      color: [f32; 3]| {
+        let w = text_width(atlas, text, px_to_ndc_x(em));
+        draw_text(out, atlas, text, right_x - w, y, em, aspect, color);
+    };
 
-    // KM/H label under it
-    let label_em = 0.06;
-    let lw = text_width(atlas, "KM/H", px_to_ndc_x(label_em));
-    draw_text(&mut out, atlas, "KM/H", -lw / 2.0, -0.78, label_em, aspect, green);
+    // Top-right: score / best / average speed
+    right_text(&mut out, &format!("SCORE {}", game.score), 0.92, 0.07, white);
+    right_text(&mut out, &format!("BEST {}", game.best_score), 0.82, 0.05, green);
+    right_text(
+        &mut out,
+        &format!("AVG {:.0} KM/H", game.avg_speed * 3.6),
+        0.72,
+        0.045,
+        dim,
+    );
 
-    // Gear (top-left)
+    // Top-left: gear / mode / wrecks remaining
     draw_text(
         &mut out,
         atlas,
@@ -119,8 +130,36 @@ pub fn build_hud_vertices(game: &Game, atlas: &FontAtlas, aspect: f32) -> Vec<Hu
         [0.78, 0.9, 1.0],
     );
 
-    // Speed bar
-    let ratio = (game.speed_kmh / 288.0).clamp(0.0, 1.0);
+    let tuning = game.difficulty.tuning();
+    let wreck_col = if tuning.wreck_limit - game.wrecks <= 1 {
+        red
+    } else {
+        white
+    };
+    draw_text(
+        &mut out,
+        atlas,
+        &format!("WRECKS {}/{}", game.wrecks, tuning.wreck_limit),
+        -0.95,
+        0.72,
+        0.05,
+        aspect,
+        wreck_col,
+    );
+
+    // Speed value (large, centered lower)
+    let speed_em = 0.14;
+    let speed_str = format!("{:.0}", game.speed_kmh);
+    let sw = text_width(atlas, &speed_str, px_to_ndc_x(speed_em));
+    draw_text(&mut out, atlas, &speed_str, -sw / 2.0, -0.6, speed_em, aspect, white);
+
+    // KM/H label under it
+    let label_em = 0.06;
+    let lw = text_width(atlas, "KM/H", px_to_ndc_x(label_em));
+    draw_text(&mut out, atlas, "KM/H", -lw / 2.0, -0.78, label_em, aspect, green);
+
+    // Speed bar (scaled to true top speed ~342 km/h)
+    let ratio = (game.speed_kmh / 342.0).clamp(0.0, 1.0);
     push_solid_rect(&mut out, -0.9, -0.85, 1.8 * ratio, 0.04, green);
 
     // Alerts
@@ -129,6 +168,23 @@ pub fn build_hud_vertices(game: &Game, atlas: &FontAtlas, aspect: f32) -> Vec<Hu
         let t = "GAME OVER";
         let w = text_width(atlas, t, px_to_ndc_x(alert_em));
         draw_text(&mut out, atlas, t, -w / 2.0, 0.15, alert_em, aspect, red);
+
+        let score_t = format!("SCORE {}", game.score);
+        let s_em = 0.08;
+        let sw2 = text_width(atlas, &score_t, px_to_ndc_x(s_em));
+        draw_text(&mut out, atlas, &score_t, -sw2 / 2.0, -0.05, s_em, aspect, white);
+
+        let best_t = format!("BEST {}", game.best_score);
+        let b_em = 0.06;
+        let bw = text_width(atlas, &best_t, px_to_ndc_x(b_em));
+        draw_text(&mut out, atlas, &best_t, -bw / 2.0, -0.18, b_em, aspect, green);
+
+        if ((game.ui_time * 2.0) as i32) % 2 == 0 {
+            let hint = "PRESS R TO RESTART";
+            let hint_em = 0.05;
+            let hw = text_width(atlas, hint, px_to_ndc_x(hint_em));
+            draw_text(&mut out, atlas, hint, -hw / 2.0, -0.32, hint_em, aspect, yellow);
+        }
     } else if game.wreck_timer > 0.0 {
         let t = "WRECK";
         let w = text_width(atlas, t, px_to_ndc_x(alert_em));
