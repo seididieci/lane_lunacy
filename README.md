@@ -23,18 +23,35 @@ Buckle up. It gets spicy.
   blink, and they are *not* moving over.
 - **A real gearbox.** Five gears, manual shifting. Keep the needle in the zone or
   bog down like a lawnmower. Top speed: a hair over **340 km/h**.
-- **Choose your pain.** Three difficulty modes, mid-run, with a keystroke:
-  | Key | Mode   | The deal                                              |
-  |-----|--------|-------------------------------------------------------|
-  | `1` | EASY   | Sparse traffic, gentle walls, forgiving crashes       |
-  | `2` | NORMAL | The way it's meant to be played                       |
-  | `3` | HARD   | Wall-to-wall chaos. Good luck.                        |
+- **Choose your pain.** Three difficulty modes. Pick one in the start menu — or
+  change it anytime via the pause menu (this restarts the run):
+  | Mode   | The deal                                              |
+  |--------|-------------------------------------------------------|
+  | EASY   | Sparse traffic, gentle walls, forgiving crashes       |
+  | NORMAL | The way it's meant to be played                       |
+  | HARD   | Wall-to-wall chaos. Good luck.                        |
 - **Wreck or be wrecked.** Hit a car and it's a *WRECK* — you slow to a crawl and
   the HUD screams it at you. Too many wrecks and it's **GAME OVER**.
 
 ---
 
 ## 🕹️ Controls
+
+### Start / pause menu
+
+| Input          | Action                              |
+|----------------|-------------------------------------|
+| `↑` / `↓` (`W`/`S`) | Move between rows              |
+| `←` / `→` (`A`/`D`) | Cycle GPU or difficulty        |
+| `Enter`        | Select (START / EXIT / GPU switch) |
+| `Esc`          | Open pause menu during a run / back |
+
+Select a **GPU** (device 0 is the default, overridable with `--gpu <N>`), choose a
+**difficulty**, then hit **START**. Switching GPU re-uses the window and keeps your
+run going. Pause anytime with `Esc` — the road freezes behind the menu. Changing the
+**difficulty** in the pause menu restarts the current run; changing the GPU does not.
+
+### Driving
 
 | Input          | Action                              |
 |----------------|-------------------------------------|
@@ -43,7 +60,8 @@ Buckle up. It gets spicy.
 | `A` / `←` `D` / `→` | Steer left / right              |
 | `E`            | Gear up                             |
 | `Q`            | Gear down                           |
-| `1` / `2` / `3`| Difficulty: Easy / Normal / Hard    |
+| `R`            | Restart run                         |
+| `Esc`          | Pause menu                          |
 
 ---
 
@@ -86,14 +104,17 @@ cargo build --release
 
 # run
 cargo run --release
+
+# force a specific GPU (see the [index] shown in the start menu)
+cargo run --release -- --gpu 1
 ```
 
 That's it. The first build takes a few minutes while shaderc compiles glslang;
 after that, incremental builds are fast and shaders are recompiled automatically
 whenever you edit anything in `shaders/`.
 
-On startup you'll be asked to pick a GPU if more than one is available (or you can
-pipe your selection / run non-interactively to auto-pick a discrete GPU).
+The game launches straight into the start menu — pick a GPU (default device 0,
+or set one up front with `--gpu <N>`) and a difficulty, then press **START**.
 
 ---
 
@@ -109,6 +130,7 @@ src/
   render/            Renderer: Vulkan pipelines, camera, texture uploads
   mesh.rs            Procedural road/world geometry
   hud.rs, font.rs    HUD + font atlas
+  menu.rs            Start/pause menu state and vertex builder
   model.rs           GLB mesh loading
   gpu.rs             Device/surface/queue selection
   build.rs*          Shader compilation pipeline

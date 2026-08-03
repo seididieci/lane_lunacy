@@ -8,5 +8,7 @@ layout(location = 1) out vec2 v_uv;
 void main() {
     v_color = color;
     v_uv = uv;
-    gl_Position = vec4(position, 0.0, 1.0);
+    // Flip Y: Vulkan's NDC maps +y to the bottom of the framebuffer, but the
+    // HUD/menu use y-up coordinates (matching the 3D scene's corrected projection).
+    gl_Position = vec4(position.x, -position.y, 0.0, 1.0);
 }

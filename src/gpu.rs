@@ -1,64 +1,54 @@
 // SPDX-License-Identifier: MIT
 
-use std::io::{self, BufRead, IsTerminal, Write};
 use std::sync::Arc;
 
 use vulkano::device::physical::{PhysicalDevice, PhysicalDeviceType};
 use vulkano::device::{Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo, QueueFlags};
 use vulkano::instance::Instance;
 use vulkano::swapchain::Surface;
-use winit::window::Window;
 
-pub fn select_physical_device(instance: &Arc<Instance>) -> Arc<PhysicalDevice> {
-    let devices: Vec<Arc<_>> = instance
+pub fn enumerate_devices(instance: &Arc<Instance>) -> Vec<Arc<PhysicalDevice>> {
+    let all: Vec<Arc<_>> = instance
         .enumerate_physical_devices()
         .expect("failed to enumerate physical devices")
         .collect();
 
-    if devices.is_empty() {
+    if all.is_empty() {
         panic!("no Vulkan-capable GPUs found on this system");
     }
 
-    println!("Available GPUs:");
-    for (i, device) in devices.iter().enumerate() {
-        let props = device.properties();
-        println!("  [{}] {}  ({:?})", i, props.device_name, props.device_type);
-    }
+    let hardware: Vec<Arc<PhysicalDevice>> = all
+        .iter()
+        .filter(|d| d.properties().device_type != PhysicalDeviceType::Cpu)
+        .cloned()
+        .collect();
 
-    let chosen = if !io::stdin().is_terminal() {
-        pick_default(&devices)
+    if hardware.is_empty() {
+        println!("No hardware GPU found; falling back to software rendering (llvmpipe)");
+        all
     } else {
-        print!("Select a GPU to use (index): ");
-        io::stdout().flush().unwrap();
-        let mut line = String::new();
-        io::stdin().lock().read_line(&mut line).unwrap();
-        match line.trim().parse::<usize>() {
-            Ok(i) if i < devices.len() => i,
-            _ => {
-                println!("invalid selection, using default");
-                pick_default(&devices)
-            }
-        }
-    };
+        hardware
+    }
+}
 
-    println!("Using GPU: {}", devices[chosen].properties().device_name);
+pub fn select_physical_device(
+    devices: &[Arc<PhysicalDevice>],
+    index: usize,
+) -> Arc<PhysicalDevice> {
+    let chosen = index.min(devices.len().saturating_sub(1));
+    println!(
+        "Using GPU [{}]: {}  ({:?})",
+        chosen,
+        devices[chosen].properties().device_name,
+        devices[chosen].properties().device_type
+    );
     devices[chosen].clone()
 }
 
-fn pick_default(devices: &[Arc<PhysicalDevice>]) -> usize {
-    devices
-        .iter()
-        .position(|d| d.properties().device_type == PhysicalDeviceType::DiscreteGpu)
-        .unwrap_or(0)
-}
-
 pub fn create_graphics_context(
-    instance: Arc<Instance>,
-    window: Arc<Window>,
-) -> (Arc<PhysicalDevice>, Arc<Surface>, Arc<Device>, Arc<Queue>) {
-    let physical = select_physical_device(&instance);
-    let surface = Surface::from_window(instance, window).expect("failed to create surface");
-
+    surface: Arc<Surface>,
+    physical: &Arc<PhysicalDevice>,
+) -> (Arc<Device>, Arc<Queue>) {
     let queue_family_index = physical
         .queue_family_properties()
         .iter()
@@ -89,5 +79,5 @@ pub fn create_graphics_context(
     .expect("failed to create device");
     let queue = queues.next().unwrap();
 
-    (physical, surface, device, queue)
+    (device, queue)
 }

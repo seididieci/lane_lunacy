@@ -23,9 +23,7 @@ use vulkano::format::Format;
 use vulkano::image::sampler::{Sampler, SamplerAddressMode, SamplerCreateInfo};
 use vulkano::image::view::ImageView;
 use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
-use vulkano::memory::allocator::{
-    AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator,
-};
+use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
 use vulkano::pipeline::graphics::color_blend::{
     AttachmentBlend, ColorBlendAttachmentState, ColorBlendState,
 };
@@ -53,6 +51,7 @@ use vulkano::{Validated, VulkanError};
 use crate::font::FontAtlas;
 use crate::game::Game;
 use crate::hud::build_hud_vertices;
+use crate::menu::{build_menu_vertices, MenuState};
 use crate::mesh::build_world_chunk;
 use crate::model::load_gltf_mesh_from_bytes;
 use crate::render::camera::{perspective_vulkan, Camera};
@@ -420,18 +419,20 @@ impl Renderer {
             swapchain,
             render_pass,
             framebuffers: Vec::new(),
-            depth_view: ImageView::new_default(Image::new(
-                memory_allocator.clone(),
-                ImageCreateInfo {
-                    image_type: ImageType::Dim2d,
-                    format: Format::D32_SFLOAT,
-                    extent: [extent[0], extent[1], 1],
-                    usage: vulkano::image::ImageUsage::DEPTH_STENCIL_ATTACHMENT,
-                    ..Default::default()
-                },
-                AllocationCreateInfo::default(),
+            depth_view: ImageView::new_default(
+                Image::new(
+                    memory_allocator.clone(),
+                    ImageCreateInfo {
+                        image_type: ImageType::Dim2d,
+                        format: Format::D32_SFLOAT,
+                        extent: [extent[0], extent[1], 1],
+                        usage: vulkano::image::ImageUsage::DEPTH_STENCIL_ATTACHMENT,
+                        ..Default::default()
+                    },
+                    AllocationCreateInfo::default(),
+                )
+                .expect("depth image"),
             )
-            .expect("depth image"))
             .expect("depth view"),
             mesh_pipeline,
             hud_pipeline,
@@ -573,22 +574,34 @@ impl Renderer {
         .expect("mvp buffer")
     }
 
-    pub fn render(&mut self, game: &Game, dt: std::time::Duration) {
+    /// Waits for all pending work on the backing device, so its swapchain and
+    /// resources can be torn down safely. Called before a GPU switch.
+    pub(crate) fn wait_idle(&self) {
+        // Safety: no further work is submitted to this device afterwards; it is
+        // dropped immediately after this call.
+        unsafe { self.device.wait_idle() }.expect("failed to wait for device idle");
+    }
+
+    pub fn render(
+        &mut self,
+        game: &Game,
+        dt: std::time::Duration,
+        menu: Option<&MenuState>,
+        gpu_names: &[String],
+    ) {
         if self.recreate {
             self.recreate_swapchain();
         }
 
-        let (image_i, suboptimal, acquire_future) = match acquire_next_image(
-            self.swapchain.clone(),
-            None,
-        ) {
-            Ok(r) => r,
-            Err(Validated::Error(VulkanError::OutOfDate)) => {
-                self.recreate = true;
-                return;
-            }
-            Err(e) => panic!("failed to acquire next image: {:?}", e),
-        };
+        let (image_i, suboptimal, acquire_future) =
+            match acquire_next_image(self.swapchain.clone(), None) {
+                Ok(r) => r,
+                Err(Validated::Error(VulkanError::OutOfDate)) => {
+                    self.recreate = true;
+                    return;
+                }
+                Err(e) => panic!("failed to acquire next image: {:?}", e),
+            };
         if suboptimal {
             self.recreate = true;
         }
@@ -623,10 +636,7 @@ impl Renderer {
         builder
             .begin_render_pass(
                 RenderPassBeginInfo {
-                    clear_values: vec![
-                        Some([0.42, 0.6, 0.8, 1.0].into()),
-                        Some(1.0f32.into()),
-                    ],
+                    clear_values: vec![Some([0.42, 0.6, 0.8, 1.0].into()), Some(1.0f32.into())],
                     ..RenderPassBeginInfo::framebuffer(self.framebuffers[image_i as usize].clone())
                 },
                 SubpassBeginInfo {
@@ -735,7 +745,10 @@ impl Renderer {
                 self.hud_descriptor_set.clone(),
             )
             .expect("bind hud descriptor set");
-        let hud_verts = build_hud_vertices(game, &self.font_atlas, aspect);
+        let hud_verts = match menu {
+            Some(menu) => build_menu_vertices(menu, gpu_names, &self.font_atlas, aspect),
+            None => build_hud_vertices(game, &self.font_atlas, aspect),
+        };
         let hud_vertex_count = hud_verts.len() as u32;
         let hud_buf = Buffer::from_iter(
             self.memory_allocator.clone(),
@@ -754,9 +767,7 @@ impl Renderer {
             .bind_vertex_buffers(0, hud_buf)
             .expect("bind hud vertex buffers");
         unsafe {
-            builder
-                .draw(hud_vertex_count, 1, 0, 0)
-                .expect("draw hud");
+            builder.draw(hud_vertex_count, 1, 0, 0).expect("draw hud");
         }
 
         builder

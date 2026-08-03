@@ -6,6 +6,7 @@ pub mod game;
 pub mod gpu;
 pub mod hud;
 pub mod input;
+pub mod menu;
 pub mod mesh;
 pub mod model;
 pub mod render;
@@ -19,7 +20,7 @@ use vulkano::instance::{Instance, InstanceCreateFlags, InstanceCreateInfo};
 use vulkano::swapchain::Surface;
 use vulkano::VulkanLibrary;
 
-pub fn run() {
+pub fn run(gpu_index: usize) {
     let event_loop = EventLoop::new().expect("failed to create event loop");
 
     let library = VulkanLibrary::new().expect("failed to load the Vulkan library");
@@ -35,6 +36,6 @@ pub fn run() {
     )
     .expect("failed to create instance");
 
-    let mut app = app::App::new(instance);
+    let mut app = app::App::new(instance, gpu_index);
     event_loop.run_app(&mut app).expect("event loop failed");
 }
