@@ -27,8 +27,15 @@ released under Creative Commons Zero (CC0) - public domain:
 Credit (not required): Kenney / www.kenney.nl
 See assets/models/KENNEY_LICENSE.txt for the original notice.
 
-HUD font
---------
-The Maple Mono Nerd Font, loaded at runtime from the system
-(/usr/share/fonts/maple-mono/MapleMono-NF-Regular.ttf), is licensed under the
-SIL Open Font License (OFL). The font is not redistributed with this project.
+HUD font (assets/fonts/)
+-----------------------
+The HUD font is Maple Mono Nerd Font (MapleMono-NF-Regular.ttf), created by
+subframe7536 (https://github.com/subframe7536) with Reserved Font Name
+"Maple Mono", and patched by the Nerd Fonts project
+(https://github.com/ryanoasis/nerd-fonts). It is bundled unmodified with this
+project under the SIL Open Font License, Version 1.1:
+
+  https://openfontlicense.org/
+
+See assets/fonts/OFL-MapleMono-NF.txt for the full license text and copyright
+notice. The font is not sold separately.

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use fontdue::Font;
 
-const FONT_PATH: &str = "/usr/share/fonts/maple-mono/MapleMono-NF-Regular.ttf";
+const FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/MapleMono-NF-Regular.ttf");
 const RASTER_PX: f32 = 48.0;
 const PADDING: usize = 2;
 const CHARSET: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 .,:!?/-+%()";
@@ -34,9 +34,8 @@ pub struct FontAtlas {
 
 impl FontAtlas {
     pub fn load() -> Self {
-        let data = std::fs::read(FONT_PATH).expect("failed to read Maple Mono font file");
-        let font =
-            Font::from_bytes(data, fontdue::FontSettings::default()).expect("failed to parse font");
+        let font = Font::from_bytes(FONT_BYTES.to_vec(), fontdue::FontSettings::default())
+            .expect("failed to parse font");
 
         let mut rasters: Vec<(char, fontdue::Metrics, Vec<u8>)> = Vec::new();
         let mut row_height = 0usize;

@@ -69,9 +69,9 @@ Buckle up. It gets spicy.
   - `git` (glslang source is vendored, but the build fetches pins)
   - `python3`
 
-> 💡 **HUD font:** the game loads **Maple Mono Nerd Font** from
-> `/usr/share/fonts/maple-mono/MapleMono-NF-Regular.ttf` for the on-screen HUD.
-> Install the font (or place a copy at that path) or the game will refuse to start.
+> 💡 Everything else is embedded in the binary — car models, textures, and the
+> **Maple Mono** HUD font (bundled under the SIL Open Font License). No runtime
+> asset files or system fonts are required.
 
 ---
 
@@ -101,6 +101,7 @@ pipe your selection / run non-interactively to auto-pick a discrete GPU).
 
 ```
 assets/models/       Embedded 3D models + textures (GLB, PNG)
+assets/fonts/        Embedded HUD font (TTF + OFL license)
 shaders/*.glsl       GLSL shader sources (compiled to SPIR-V at build time)
 src/
   app.rs             Window, event loop, input handling
@@ -128,7 +129,7 @@ src/
 - **Code** (Rust source + GLSL shaders): [MIT](LICENSE) — Copyright (c) 2026 Lane Lunacy contributors.
 - **Original art/audio** (added by the project): [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/).
 - **Kenney car models & textures**: [CC0](https://creativecommons.org/publicdomain/zero/1.0/) public domain.
-- **HUD font** (Maple Mono Nerd Font): [SIL OFL](https://openfontlicense.org/), loaded from the system, not redistributed.
+- **HUD font** (Maple Mono Nerd Font): bundled under the [SIL OFL 1.1](assets/fonts/OFL-MapleMono-NF.txt).
 
 See [LICENSE-ASSETS](LICENSE-ASSETS) for the full asset breakdown.
 
