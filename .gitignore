@@ -1,0 +1,14 @@
+# Build artifacts
+/target
+
+# Compiled SPIR-V shaders (generated from shaders/*.glsl)
+shaders/*.spv
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

@@ -1,0 +1,16 @@
+[package]
+name = "lane_lunacy"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+vulkano = "0.35"
+winit = "0.30"
+glam = "0.29"
+fontdue = "0.9"
+gltf = "1.4"
+image = "0.25"
+
+[build-dependencies]
+shaderc = { version = "0.10.1", features = ["build-from-source"] }
