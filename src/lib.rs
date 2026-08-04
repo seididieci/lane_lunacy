@@ -12,6 +12,7 @@ pub mod model;
 pub mod render;
 pub mod road;
 pub mod shaders;
+pub mod ui;
 pub mod vertex;
 
 use winit::event_loop::EventLoop;

@@ -2,10 +2,9 @@
 
 use crate::font::{FontAtlas, ICON_CHIP, ICON_LOGOUT, ICON_PLAY, ICON_SPEEDOMETER, ICON_STEERING};
 use crate::game::DifficultyLevel;
-use crate::hud::{draw_text, push_panel_color, text_bounds, text_width, PANEL_PAD};
+use crate::ui::{Align, Button, Column, HAlign, Insets, Node, Overlay, Panel, Spacer, Text, Ui};
 use crate::vertex::HudVertex;
 
-const HIGHLIGHT: [f32; 4] = [0.35, 0.5, 0.7, 0.35];
 const BACKDROP: [f32; 4] = [0.02, 0.03, 0.05, 0.55];
 const TITLE_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 const ROW_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
@@ -13,7 +12,12 @@ const START_COLOR: [f32; 4] = [0.3, 1.0, 0.4, 1.0];
 const EXIT_COLOR: [f32; 4] = [1.0, 0.45, 0.45, 1.0];
 const FOOT_COLOR: [f32; 4] = [0.72, 0.78, 0.82, 1.0];
 
-const ROW_EM: f32 = 0.055;
+const TITLE_EM: f32 = 72.0;
+const ROW_EM: f32 = 30.0;
+const FOOT_EM: f32 = 18.0;
+const ROW_GAP: f32 = 18.0;
+const SECTION_GAP: f32 = 64.0;
+const CARD_PAD: Insets = Insets::new(64.0, 48.0, 64.0, 48.0);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuRow {
@@ -110,119 +114,86 @@ fn gpu_label(index: usize, names: &[String]) -> String {
     }
 }
 
-fn push_menu_row(
-    out: &mut Vec<HudVertex>,
-    atlas: &FontAtlas,
-    aspect: f32,
-    text: &str,
-    y: f32,
-    em: f32,
-    color: [f32; 4],
-    focused: bool,
-) {
-    let px_to_ndc_x = em / atlas.raster_px / aspect;
-    let w = text_width(atlas, text, px_to_ndc_x);
-    let x = -w / 2.0;
-    if focused {
-        if let Some((min_x, top, max_x, bottom)) = text_bounds(atlas, text, x, y, em, aspect) {
-            push_panel_color(
-                out,
-                min_x - PANEL_PAD,
-                top + PANEL_PAD,
-                (max_x - min_x) + 2.0 * PANEL_PAD,
-                (top - bottom) + 2.0 * PANEL_PAD,
-                HIGHLIGHT,
-            );
-        }
-    }
-    draw_text(out, atlas, text, x, y, em, aspect, color);
-}
-
+/// Builds the menu as a widget tree laid out by the UI engine.
 pub fn build_menu_vertices(
     menu: &MenuState,
     gpu_names: &[String],
     atlas: &FontAtlas,
     aspect: f32,
 ) -> Vec<HudVertex> {
-    let mut out: Vec<HudVertex> = Vec::new();
+    let ui = Ui::new();
+    let mut root = build_menu_tree(menu, gpu_names);
+    ui.build(&mut root, atlas, aspect)
+}
 
-    // Backdrop card
-    push_panel_color(&mut out, -0.55, 0.78, 1.1, 1.33, BACKDROP);
-
-    // Title
+fn build_menu_tree(menu: &MenuState, gpu_names: &[String]) -> Node {
     let title = format!("{}  LANE LUNACY", ICON_STEERING);
-    let title_em = 0.15;
-    let tw = text_width(atlas, &title, title_em / atlas.raster_px / aspect);
-    draw_text(
-        &mut out,
-        atlas,
-        &title,
-        -tw / 2.0,
-        0.68,
-        title_em,
-        aspect,
-        TITLE_COLOR,
-    );
-
-    // Rows
     let gpu_t = gpu_label(menu.gpu_index, gpu_names);
     let mode_t = format!("{}  MODE  {}", ICON_SPEEDOMETER, menu.difficulty.label());
-
-    push_menu_row(
-        &mut out,
-        atlas,
-        aspect,
-        &gpu_t,
-        0.22,
-        ROW_EM,
-        ROW_COLOR,
-        menu.cursor == MenuRow::Gpu,
-    );
-    push_menu_row(
-        &mut out,
-        atlas,
-        aspect,
-        &mode_t,
-        0.12,
-        ROW_EM,
-        ROW_COLOR,
-        menu.cursor == MenuRow::Difficulty,
-    );
-    push_menu_row(
-        &mut out,
-        atlas,
-        aspect,
-        &format!("{}  START", ICON_PLAY),
-        0.02,
-        ROW_EM,
-        START_COLOR,
-        menu.cursor == MenuRow::Start,
-    );
-    push_menu_row(
-        &mut out,
-        atlas,
-        aspect,
-        &format!("{}  EXIT", ICON_LOGOUT),
-        -0.08,
-        ROW_EM,
-        EXIT_COLOR,
-        menu.cursor == MenuRow::Exit,
-    );
-
-    // Footer hint
     let foot = "UP/DOWN MOVE, LEFT/RIGHT CHANGE, ENTER CONFIRM";
-    let foot_em = 0.032;
-    let fw = text_width(atlas, foot, foot_em / atlas.raster_px / aspect);
-    draw_text(
-        &mut out,
-        atlas,
-        foot,
-        -fw / 2.0,
-        -0.34,
-        foot_em,
-        aspect,
-        FOOT_COLOR,
+
+    let rows = Column::new(
+        vec![
+            Node::new(
+                Button::new(gpu_t, ROW_EM, ROW_COLOR, 0).focused(menu.cursor == MenuRow::Gpu),
+            ),
+            Node::new(
+                Button::new(mode_t, ROW_EM, ROW_COLOR, 1)
+                    .focused(menu.cursor == MenuRow::Difficulty),
+            ),
+            Node::new(
+                Button::new(format!("{}  START", ICON_PLAY), ROW_EM, START_COLOR, 2)
+                    .focused(menu.cursor == MenuRow::Start),
+            ),
+            Node::new(
+                Button::new(format!("{}  EXIT", ICON_LOGOUT), ROW_EM, EXIT_COLOR, 3)
+                    .focused(menu.cursor == MenuRow::Exit),
+            ),
+        ],
+        ROW_GAP,
+        HAlign::Center,
     );
 
-    out
+    let card = Column::new(
+        vec![
+            Node::new(Text::new(title, TITLE_EM, TITLE_COLOR).aligned(HAlign::Center)),
+            Node::new(Spacer::new(0.0, SECTION_GAP)),
+            Node::new(rows),
+            Node::new(Spacer::new(0.0, SECTION_GAP)),
+            Node::new(Text::new(foot, FOOT_EM, FOOT_COLOR).aligned(HAlign::Center)),
+        ],
+        0.0,
+        HAlign::Center,
+    );
+
+    Node::new(
+        Overlay::new().child(
+            Align::Center,
+            Node::new(Panel::wrap(BACKDROP, CARD_PAD, Node::new(card))),
+        ),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::font::FontAtlas;
+    use crate::ui::Point;
+
+    #[test]
+    fn menu_builds_vertices_and_centers_rows() {
+        let menu = MenuState::new(0);
+        let names = vec!["Test GPU".to_string()];
+        let atlas = FontAtlas::load();
+        let verts = build_menu_vertices(&menu, &names, &atlas, 16.0 / 9.0);
+        assert!(!verts.is_empty());
+
+        // The START button must be hit-testable at the canvas center line.
+        let ui = Ui::new();
+        let mut root = build_menu_tree(&menu, &names);
+        ui.build(&mut root, &atlas, 16.0 / 9.0);
+        let canvas = ui.virtual_size(16.0 / 9.0);
+        let center = Point::new(canvas.w / 2.0, canvas.h / 2.0);
+        assert!(ui.hit_test(&root, center).is_some());
+    }
 }
