@@ -72,6 +72,10 @@ const TRAFFIC_SUV_GLB: &[u8] = include_bytes!("../../assets/models/traffic_suv.g
 const TRAFFIC_TAXI_GLB: &[u8] = include_bytes!("../../assets/models/traffic_taxi.glb");
 const TRAFFIC_VAN_GLB: &[u8] = include_bytes!("../../assets/models/traffic_van.glb");
 const CAR_COLORMAP_PNG: &[u8] = include_bytes!("../../assets/models/colormap.png");
+const ASPHALT_BASE_PNG: &[u8] = include_bytes!("../../assets/textures/asphalt_base.png");
+const ASPHALT_WORN_PNG: &[u8] = include_bytes!("../../assets/textures/asphalt_worn.png");
+const ASPHALT_CRACKED_PNG: &[u8] = include_bytes!("../../assets/textures/asphalt_cracked.png");
+const GRASS_PNG: &[u8] = include_bytes!("../../assets/textures/grass.png");
 
 pub struct Renderer {
     device: Arc<Device>,
@@ -362,13 +366,44 @@ impl Renderer {
         )
         .expect("hud descriptor set");
 
+        // World texture atlas, one row of slots left-to-right:
+        //   slot 0 = asphalt base, slot 1 = asphalt worn, slot 2 = asphalt cracked, slot 3 = grass.
+        // See mesh.frag.glsl for the material-based atlas offset.
+        let slot_textures = [
+            load_from_memory(ASPHALT_BASE_PNG)
+                .expect("failed to decode embedded asphalt_base texture")
+                .to_rgba8(),
+            load_from_memory(ASPHALT_WORN_PNG)
+                .expect("failed to decode embedded asphalt_worn texture")
+                .to_rgba8(),
+            load_from_memory(ASPHALT_CRACKED_PNG)
+                .expect("failed to decode embedded asphalt_cracked texture")
+                .to_rgba8(),
+            load_from_memory(GRASS_PNG)
+                .expect("failed to decode embedded grass texture")
+                .to_rgba8(),
+        ];
+        let slot_w = slot_textures[0].dimensions().0;
+        let atlas_h = slot_textures.iter().map(|t| t.dimensions().1).max().unwrap();
+        let atlas_w = slot_w * slot_textures.len() as u32;
+        let mut atlas = vec![0u8; (atlas_w * atlas_h * 4) as usize];
+        for (slot, tex) in slot_textures.iter().enumerate() {
+            let (sw, sh) = tex.dimensions();
+            let x0 = (slot as u32 * slot_w) as usize;
+            for y in 0..sh {
+                let dst = (y * atlas_w * 4) as usize + x0 * 4;
+                let src = (y * sw * 4) as usize;
+                atlas[dst..dst + (sw as usize) * 4]
+                    .copy_from_slice(&tex.as_raw()[src..src + (sw as usize) * 4]);
+            }
+        }
         let world_texture_view = upload_rgba8_texture(
             memory_allocator.clone(),
             command_allocator.clone(),
             queue.clone(),
-            1,
-            1,
-            vec![255, 255, 255, 255],
+            atlas_w,
+            atlas_h,
+            atlas,
         );
 
         let colormap = load_from_memory(CAR_COLORMAP_PNG)

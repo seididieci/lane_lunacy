@@ -14,6 +14,8 @@ pub struct Vertex3d {
     pub color: [f32; 3],
     #[format(R32G32_SFLOAT)]
     pub tex_coord: [f32; 2],
+    #[format(R32_SFLOAT)]
+    pub material: f32,
 }
 
 #[derive(BufferContents, Vertex, Default, Clone, Copy, Debug)]

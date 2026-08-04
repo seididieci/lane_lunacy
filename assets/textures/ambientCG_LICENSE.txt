@@ -1,0 +1,23 @@
+Road / ground textures
+======================
+
+The road and ground textures in this directory are from ambientCG
+(www.ambientcg.com), distributed under the Creative Commons CC0 1.0
+Universal License (public domain):
+
+  https://creativecommons.org/publicdomain/zero/1.0/
+  https://docs.ambientcg.com/license
+
+Asset pages and source maps:
+  - asphalt_base.png   derived from "Asphalt 033"  -> https://ambientcg.com/a/Asphalt033
+  - asphalt_worn.png   derived from "Asphalt 019"  -> https://ambientcg.com/a/Asphalt019
+  - asphalt_cracked.png derived from "Asphalt 026 C" -> https://ambientcg.com/a/Asphalt026C
+  - grass.png          derived from "Grass 001"    -> https://ambientcg.com/a/Grass001
+
+The downloaded color maps were downscaled to 512x512 and re-encoded as
+RGBA PNG. You may use, modify, and redistribute them for any purpose
+without attribution. Suggested (optional) credit:
+
+  Created using Asphalt 033 / Asphalt 019 / Asphalt 026 C / Grass 001
+  from ambientCG.com, licensed under the Creative Commons CC0 1.0
+  Universal License.

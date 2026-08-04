@@ -27,6 +27,19 @@ released under Creative Commons Zero (CC0) - public domain:
 Credit (not required): Kenney / www.kenney.nl
 See assets/models/KENNEY_LICENSE.txt for the original notice.
 
+ambientCG textures (assets/textures/)
+-------------------------------------
+asphalt_base.png (derived from "Asphalt 033"), asphalt_worn.png (derived
+from "Asphalt 019"), asphalt_cracked.png (derived from "Asphalt 026 C")
+and grass.png (derived from "Grass 001") are from ambientCG
+(www.ambientcg.com) and are released under Creative Commons Zero (CC0) -
+public domain:
+
+  https://creativecommons.org/publicdomain/zero/1.0/
+
+Credit (not required): ambientCG / www.ambientcg.com
+See assets/textures/ambientCG_LICENSE.txt for details.
+
 HUD font (assets/fonts/)
 -----------------------
 The HUD font is Maple Mono Nerd Font (MapleMono-NF-Regular.ttf), created by

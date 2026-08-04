@@ -3,6 +3,30 @@
 use crate::road::{road_curve, ROAD_HALF};
 use crate::vertex::Vertex3d;
 
+/// Texture atlas slots (see mesh.frag.glsl), left to right.
+const MAT_ASPHALT_BASE: f32 = 0.0;
+const MAT_ASPHALT_WORN: f32 = 1.0;
+const MAT_ASPHALT_CRACKED: f32 = 2.0;
+const MAT_GRASS: f32 = 3.0;
+/// UV scale (tiles per metre). Kept intentionally low so texture detail stays subtle.
+const ASPHALT_SCALE: f32 = 0.32;
+const GRASS_SCALE: f32 = 0.10;
+
+/// Picks an asphalt variant per long block so worn/cracked stretches appear
+/// occasionally and subtly instead of alternating every few metres.
+fn road_material(s: f32) -> f32 {
+    let block = (s / 96.0).floor() as i32;
+    let h = block.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+    let r = ((h >> 16) & 0x7fff) as f32 / 32767.0;
+    if r < 0.03 {
+        MAT_ASPHALT_CRACKED
+    } else if r < 0.15 {
+        MAT_ASPHALT_WORN
+    } else {
+        MAT_ASPHALT_BASE
+    }
+}
+
 fn push_quad(
     v: &mut Vec<Vertex3d>,
     i: &mut Vec<u32>,
@@ -12,12 +36,15 @@ fn push_quad(
     d: [f32; 3],
     n: [f32; 3],
     col: [f32; 3],
+    material: f32,
+    scale: f32,
 ) {
     let base = v.len() as u32;
-    v.push(Vertex3d { position: a, normal: n, color: col, tex_coord: [0.0, 0.0] });
-    v.push(Vertex3d { position: b, normal: n, color: col, tex_coord: [1.0, 0.0] });
-    v.push(Vertex3d { position: c, normal: n, color: col, tex_coord: [1.0, 1.0] });
-    v.push(Vertex3d { position: d, normal: n, color: col, tex_coord: [0.0, 1.0] });
+    let uv = |p: [f32; 3]| [p[0] * scale, p[2] * scale];
+    v.push(Vertex3d { position: a, normal: n, color: col, tex_coord: uv(a), material });
+    v.push(Vertex3d { position: b, normal: n, color: col, tex_coord: uv(b), material });
+    v.push(Vertex3d { position: c, normal: n, color: col, tex_coord: uv(c), material });
+    v.push(Vertex3d { position: d, normal: n, color: col, tex_coord: uv(d), material });
     i.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
 
@@ -27,15 +54,17 @@ fn push_box(
     min: [f32; 3],
     max: [f32; 3],
     col: [f32; 3],
+    material: f32,
+    scale: f32,
 ) {
     let (x0, y0, z0) = (min[0], min[1], min[2]);
     let (x1, y1, z1) = (max[0], max[1], max[2]);
-    push_quad(v, i, [x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1], [0.0, -1.0, 0.0], col);
-    push_quad(v, i, [x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [x0, y1, z0], [0.0, 1.0, 0.0], col);
-    push_quad(v, i, [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1], [0.0, 0.0, 1.0], col);
-    push_quad(v, i, [x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0], [0.0, 0.0, -1.0], col);
-    push_quad(v, i, [x1, y0, z0], [x1, y0, z1], [x1, y1, z1], [x1, y1, z0], [1.0, 0.0, 0.0], col);
-    push_quad(v, i, [x0, y0, z1], [x0, y0, z0], [x0, y1, z0], [x0, y1, z1], [-1.0, 0.0, 0.0], col);
+    push_quad(v, i, [x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1], [0.0, -1.0, 0.0], col, material, scale);
+    push_quad(v, i, [x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [x0, y1, z0], [0.0, 1.0, 0.0], col, material, scale);
+    push_quad(v, i, [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1], [0.0, 0.0, 1.0], col, material, scale);
+    push_quad(v, i, [x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0], [0.0, 0.0, -1.0], col, material, scale);
+    push_quad(v, i, [x1, y0, z0], [x1, y0, z1], [x1, y1, z1], [x1, y1, z0], [1.0, 0.0, 0.0], col, material, scale);
+    push_quad(v, i, [x0, y0, z1], [x0, y0, z0], [x0, y1, z0], [x0, y1, z1], [-1.0, 0.0, 0.0], col, material, scale);
 }
 
 pub fn build_world_chunk(start_s: f32, chunk_len: f32) -> (Vec<Vertex3d>, Vec<u32>) {
@@ -46,7 +75,7 @@ pub fn build_world_chunk(start_s: f32, chunk_len: f32) -> (Vec<Vertex3d>, Vec<u3
     let step = 2.0;
 
     // local ground ribbon around the road (per-chunk)
-    let ground = [0.1, 0.3, 0.12];
+    let ground = [0.7, 0.85, 0.6];
     let mut s_ground = start_s;
     while s_ground < end_s {
         let s0 = s_ground;
@@ -64,17 +93,19 @@ pub fn build_world_chunk(start_s: f32, chunk_len: f32) -> (Vec<Vertex3d>, Vec<u3
             [x1 - 44.0, 0.0, z1],
             [0.0, 1.0, 0.0],
             ground,
+            MAT_GRASS,
+            GRASS_SCALE,
         );
         s_ground += step;
     }
 
     // road ribbon along -Z
-    let road = [0.08, 0.09, 0.11];
+    let road = [0.55, 0.55, 0.58];
     let edge_line = [0.95, 0.95, 0.92];
     let center_line = [0.95, 0.84, 0.36];
     let shoulder_a = [0.62, 0.12, 0.12];
     let shoulder_b = [0.86, 0.86, 0.8];
-    let verge = [0.17, 0.42, 0.19];
+    let verge = [0.6, 0.75, 0.55];
     let mut s = start_s;
     while s < end_s {
         let s0 = s;
@@ -94,6 +125,8 @@ pub fn build_world_chunk(start_s: f32, chunk_len: f32) -> (Vec<Vertex3d>, Vec<u3
             [x1 - half_w, 0.02, z1],
             [0.0, 1.0, 0.0],
             road,
+            road_material(s0),
+            ASPHALT_SCALE,
         );
 
         let shoulder_col = if ((s0 / 4.0) as i32) % 2 == 0 {
@@ -112,6 +145,8 @@ pub fn build_world_chunk(start_s: f32, chunk_len: f32) -> (Vec<Vertex3d>, Vec<u3
             [x1 - half_w - 0.55, 0.021, z1],
             [0.0, 1.0, 0.0],
             shoulder_col,
+            MAT_ASPHALT_BASE,
+            ASPHALT_SCALE,
         );
 
         // right shoulder strip
@@ -124,6 +159,8 @@ pub fn build_world_chunk(start_s: f32, chunk_len: f32) -> (Vec<Vertex3d>, Vec<u3
             [x1 + half_w, 0.021, z1],
             [0.0, 1.0, 0.0],
             shoulder_col,
+            MAT_ASPHALT_BASE,
+            ASPHALT_SCALE,
         );
 
         // grass verge strips to soften shoulder->terrain transition
@@ -136,6 +173,8 @@ pub fn build_world_chunk(start_s: f32, chunk_len: f32) -> (Vec<Vertex3d>, Vec<u3
             [x1 - half_w - 1.1, 0.016, z1],
             [0.0, 1.0, 0.0],
             verge,
+            MAT_GRASS,
+            GRASS_SCALE,
         );
         push_quad(
             &mut v,
@@ -146,6 +185,8 @@ pub fn build_world_chunk(start_s: f32, chunk_len: f32) -> (Vec<Vertex3d>, Vec<u3
             [x1 + half_w + 0.55, 0.016, z1],
             [0.0, 1.0, 0.0],
             verge,
+            MAT_GRASS,
+            GRASS_SCALE,
         );
 
         // edge lines
@@ -158,6 +199,8 @@ pub fn build_world_chunk(start_s: f32, chunk_len: f32) -> (Vec<Vertex3d>, Vec<u3
             [x1 - half_w + 0.10, 0.025, z1],
             [0.0, 1.0, 0.0],
             edge_line,
+            MAT_ASPHALT_BASE,
+            ASPHALT_SCALE,
         );
         push_quad(
             &mut v,
@@ -168,6 +211,8 @@ pub fn build_world_chunk(start_s: f32, chunk_len: f32) -> (Vec<Vertex3d>, Vec<u3
             [x1 + half_w - 0.18, 0.025, z1],
             [0.0, 1.0, 0.0],
             edge_line,
+            MAT_ASPHALT_BASE,
+            ASPHALT_SCALE,
         );
 
         // dashed center line
@@ -181,6 +226,8 @@ pub fn build_world_chunk(start_s: f32, chunk_len: f32) -> (Vec<Vertex3d>, Vec<u3
                 [x1 - 0.09, 0.026, z1],
                 [0.0, 1.0, 0.0],
                 center_line,
+                MAT_ASPHALT_BASE,
+                ASPHALT_SCALE,
             );
         }
         s += step;
@@ -199,6 +246,8 @@ pub fn build_world_chunk(start_s: f32, chunk_len: f32) -> (Vec<Vertex3d>, Vec<u3
                 [px - 0.07, 0.0, z - 0.07],
                 [px + 0.07, 1.05, z + 0.07],
                 [0.93, 0.93, 0.9],
+                MAT_ASPHALT_BASE,
+                ASPHALT_SCALE,
             );
             push_box(
                 &mut v,
@@ -210,6 +259,8 @@ pub fn build_world_chunk(start_s: f32, chunk_len: f32) -> (Vec<Vertex3d>, Vec<u3
                 } else {
                     [0.24, 0.58, 0.95]
                 },
+                MAT_ASPHALT_BASE,
+                ASPHALT_SCALE,
             );
         }
         post_s += 18.0;
@@ -248,6 +299,8 @@ pub fn build_world_chunk(start_s: f32, chunk_len: f32) -> (Vec<Vertex3d>, Vec<u3
                     [min_x, base_y, z0],
                     [max_x, top_y, z1],
                     *col,
+                    MAT_GRASS,
+                    GRASS_SCALE,
                 );
             }
         }
