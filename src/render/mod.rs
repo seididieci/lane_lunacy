@@ -50,8 +50,6 @@ use vulkano::{Validated, VulkanError};
 
 use crate::font::FontAtlas;
 use crate::game::Game;
-use crate::hud::build_hud_vertices;
-use crate::menu::{build_menu_vertices, MenuState};
 use crate::mesh::build_world_chunk;
 use crate::model::load_gltf_mesh_from_bytes;
 use crate::render::camera::{perspective_vulkan, Camera};
@@ -89,7 +87,6 @@ pub struct Renderer {
     mesh_sampler: Arc<Sampler>,
     world_texture_view: Arc<ImageView>,
     car_texture_view: Arc<ImageView>,
-    font_atlas: FontAtlas,
     memory_allocator: Arc<StandardMemoryAllocator>,
     command_allocator: Arc<StandardCommandBufferAllocator>,
     descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
@@ -112,6 +109,7 @@ impl Renderer {
         surface: Arc<Surface>,
         window: Arc<Window>,
         physical: &Arc<vulkano::device::physical::PhysicalDevice>,
+        font_atlas: &FontAtlas,
     ) -> Self {
         let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
         let command_allocator = Arc::new(StandardCommandBufferAllocator::new(
@@ -277,7 +275,6 @@ impl Renderer {
         .expect("hud pipeline");
 
         // ---- Font atlas texture ----
-        let font_atlas = FontAtlas::load();
         let atlas_staging = Buffer::from_iter(
             memory_allocator.clone(),
             BufferCreateInfo {
@@ -440,7 +437,6 @@ impl Renderer {
             mesh_sampler,
             world_texture_view,
             car_texture_view,
-            font_atlas,
             memory_allocator,
             command_allocator,
             descriptor_set_allocator,
@@ -582,13 +578,7 @@ impl Renderer {
         unsafe { self.device.wait_idle() }.expect("failed to wait for device idle");
     }
 
-    pub fn render(
-        &mut self,
-        game: &Game,
-        dt: std::time::Duration,
-        menu: Option<&MenuState>,
-        gpu_names: &[String],
-    ) {
+    pub fn render(&mut self, game: &Game, dt: std::time::Duration, hud_verts: &[HudVertex]) {
         if self.recreate {
             self.recreate_swapchain();
         }
@@ -745,10 +735,6 @@ impl Renderer {
                 self.hud_descriptor_set.clone(),
             )
             .expect("bind hud descriptor set");
-        let hud_verts = match menu {
-            Some(menu) => build_menu_vertices(menu, gpu_names, &self.font_atlas, aspect),
-            None => build_hud_vertices(game, &self.font_atlas, aspect),
-        };
         let hud_vertex_count = hud_verts.len() as u32;
         let hud_buf = Buffer::from_iter(
             self.memory_allocator.clone(),
@@ -760,7 +746,7 @@ impl Renderer {
                 memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            hud_verts,
+            hud_verts.iter().copied(),
         )
         .expect("hud buffer");
         builder

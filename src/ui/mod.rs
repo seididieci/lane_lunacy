@@ -20,14 +20,13 @@ mod layout;
 mod widget;
 mod widgets;
 
-#[allow(unused_imports)] // pointer API consumed by tests until input wiring lands
 pub(crate) use engine::{Ui, VIRTUAL_HEIGHT};
-#[allow(unused_imports)] // Row/VAlign reserved for future screens
+#[allow(unused_imports)] // Constraints/Point/Rect consumed by tests; VAlign reserved
 pub(crate) use layout::{Align, Constraints, HAlign, Insets, Point, Rect, Size, VAlign};
 #[allow(unused_imports)] // pointer API consumed by tests until input wiring lands
 pub(crate) use widget::{DrawCtx, Hit, LayoutCtx, Node, PointerEvent, Widget};
 #[allow(unused_imports)] // Row reserved for future screens
-pub(crate) use widgets::{Button, Column, Overlay, Panel, Row, Spacer, Text};
+pub(crate) use widgets::{Blink, Button, Column, Overlay, Panel, Row, Spacer, Text};
 
 #[cfg(test)]
 mod tests {
@@ -75,7 +74,7 @@ mod tests {
                 )),
             ),
         );
-        let verts = ui.build(&mut root, &atlas(), aspect_ratio());
+        let verts = ui.build(&mut root, &atlas(), aspect_ratio(), 0.0);
         assert!(!verts.is_empty());
     }
 
@@ -87,7 +86,7 @@ mod tests {
             Node::new(Button::new("START", 40.0, [1.0, 1.0, 1.0, 1.0], 42)),
         ));
         let atlas = atlas();
-        ui.build(&mut root, &atlas, aspect_ratio());
+        ui.build(&mut root, &atlas, aspect_ratio(), 0.0);
 
         let canvas = ui.virtual_size(aspect_ratio());
         let center = Point::new(canvas.w / 2.0, canvas.h / 2.0);
@@ -111,7 +110,7 @@ mod tests {
             Node::new(Button::new("X", 20.0, [1.0, 1.0, 1.0, 1.0], 1)),
         ));
         let atlas = atlas();
-        ui.build(&mut root, &atlas, aspect_ratio());
+        ui.build(&mut root, &atlas, aspect_ratio(), 0.0);
 
         let canvas = ui.virtual_size(aspect_ratio());
         let far = Point::new(canvas.w - 3.0, canvas.h - 3.0);
@@ -137,5 +136,52 @@ mod tests {
         let lines = ctx.wrap("one two three four five six seven", em, 90.0);
         assert!(lines.len() > 1);
         assert!(lines.iter().all(|l| ctx.measure(l, em).w <= 90.0));
+    }
+
+    #[test]
+    fn blinking_text_keeps_layout_space_and_toggles_alpha() {
+        let ui = Ui::new();
+        let atlas = atlas();
+        let aspect = aspect_ratio();
+
+        let root = |time: f32| -> Vec<crate::vertex::HudVertex> {
+            let mut tree = Node::new(Column::new(
+                vec![
+                    Node::new(Text::new("READY", 24.0, [1.0, 1.0, 1.0, 1.0])),
+                    Node::new(
+                        Text::new("GO", 24.0, [1.0, 1.0, 1.0, 1.0]).blinking(1.0),
+                    ),
+                ],
+                8.0,
+                HAlign::Left,
+            ));
+            ui.build(&mut tree, &atlas, aspect, time)
+        };
+
+        // At t=0 the blink is visible (duty 0.5); at t=0.5 it is hidden.
+        let on = root(0.0);
+        let off = root(0.5);
+
+        // The text always reserves its space, so the vertex count is identical
+        // whether the blinking line is visible or not.
+        assert_eq!(on.len(), off.len(), "blink must not resize the layout");
+
+        // The text quads (uv.x >= 0) carry the blink alpha: 1.0 when visible,
+        // 0.0 when hidden, while the "READY" line stays opaque.
+        let text_alpha = |verts: &[crate::vertex::HudVertex]| {
+            verts
+                .iter()
+                .filter(|v| v.uv[0] >= 0.0)
+                .map(|v| v.color[3])
+                .collect::<Vec<_>>()
+        };
+        let on_a = text_alpha(&on);
+        let off_a = text_alpha(&off);
+        assert_eq!(on_a.len(), off_a.len());
+        assert!(on_a.iter().any(|a| (*a - 1.0).abs() < f32::EPSILON));
+        assert!(off_a.iter().any(|a| *a < f32::EPSILON));
+        // The "READY" glyphs must remain opaque in both frames.
+        assert!(on_a.iter().any(|a| (*a - 1.0).abs() < f32::EPSILON));
+        assert!(off_a.iter().any(|a| (*a - 1.0).abs() < f32::EPSILON));
     }
 }

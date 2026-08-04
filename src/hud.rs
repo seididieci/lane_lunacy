@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: MIT
 
-use crate::font::{FontAtlas, ICON_TROPHY};
+use crate::font::ICON_TROPHY;
 use crate::game::Game;
 use crate::ui::{
-    Align, Column, HAlign, Insets, Node, Overlay, Panel, Size, Text, Ui, VIRTUAL_HEIGHT,
+    Align, Column, HAlign, Insets, Node, Overlay, Panel, Size, Text, VIRTUAL_HEIGHT,
 };
-use crate::vertex::HudVertex;
 
 const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 const GREEN: [f32; 4] = [0.2, 1.0, 0.3, 1.0];
@@ -31,14 +30,8 @@ const EM_LABEL: f32 = 32.0;
 /// True top speed (~342 km/h) used to scale the speed bar.
 const TOP_SPEED: f32 = 342.0;
 
-/// Builds the in-game HUD as a widget tree laid out by the UI engine.
-pub fn build_hud_vertices(game: &Game, atlas: &FontAtlas, aspect: f32) -> Vec<HudVertex> {
-    let ui = Ui::new();
-    let mut root = build_hud_tree(game, aspect);
-    ui.build(&mut root, atlas, aspect)
-}
-
-fn build_hud_tree(game: &Game, aspect: f32) -> Node {
+/// Builds the in-game HUD widget tree for the current game state.
+pub(crate) fn build_hud_tree(game: &Game, aspect: f32) -> Node {
     let mut overlay = Overlay::new();
     overlay.push(Align::TopLeft, top_left(game));
     overlay.push(Align::TopRight, top_right(game));
@@ -133,7 +126,7 @@ fn speed_bar(game: &Game, aspect: f32) -> Node {
 
 fn alert(game: &Game) -> Option<Node> {
     if game.game_over {
-        let mut lines = vec![
+        let lines = vec![
             Node::new(Text::new("GAME OVER", EM_ALERT, RED)),
             Node::new(Text::new(format!("SCORE {}", game.score), EM_LG, WHITE)),
             Node::new(Text::new(
@@ -141,14 +134,9 @@ fn alert(game: &Game) -> Option<Node> {
                 EM_MD,
                 GREEN,
             )),
+            // Always laid out (its space stays reserved) but blinks on/off.
+            Node::new(Text::new("PRESS R TO RESTART", EM_MD, YELLOW).blinking(1.0)),
         ];
-        if ((game.ui_time * 2.0) as i32) % 2 == 0 {
-            lines.push(Node::new(Text::new(
-                "PRESS R TO RESTART",
-                EM_MD,
-                YELLOW,
-            )));
-        }
         let col = Column::new(lines, 12.0, HAlign::Center);
         Some(Node::new(Panel::wrap(
             PANEL_BG,
@@ -169,17 +157,21 @@ fn alert(game: &Game) -> Option<Node> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::font::FontAtlas;
     use crate::game::Game;
+    use crate::ui::Ui;
 
     #[test]
     fn hud_builds_vertices_for_playing_and_game_over() {
+        let ui = Ui::new();
         let atlas = FontAtlas::load();
 
-        let playing = Game::new();
-        assert!(!build_hud_vertices(&playing, &atlas, 16.0 / 9.0).is_empty());
+        let mut playing = build_hud_tree(&Game::new(), 16.0 / 9.0);
+        assert!(!ui.build(&mut playing, &atlas, 16.0 / 9.0, 0.0).is_empty());
 
         let mut over = Game::new();
         over.game_over = true;
-        assert!(!build_hud_vertices(&over, &atlas, 16.0 / 9.0).is_empty());
+        let mut over_root = build_hud_tree(&over, 16.0 / 9.0);
+        assert!(!ui.build(&mut over_root, &atlas, 16.0 / 9.0, 0.0).is_empty());
     }
 }

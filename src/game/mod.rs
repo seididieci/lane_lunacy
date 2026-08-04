@@ -28,7 +28,6 @@ pub struct Game {
     pub best_score: u32,
     pub avg_speed: f32,
     pub time: f32,
-    pub ui_time: f32,
 }
 
 impl Game {
@@ -45,7 +44,6 @@ impl Game {
             best_score: 0,
             avg_speed: 0.0,
             time: 0.0,
-            ui_time: 0.0,
         };
         game.rebuild_traffic();
         game
@@ -81,7 +79,6 @@ impl Game {
 
     pub fn update(&mut self, dt: Duration, input: &Input) {
         let dt = dt.as_secs_f32().min(0.05);
-        self.ui_time += dt;
         if self.game_over {
             return;
         }

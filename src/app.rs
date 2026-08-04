@@ -13,11 +13,14 @@ use winit::window::{Window, WindowAttributes};
 use vulkano::instance::Instance;
 use vulkano::swapchain::Surface;
 
+use crate::font::FontAtlas;
 use crate::game::Game;
 use crate::gpu::{create_graphics_context, enumerate_devices, select_physical_device};
+use crate::hud::build_hud_tree;
 use crate::input::Input;
-use crate::menu::{MenuRow, MenuState};
+use crate::menu::{build_menu_tree, MenuRow, MenuState};
 use crate::render::Renderer;
+use crate::ui::Ui;
 
 enum AppMode {
     Menu,
@@ -35,6 +38,9 @@ pub struct App {
     mode: AppMode,
     game: Game,
     input: Input,
+    ui: Ui,
+    font_atlas: FontAtlas,
+    ui_clock: f32,
     previous: Instant,
 }
 
@@ -51,6 +57,9 @@ impl App {
             mode: AppMode::Menu,
             game: Game::new(),
             input: Input::default(),
+            ui: Ui::new(),
+            font_atlas: FontAtlas::load(),
+            ui_clock: 0.0,
             previous: Instant::now(),
         }
     }
@@ -84,7 +93,14 @@ impl App {
         }
         let physical = select_physical_device(&devices, self.menu.gpu_index);
         let (device, queue) = create_graphics_context(surface.clone(), &physical);
-        let renderer = Renderer::new(device, queue, surface.clone(), window.clone(), &physical);
+        let renderer = Renderer::new(
+            device,
+            queue,
+            surface.clone(),
+            window.clone(),
+            &physical,
+            &self.font_atlas,
+        );
 
         self.active_gpu_index = self.menu.gpu_index;
         self.renderer = Some(renderer);
@@ -148,7 +164,7 @@ impl App {
         let devices = enumerate_devices(&self.instance);
         let physical = select_physical_device(&devices, chosen);
         let (device, queue) = create_graphics_context(surface.clone(), &physical);
-        let renderer = Renderer::new(device, queue, surface.clone(), window, &physical);
+        let renderer = Renderer::new(device, queue, surface.clone(), window, &physical, &self.font_atlas);
         self.active_gpu_index = chosen;
         self.renderer = Some(renderer);
     }
@@ -274,6 +290,7 @@ impl ApplicationHandler for App {
         let now = Instant::now();
         let dt = now.duration_since(self.previous);
         self.previous = now;
+        self.ui_clock += dt.as_secs_f32();
 
         if matches!(self.mode, AppMode::Playing) {
             self.game.update(dt, &self.input);
@@ -281,10 +298,21 @@ impl ApplicationHandler for App {
             self.input.gear_down = false;
         }
 
-        let menu = match &self.mode {
-            AppMode::Menu => Some(&self.menu),
-            AppMode::Playing => None,
+        let aspect = self.window.as_ref().map_or(16.0 / 9.0, |w| {
+            let size = w.inner_size();
+            if size.height == 0 {
+                16.0 / 9.0
+            } else {
+                size.width as f32 / size.height as f32
+            }
+        });
+        let mut root = match &self.mode {
+            AppMode::Menu => build_menu_tree(&self.menu, &self.gpu_names),
+            AppMode::Playing => build_hud_tree(&self.game, aspect),
         };
-        renderer.render(&self.game, dt, menu, &self.gpu_names);
+        let hud_verts = self
+            .ui
+            .build(&mut root, &self.font_atlas, aspect, self.ui_clock);
+        renderer.render(&self.game, dt, &hud_verts);
     }
 }

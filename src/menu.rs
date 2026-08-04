@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: MIT
 
-use crate::font::{FontAtlas, ICON_CHIP, ICON_LOGOUT, ICON_PLAY, ICON_SPEEDOMETER, ICON_STEERING};
+use crate::font::{ICON_CHIP, ICON_LOGOUT, ICON_PLAY, ICON_SPEEDOMETER, ICON_STEERING};
 use crate::game::DifficultyLevel;
-use crate::ui::{Align, Button, Column, HAlign, Insets, Node, Overlay, Panel, Spacer, Text, Ui};
-use crate::vertex::HudVertex;
+use crate::ui::{Align, Button, Column, HAlign, Insets, Node, Overlay, Panel, Spacer, Text};
 
 const BACKDROP: [f32; 4] = [0.02, 0.03, 0.05, 0.55];
 const TITLE_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
@@ -114,19 +113,8 @@ fn gpu_label(index: usize, names: &[String]) -> String {
     }
 }
 
-/// Builds the menu as a widget tree laid out by the UI engine.
-pub fn build_menu_vertices(
-    menu: &MenuState,
-    gpu_names: &[String],
-    atlas: &FontAtlas,
-    aspect: f32,
-) -> Vec<HudVertex> {
-    let ui = Ui::new();
-    let mut root = build_menu_tree(menu, gpu_names);
-    ui.build(&mut root, atlas, aspect)
-}
-
-fn build_menu_tree(menu: &MenuState, gpu_names: &[String]) -> Node {
+/// Builds the menu widget tree for the given state.
+pub(crate) fn build_menu_tree(menu: &MenuState, gpu_names: &[String]) -> Node {
     let title = format!("{}  LANE LUNACY", ICON_STEERING);
     let gpu_t = gpu_label(menu.gpu_index, gpu_names);
     let mode_t = format!("{}  MODE  {}", ICON_SPEEDOMETER, menu.difficulty.label());
@@ -178,20 +166,20 @@ fn build_menu_tree(menu: &MenuState, gpu_names: &[String]) -> Node {
 mod tests {
     use super::*;
     use crate::font::FontAtlas;
-    use crate::ui::Point;
+    use crate::ui::{Point, Ui};
 
     #[test]
     fn menu_builds_vertices_and_centers_rows() {
         let menu = MenuState::new(0);
         let names = vec!["Test GPU".to_string()];
         let atlas = FontAtlas::load();
-        let verts = build_menu_vertices(&menu, &names, &atlas, 16.0 / 9.0);
+        let ui = Ui::new();
+
+        let mut root = build_menu_tree(&menu, &names);
+        let verts = ui.build(&mut root, &atlas, 16.0 / 9.0, 0.0);
         assert!(!verts.is_empty());
 
         // The START button must be hit-testable at the canvas center line.
-        let ui = Ui::new();
-        let mut root = build_menu_tree(&menu, &names);
-        ui.build(&mut root, &atlas, 16.0 / 9.0);
         let canvas = ui.virtual_size(16.0 / 9.0);
         let center = Point::new(canvas.w / 2.0, canvas.h / 2.0);
         assert!(ui.hit_test(&root, center).is_some());

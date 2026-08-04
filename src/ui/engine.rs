@@ -25,7 +25,16 @@ impl Ui {
     }
 
     /// Layout `root`, draw it and return the HUD vertices for this frame.
-    pub fn build(&self, root: &mut Node, atlas: &FontAtlas, aspect: f32) -> Vec<HudVertex> {
+    ///
+    /// `time` is the UI clock in seconds, used for time-based widget effects
+    /// such as blinking text.
+    pub fn build(
+        &self,
+        root: &mut Node,
+        atlas: &FontAtlas,
+        aspect: f32,
+        time: f32,
+    ) -> Vec<HudVertex> {
         let virtual_size = self.virtual_size(aspect);
 
         let mut layout_ctx = LayoutCtx { atlas };
@@ -39,6 +48,7 @@ impl Ui {
             out: &mut out,
             atlas,
             virtual_size,
+            time,
         };
         root.widget.draw(&mut draw_ctx, root.rect);
         out

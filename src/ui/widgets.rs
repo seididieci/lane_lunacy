@@ -6,6 +6,28 @@ use crate::ui::widget::{DrawCtx, Hit, LayoutCtx, Node, PointerEvent, Widget};
 /// Highlight color used by focused `Button`s.
 const HIGHLIGHT: [f32; 4] = [0.35, 0.5, 0.7, 0.35];
 
+/// Square-wave visibility for a `Text` widget: the text always reserves its
+/// layout space, but its drawn alpha toggles on/off over time.
+#[derive(Clone, Copy, Debug)]
+pub struct Blink {
+    /// Full on+off cycle, in seconds.
+    pub period: f32,
+    /// Fraction of the period the text is visible, in 0..=1.
+    pub duty: f32,
+    /// Phase offset in seconds, to stagger multiple blinking elements.
+    pub phase: f32,
+}
+
+impl Default for Blink {
+    fn default() -> Self {
+        Blink {
+            period: 1.0,
+            duty: 0.5,
+            phase: 0.0,
+        }
+    }
+}
+
 /// A block of text, optionally wrapped to its allocated width.
 pub struct Text {
     pub text: String,
@@ -13,6 +35,7 @@ pub struct Text {
     pub color: [f32; 4],
     pub wrap: bool,
     pub align: HAlign,
+    blink: Option<Blink>,
     lines: Vec<(String, f32, f32)>,
 }
 
@@ -24,6 +47,7 @@ impl Text {
             color,
             wrap: false,
             align: HAlign::Left,
+            blink: None,
             lines: Vec::new(),
         }
     }
@@ -37,6 +61,21 @@ impl Text {
     /// Align each line within its allocated box.
     pub fn aligned(mut self, align: HAlign) -> Text {
         self.align = align;
+        self
+    }
+
+    /// Blink on/off every `period` seconds (50% duty, no phase offset).
+    ///
+    /// The text keeps occupying its layout space while hidden, so surrounding
+    /// widgets do not resize.
+    pub fn blinking(mut self, period: f32) -> Text {
+        self.blink = Some(Blink { period, ..Blink::default() });
+        self
+    }
+
+    /// Blink with explicit timing (speed, duty cycle, phase offset).
+    pub fn blink(mut self, blink: Blink) -> Text {
+        self.blink = Some(blink);
         self
     }
 }
@@ -68,6 +107,14 @@ impl Widget for Text {
     }
 
     fn draw(&self, ctx: &mut DrawCtx, rect: Rect) {
+        let color = match self.blink {
+            Some(b) => {
+                let t = (ctx.time + b.phase) % b.period;
+                let a = if t < b.period * b.duty { 1.0 } else { 0.0 };
+                [self.color[0], self.color[1], self.color[2], self.color[3] * a]
+            }
+            None => self.color,
+        };
         let mut y = rect.pos.y;
         for (line, line_w, line_h) in &self.lines {
             let x = rect.pos.x
@@ -76,7 +123,7 @@ impl Widget for Text {
                     HAlign::Center => ((rect.size.w - line_w) / 2.0).max(0.0),
                     HAlign::Right => (rect.size.w - line_w).max(0.0),
                 };
-            ctx.draw_text(line, self.em, self.color, Point::new(x, y));
+            ctx.draw_text(line, self.em, color, Point::new(x, y));
             y += line_h;
         }
     }

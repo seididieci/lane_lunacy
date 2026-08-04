@@ -158,6 +158,8 @@ pub struct DrawCtx<'a> {
     pub out: &'a mut Vec<HudVertex>,
     pub atlas: &'a FontAtlas,
     pub virtual_size: Size,
+    /// Monotonic UI clock in seconds, for time-based effects (e.g. blinking).
+    pub time: f32,
 }
 
 impl<'a> DrawCtx<'a> {
