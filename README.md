@@ -21,8 +21,11 @@ Buckle up. It gets spicy.
   rather not meet at speed.
 - **Dodge the traffic.** Sedans, SUVs, taxis, vans. They come in waves, they don't
   blink, and they are *not* moving over.
-- **A real gearbox.** Five gears, manual shifting. Keep the needle in the zone or
-  bog down like a lawnmower. Top speed: a hair over **340 km/h**.
+- **A real gearbox.** Five gears, manual shifting. Revs idle and scream toward the
+  redline on a live RPM dial. Shift up inside the *perfect band* — just before the
+  red — for a score bonus and a short burst of acceleration. Push into the **red
+  zone** and the engine starts to cook; cook it too long and **the engine blows**,
+  ending the run. Top speed: a hair over **340 km/h**.
 - **Choose your pain.** Three difficulty modes. Pick one in the start menu — or
   change it anytime via the pause menu (this restarts the run):
   | Mode   | The deal                                              |
@@ -31,7 +34,8 @@ Buckle up. It gets spicy.
   | NORMAL | The way it's meant to be played                       |
   | HARD   | Wall-to-wall chaos. Good luck.                        |
 - **Wreck or be wrecked.** Hit a car and it's a *WRECK* — you slow to a crawl and
-  the HUD screams it at you. Too many wrecks and it's **GAME OVER**.
+  the HUD screams it at you. Too many wrecks and it's **GAME OVER** — and if you
+  let the engine cook, it **blows** and the car coasts to a stop.
 
 ---
 
