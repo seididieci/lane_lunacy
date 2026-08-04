@@ -20,13 +20,15 @@ mod layout;
 mod widget;
 mod widgets;
 
-pub(crate) use engine::{Ui, VIRTUAL_HEIGHT};
+pub(crate) use engine::Ui;
 #[allow(unused_imports)] // Constraints/Point/Rect consumed by tests; VAlign reserved
 pub(crate) use layout::{Align, Constraints, HAlign, Insets, Point, Rect, Size, VAlign};
 #[allow(unused_imports)] // pointer API consumed by tests until input wiring lands
 pub(crate) use widget::{DrawCtx, Hit, LayoutCtx, Node, PointerEvent, Widget};
 #[allow(unused_imports)] // Row reserved for future screens
-pub(crate) use widgets::{Blink, Button, Column, Overlay, Panel, Row, Spacer, Text};
+pub(crate) use widgets::{
+    Blink, Button, Column, Gauge, GaugeZone, Overlay, Panel, Row, Spacer, Text,
+};
 
 #[cfg(test)]
 mod tests {
@@ -183,5 +185,36 @@ mod tests {
         // The "READY" glyphs must remain opaque in both frames.
         assert!(on_a.iter().any(|a| (*a - 1.0).abs() < f32::EPSILON));
         assert!(off_a.iter().any(|a| (*a - 1.0).abs() < f32::EPSILON));
+    }
+
+    #[test]
+    fn gauge_emits_ring_vertices_and_is_layout_stable() {
+        let ui = Ui::new();
+        let atlas = atlas();
+        let aspect = aspect_ratio();
+
+        let root = |value: f32| -> Vec<crate::vertex::HudVertex> {
+            let mut tree = Node::new(
+                Gauge::new(Size::new(260.0, 260.0), value, [0.2, 1.0, 0.3, 1.0])
+                    .zone(GaugeZone::new(0.78, 0.9, [0.3, 1.0, 0.95, 1.0]))
+                    .zone(GaugeZone::new(0.9, 1.0, [1.0, 0.2, 0.2, 1.0]))
+                    .number("7.2", 62.0, [1.0, 1.0, 1.0, 1.0])
+                    .label("RPM x1000", 26.0, [0.3, 1.0, 0.95, 1.0]),
+            );
+            ui.build(&mut tree, &atlas, aspect, 0.0)
+        };
+
+        let low = root(0.3);
+        let high = root(1.0);
+        assert!(!low.is_empty());
+        // The value arc changes the number of solid (uv.x < 0) triangles, but
+        // the text glyphs (uv.x >= 0) must stay identical.
+        let text = |v: &[crate::vertex::HudVertex]| {
+            v.iter()
+                .filter(|x| x.uv[0] >= 0.0)
+                .map(|x| x.position)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(text(&low), text(&high));
     }
 }

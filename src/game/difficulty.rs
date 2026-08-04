@@ -25,6 +25,10 @@ pub struct DifficultyTuning {
     pub collision_lat_mul: f32,
     pub wreck_cooldown: f32,
     pub wreck_limit: u32,
+    /// Engine heat gained per second while revving in the danger zone.
+    pub engine_heat_rate: f32,
+    /// Engine heat shed per second while below the danger zone.
+    pub engine_heat_cool: f32,
 }
 
 impl DifficultyLevel {
@@ -47,6 +51,8 @@ impl DifficultyLevel {
                 collision_lat_mul: 1.15,
                 wreck_cooldown: 0.9,
                 wreck_limit: 7,
+                engine_heat_rate: 0.3,
+                engine_heat_cool: 0.22,
             },
             DifficultyLevel::Normal => DifficultyTuning {
                 traffic_count: 5,
@@ -65,6 +71,8 @@ impl DifficultyLevel {
                 collision_lat_mul: 1.25,
                 wreck_cooldown: 1.0,
                 wreck_limit: 6,
+                engine_heat_rate: 0.4,
+                engine_heat_cool: 0.2,
             },
             DifficultyLevel::Hard => DifficultyTuning {
                 traffic_count: 6,
@@ -83,6 +91,8 @@ impl DifficultyLevel {
                 collision_lat_mul: 1.35,
                 wreck_cooldown: 1.2,
                 wreck_limit: 5,
+                engine_heat_rate: 0.55,
+                engine_heat_cool: 0.18,
             },
         }
     }

@@ -308,7 +308,7 @@ impl ApplicationHandler for App {
         });
         let mut root = match &self.mode {
             AppMode::Menu => build_menu_tree(&self.menu, &self.gpu_names),
-            AppMode::Playing => build_hud_tree(&self.game, aspect),
+            AppMode::Playing => build_hud_tree(&self.game),
         };
         let hud_verts = self
             .ui

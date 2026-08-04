@@ -163,6 +163,27 @@ pub struct DrawCtx<'a> {
 }
 
 impl<'a> DrawCtx<'a> {
+    /// Width of `text` at `em` layout units (nominal em box).
+    pub fn measure_text(&self, text: &str, em: f32) -> f32 {
+        let scale = em / self.atlas.raster_px;
+        text.chars()
+            .filter_map(|c| self.atlas.glyph(c).map(|g| g.advance))
+            .sum::<f32>()
+            * scale
+    }
+
+    /// Draw `text` centered on `center` (layout units), with its em box
+    /// vertically centered too.
+    pub fn draw_text_centered(&mut self, text: &str, em: f32, color: [f32; 4], center: Point) {
+        let w = self.measure_text(text, em);
+        self.draw_text(
+            text,
+            em,
+            color,
+            Point::new(center.x - w / 2.0, center.y - em / 2.0),
+        );
+    }
+
     /// Draw `text` with the top-left of its em box at `top_left`.
     pub fn draw_text(&mut self, text: &str, em: f32, color: [f32; 4], top_left: Point) {
         let em_ndc = 2.0 * em / self.virtual_size.h;
@@ -191,6 +212,69 @@ impl<'a> DrawCtx<'a> {
             color,
         );
     }
+
+    /// Ring band from `frac0` to `frac1` (fractions of the gauge sweep) between
+    /// `r_in` and `r_out` layout units, centered on `center`.
+    pub fn draw_ring_segment(
+        &mut self,
+        center: Point,
+        r_in: f32,
+        r_out: f32,
+        frac0: f32,
+        frac1: f32,
+        color: [f32; 4],
+    ) {
+        let (a0, a1) = gauge_angles(frac0, frac1);
+        let scale = 2.0 / self.virtual_size.h;
+        crate::ui::backend::push_ring_segment(
+            self.out,
+            to_ndc_x(self.virtual_size, center.x),
+            to_ndc_y(self.virtual_size, center.y),
+            r_in * scale,
+            r_out * scale,
+            a0,
+            a1,
+            self.virtual_size.h / self.virtual_size.w,
+            color,
+        );
+    }
+
+    /// A thin needle from radius `r0` to `r1` at gauge fraction `frac`.
+    pub fn draw_needle(
+        &mut self,
+        center: Point,
+        r0: f32,
+        r1: f32,
+        frac: f32,
+        thick: f32,
+        color: [f32; 4],
+    ) {
+        let angle = gauge_angle(frac);
+        let scale = 2.0 / self.virtual_size.h;
+        crate::ui::backend::push_needle(
+            self.out,
+            to_ndc_x(self.virtual_size, center.x),
+            to_ndc_y(self.virtual_size, center.y),
+            r0 * scale,
+            r1 * scale,
+            angle,
+            thick * scale,
+            self.virtual_size.h / self.virtual_size.w,
+            color,
+        );
+    }
+}
+
+/// Map a fraction of the 270-degree gauge sweep (0 = lower-left, 0.5 = top,
+/// 1 = lower-right) to an angle in degrees, y-up.
+pub(crate) fn gauge_angle(frac: f32) -> f32 {
+    let t = frac.clamp(0.0, 1.0);
+    // Sweep clockwise from 225 deg (7:30) down to -45 deg (4:30).
+    225.0 - 270.0 * t
+}
+
+fn gauge_angles(frac0: f32, frac1: f32) -> (f32, f32) {
+    (gauge_angle(frac0), gauge_angle(frac1))
 }
 
 fn to_ndc_x(canvas: Size, x: f32) -> f32 {

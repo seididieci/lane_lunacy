@@ -533,6 +533,133 @@ impl Widget for Spacer {
     fn draw(&self, _ctx: &mut DrawCtx, _rect: Rect) {}
 }
 
+/// A colored band on a `Gauge`, covering a fraction range of the dial.
+#[derive(Clone, Copy)]
+pub struct GaugeZone {
+    pub lo: f32,
+    pub hi: f32,
+    pub color: [f32; 4],
+}
+
+impl GaugeZone {
+    pub fn new(lo: f32, hi: f32, color: [f32; 4]) -> GaugeZone {
+        GaugeZone { lo, hi, color }
+    }
+}
+
+/// A circular gauge: a 270-degree track ring with colored zone bands, a bright
+/// value arc, an optional needle, tick marks, and centered number/label text.
+pub struct Gauge {
+    pub size: Size,
+    /// Current value as a fraction of the dial, 0..=1.
+    pub value: f32,
+    /// Color of the value arc; falls back to the enclosing zone's color when
+    /// the value sits inside one of `zones`.
+    pub value_color: [f32; 4],
+    pub zones: Vec<GaugeZone>,
+    pub track_color: [f32; 4],
+    pub needle: bool,
+    pub ticks: bool,
+    /// Big centered number (value readout).
+    pub number: Option<(String, f32, [f32; 4])>,
+    /// Small label under the number (unit).
+    pub label: Option<(String, f32, [f32; 4])>,
+}
+
+impl Gauge {
+    pub fn new(size: Size, value: f32, value_color: [f32; 4]) -> Gauge {
+        Gauge {
+            size,
+            value,
+            value_color,
+            zones: Vec::new(),
+            track_color: [0.18, 0.2, 0.24, 0.9],
+            needle: true,
+            ticks: true,
+            number: None,
+            label: None,
+        }
+    }
+
+    pub fn zone(mut self, zone: GaugeZone) -> Gauge {
+        self.zones.push(zone);
+        self
+    }
+
+    pub fn number(mut self, text: impl Into<String>, em: f32, color: [f32; 4]) -> Gauge {
+        self.number = Some((text.into(), em, color));
+        self
+    }
+
+    pub fn label(mut self, text: impl Into<String>, em: f32, color: [f32; 4]) -> Gauge {
+        self.label = Some((text.into(), em, color));
+        self
+    }
+
+    fn active_color(&self) -> [f32; 4] {
+        self.zones
+            .iter()
+            .find(|z| self.value >= z.lo && self.value <= z.hi)
+            .map_or(self.value_color, |z| z.color)
+    }
+}
+
+impl Widget for Gauge {
+    fn layout(&mut self, _ctx: &mut LayoutCtx, constraints: Constraints) -> Size {
+        constraints.clamp_size(self.size)
+    }
+
+    fn draw(&self, ctx: &mut DrawCtx, rect: Rect) {
+        let center = Point::new(
+            rect.pos.x + rect.size.w / 2.0,
+            rect.pos.y + rect.size.h / 2.0,
+        );
+        let min_d = rect.size.w.min(rect.size.h);
+        let r_out = min_d * 0.40;
+        let thick = r_out * 0.18;
+        let r_in = r_out - thick;
+
+        // Track ring (full sweep).
+        ctx.draw_ring_segment(center, r_in, r_out, 0.0, 1.0, self.track_color);
+
+        // Zone bands (always visible as warning ranges).
+        for zone in &self.zones {
+            let lo = zone.lo.clamp(0.0, 1.0);
+            let hi = zone.hi.clamp(0.0, 1.0);
+            if lo < hi {
+                ctx.draw_ring_segment(center, r_in, r_out, lo, hi, zone.color);
+            }
+        }
+
+        // Value arc: bright fill from 0 to the current value.
+        let v = self.value.clamp(0.0, 1.0);
+        if v > 0.0 {
+            ctx.draw_ring_segment(center, r_in, r_out, 0.0, v, self.active_color());
+        }
+
+        // Tick marks just outside the ring.
+        if self.ticks {
+            for i in 0..=4 {
+                let frac = i as f32 / 4.0;
+                ctx.draw_needle(center, r_out * 1.04, r_out * 1.12, frac, 4.0, [1.0, 1.0, 1.0, 0.55]);
+            }
+        }
+
+        // Needle.
+        if self.needle {
+            ctx.draw_needle(center, r_in * 0.55, r_out * 0.9, v, 6.0, [1.0, 1.0, 1.0, 1.0]);
+        }
+
+        // Centered readout + unit label.
+        if let Some((text, em, color)) = &self.number {
+            ctx.draw_text_centered(text, *em, *color, Point::new(center.x, center.y - em * 0.55));
+        }
+        if let Some((text, em, color)) = &self.label {
+            ctx.draw_text_centered(text, *em, *color, Point::new(center.x, center.y + em * 0.7));
+        }
+    }
+}
+
 fn h_align_offset(align: HAlign, parent_w: f32, child_w: f32) -> f32 {
     match align {
         HAlign::Left => 0.0,

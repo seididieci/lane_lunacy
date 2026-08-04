@@ -127,3 +127,86 @@ pub(crate) fn draw_text(
     }
 }
 
+/// A point on a ring in NDC. Angles are degrees from +x, counter-clockwise
+/// (NDC y-up). `aspect` stretches the x axis so rings render physically
+/// circular on any window aspect.
+pub(crate) fn ring_point(
+    cx: f32,
+    cy: f32,
+    r: f32,
+    angle_deg: f32,
+    aspect: f32,
+) -> [f32; 2] {
+    let rad = angle_deg.to_radians();
+    [cx + r * rad.cos() * aspect, cy + r * rad.sin()]
+}
+
+/// Tessellated ring band from `a0_deg` to `a1_deg` (counter-clockwise) between
+/// radii `r0` and `r1`. Emitted as solid-colored triangles (SOLID_UV).
+pub(crate) fn push_ring_segment(
+    out: &mut Vec<HudVertex>,
+    cx: f32,
+    cy: f32,
+    r0: f32,
+    r1: f32,
+    a0_deg: f32,
+    a1_deg: f32,
+    aspect: f32,
+    color: [f32; 4],
+) {
+    if (a1_deg - a0_deg).abs() < 1e-3 {
+        return;
+    }
+    // One quad every ~5 degrees, bounded for tiny sweeps.
+    let steps = (((a1_deg - a0_deg).abs() / 5.0).ceil() as usize).max(1).min(96);
+    let c = color;
+    for i in 0..steps {
+        let t0 = i as f32 / steps as f32;
+        let t1 = (i + 1) as f32 / steps as f32;
+        let a = a0_deg + (a1_deg - a0_deg) * t0;
+        let b = a0_deg + (a1_deg - a0_deg) * t1;
+        let p0 = ring_point(cx, cy, r1, a, aspect);
+        let p1 = ring_point(cx, cy, r0, a, aspect);
+        let p2 = ring_point(cx, cy, r0, b, aspect);
+        let p3 = ring_point(cx, cy, r1, b, aspect);
+        out.push(HudVertex { position: p0, color: c, uv: SOLID_UV });
+        out.push(HudVertex { position: p1, color: c, uv: SOLID_UV });
+        out.push(HudVertex { position: p2, color: c, uv: SOLID_UV });
+        out.push(HudVertex { position: p0, color: c, uv: SOLID_UV });
+        out.push(HudVertex { position: p2, color: c, uv: SOLID_UV });
+        out.push(HudVertex { position: p3, color: c, uv: SOLID_UV });
+    }
+}
+
+/// A thin needle from radius `r0` to `r1` at `angle_deg`, `thick` wide,
+/// centered on `(cx, cy)`.
+pub(crate) fn push_needle(
+    out: &mut Vec<HudVertex>,
+    cx: f32,
+    cy: f32,
+    r0: f32,
+    r1: f32,
+    angle_deg: f32,
+    thick: f32,
+    aspect: f32,
+    color: [f32; 4],
+) {
+    let rad = angle_deg.to_radians();
+    // Direction with aspect stretch; perpendicular is the unstretched flip.
+    let (sin, cos) = rad.sin_cos();
+    let dx = cos * aspect;
+    let dy = sin;
+    let len = (dx * dx + dy * dy).sqrt();
+    let (ux, uy) = (-dy / len, dx / len);
+    let h = thick / 2.0;
+    let a = [cx + r0 * dx, cy + r0 * dy];
+    let b = [cx + r1 * dx, cy + r1 * dy];
+    let c = color;
+    out.push(HudVertex { position: [a[0] + ux * h, a[1] + uy * h], color: c, uv: SOLID_UV });
+    out.push(HudVertex { position: [b[0] + ux * h, b[1] + uy * h], color: c, uv: SOLID_UV });
+    out.push(HudVertex { position: [b[0] - ux * h, b[1] - uy * h], color: c, uv: SOLID_UV });
+    out.push(HudVertex { position: [a[0] + ux * h, a[1] + uy * h], color: c, uv: SOLID_UV });
+    out.push(HudVertex { position: [b[0] - ux * h, b[1] - uy * h], color: c, uv: SOLID_UV });
+    out.push(HudVertex { position: [a[0] - ux * h, a[1] - uy * h], color: c, uv: SOLID_UV });
+}
+
