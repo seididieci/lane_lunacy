@@ -7,7 +7,7 @@ use fontdue::Font;
 const FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/MapleMono-NF-Regular.ttf");
 const RASTER_PX: f32 = 48.0;
 const PADDING: usize = 2;
-const CHARSET: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 .,:!?/-+%()[]|\u{F04D4}\u{F2DB}\u{F04C5}\u{F040A}\u{F0343}\u{F091}";
+const CHARSET: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 .,:!?/-+%()[]|\u{F04D4}\u{F2DB}\u{F04C5}\u{F040A}\u{F0343}\u{F091}\u{F0594}";
 
 /// Nerd Font PUA glyphs (Maple Mono NF). Referenced by the menu and HUD.
 pub const ICON_STEERING: char = '\u{F04D4}';
@@ -16,6 +16,7 @@ pub const ICON_SPEEDOMETER: char = '\u{F04C5}';
 pub const ICON_PLAY: char = '\u{F040A}';
 pub const ICON_LOGOUT: char = '\u{F0343}';
 pub const ICON_TROPHY: char = '\u{F091}';
+pub const ICON_WEATHER: char = '\u{F0594}';
 
 #[derive(Clone, Copy, Debug)]
 pub struct Glyph {

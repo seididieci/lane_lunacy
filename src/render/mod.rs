@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use glam::{Mat4, Vec3};
 use image::load_from_memory;
@@ -50,21 +51,26 @@ use vulkano::{Validated, VulkanError};
 
 use crate::font::FontAtlas;
 use crate::game::Game;
-use crate::mesh::build_world_chunk;
+use crate::mesh::{build_sky_dome, build_world_chunk};
 use crate::model::load_gltf_mesh_from_bytes;
 use crate::render::camera::{perspective_vulkan, Camera};
+use crate::render::cloud::generate_cloud_tile;
 use crate::render::texture::{make_mesh_buffers, upload_rgba8_texture};
 use crate::road::road_tangent;
-use crate::shaders::{self, MVP};
+use crate::shaders::{self, MVP, SkyUniform};
 use crate::vertex::{HudVertex, Vertex3d};
 
 pub mod camera;
+pub mod cloud;
 pub mod texture;
 
 const LIGHT_DIR: [f32; 4] = [0.25, 1.0, 0.4, 0.0];
 const WORLD_CHUNK_LEN: f32 = 260.0;
 const WORLD_CHUNKS_BEHIND: i32 = 1;
 const WORLD_CHUNKS_AHEAD: i32 = 6;
+
+const SKY_RADIUS: f32 = 550.0;
+const CLOUD_TILE: u32 = 256;
 
 const PLAYER_MODEL_GLB: &[u8] = include_bytes!("../../assets/models/player_race_future.glb");
 const TRAFFIC_SEDAN_GLB: &[u8] = include_bytes!("../../assets/models/traffic_sedan.glb");
@@ -87,10 +93,16 @@ pub struct Renderer {
     depth_view: Arc<ImageView>,
     mesh_pipeline: Arc<GraphicsPipeline>,
     hud_pipeline: Arc<GraphicsPipeline>,
+    sky_pipeline: Arc<GraphicsPipeline>,
     hud_descriptor_set: Arc<DescriptorSet>,
     mesh_sampler: Arc<Sampler>,
     world_texture_view: Arc<ImageView>,
     car_texture_view: Arc<ImageView>,
+    cloud_a_view: Arc<ImageView>,
+    cloud_b_view: Arc<ImageView>,
+    sky_dome_vertices: Subbuffer<[Vertex3d]>,
+    sky_dome_indices: Subbuffer<[u32]>,
+    sky_time: f32,
     memory_allocator: Arc<StandardMemoryAllocator>,
     command_allocator: Arc<StandardCommandBufferAllocator>,
     descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
@@ -278,6 +290,63 @@ impl Renderer {
         )
         .expect("hud pipeline");
 
+        let svs = unsafe {
+            ShaderModule::new(
+                device.clone(),
+                ShaderModuleCreateInfo::new(&shaders::spv_words(shaders::SKY_VERT_SPV)),
+            )
+        }
+        .expect("sky vertex shader");
+        let sfs = unsafe {
+            ShaderModule::new(
+                device.clone(),
+                ShaderModuleCreateInfo::new(&shaders::spv_words(shaders::SKY_FRAG_SPV)),
+            )
+        }
+        .expect("sky fragment shader");
+        let svs_ep = svs.entry_point("main").unwrap();
+        let sfs_ep = sfs.entry_point("main").unwrap();
+        let sky_vertex_input = Vertex3d::per_vertex().definition(&svs_ep).unwrap();
+        let sky_stages = [
+            PipelineShaderStageCreateInfo::new(svs_ep),
+            PipelineShaderStageCreateInfo::new(sfs_ep),
+        ];
+        let sky_layout = PipelineLayout::new(
+            device.clone(),
+            PipelineDescriptorSetLayoutCreateInfo::from_stages(&sky_stages)
+                .into_pipeline_layout_create_info(device.clone())
+                .unwrap(),
+        )
+        .unwrap();
+        let sky_subpass = Subpass::from(render_pass.clone(), 0).unwrap();
+        let sky_pipeline = GraphicsPipeline::new(
+            device.clone(),
+            None,
+            GraphicsPipelineCreateInfo {
+                stages: sky_stages.into_iter().collect(),
+                vertex_input_state: Some(sky_vertex_input),
+                input_assembly_state: Some(InputAssemblyState::default()),
+                viewport_state: Some(ViewportState::default()),
+                rasterization_state: Some(RasterizationState {
+                    cull_mode: CullMode::None,
+                    ..Default::default()
+                }),
+                multisample_state: Some(MultisampleState::default()),
+                depth_stencil_state: Some(DepthStencilState {
+                    depth: None,
+                    ..Default::default()
+                }),
+                color_blend_state: Some(ColorBlendState::with_attachment_states(
+                    sky_subpass.num_color_attachments(),
+                    ColorBlendAttachmentState::default(),
+                )),
+                dynamic_state: [DynamicState::Viewport].into_iter().collect(),
+                subpass: Some(sky_subpass.into()),
+                ..GraphicsPipelineCreateInfo::layout(sky_layout)
+            },
+        )
+        .expect("sky pipeline");
+
         // ---- Font atlas texture ----
         let atlas_staging = Buffer::from_iter(
             memory_allocator.clone(),
@@ -419,6 +488,39 @@ impl Renderer {
             colormap.into_raw(),
         );
 
+        // ---- Sky cloud layer ----
+        // Two decorrelated seamless tiles cross-faded in the sky shader so the
+        // clouds drift and evolve. Per-run seed -> a different sky each launch.
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before epoch")
+            .as_nanos() as u64;
+        let cloud_a = generate_cloud_tile(CLOUD_TILE, seed);
+        let cloud_b = generate_cloud_tile(
+            CLOUD_TILE,
+            seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407),
+        );
+        let cloud_a_view = upload_rgba8_texture(
+            memory_allocator.clone(),
+            command_allocator.clone(),
+            queue.clone(),
+            CLOUD_TILE,
+            CLOUD_TILE,
+            cloud_a,
+        );
+        let cloud_b_view = upload_rgba8_texture(
+            memory_allocator.clone(),
+            command_allocator.clone(),
+            queue.clone(),
+            CLOUD_TILE,
+            CLOUD_TILE,
+            cloud_b,
+        );
+
+        let (dome_vertices, dome_indices) = build_sky_dome(10, 32);
+        let (sky_dome_vertices, sky_dome_indices) =
+            make_mesh_buffers(memory_allocator.clone(), dome_vertices, dome_indices);
+
         let player_mesh = load_gltf_mesh_from_bytes(PLAYER_MODEL_GLB, "player_race_future.glb")
             .expect("failed to load embedded player model");
         let (car_vertices, car_indices) =
@@ -468,10 +570,16 @@ impl Renderer {
             .expect("depth view"),
             mesh_pipeline,
             hud_pipeline,
+            sky_pipeline,
             hud_descriptor_set,
             mesh_sampler,
             world_texture_view,
             car_texture_view,
+            cloud_a_view,
+            cloud_b_view,
+            sky_dome_vertices,
+            sky_dome_indices,
+            sky_time: 0.0,
             memory_allocator,
             command_allocator,
             descriptor_set_allocator,
@@ -640,6 +748,7 @@ impl Renderer {
         self.ensure_world_chunks_for_player(game.vehicle.distance);
         let car_pos = Vec3::new(game.player_world_x(), 0.0, game.player_world_z());
         let dt_secs = dt.as_secs_f32().min(0.05);
+        self.sky_time += dt_secs;
         let diff = game.vehicle.heading - self.camera_heading;
         self.camera_heading += diff * (dt_secs * 3.0).min(1.0);
         let cam_forward = Vec3::new(self.camera_heading.sin(), 0.0, -self.camera_heading.cos());
@@ -661,7 +770,7 @@ impl Renderer {
         builder
             .begin_render_pass(
                 RenderPassBeginInfo {
-                    clear_values: vec![Some([0.42, 0.6, 0.8, 1.0].into()), Some(1.0f32.into())],
+                    clear_values: vec![Some([0.9, 0.7, 0.5, 1.0].into()), Some(1.0f32.into())],
                     ..RenderPassBeginInfo::framebuffer(self.framebuffers[image_i as usize].clone())
                 },
                 SubpassBeginInfo {
@@ -672,6 +781,82 @@ impl Renderer {
             .expect("begin render pass")
             .set_viewport(0, [self.viewport.clone()].into_iter().collect())
             .expect("set viewport");
+
+        // ---- Sky dome (background) ----
+        // Drawn first with depth disabled so the 3D scene overdraws it.
+        builder
+            .bind_pipeline_graphics(self.sky_pipeline.clone())
+            .expect("bind sky pipeline");
+
+        let sky_uniform = SkyUniform {
+            model: Mat4::from_scale_rotation_translation(
+                Vec3::splat(SKY_RADIUS),
+                glam::Quat::IDENTITY,
+                eye,
+            )
+            .to_cols_array_2d(),
+            view: view.to_cols_array_2d(),
+            projection: proj.to_cols_array_2d(),
+            time: self.sky_time,
+            _pad: [0.0; 3],
+            zenith: [0.24, 0.38, 0.66, 1.0],
+            horizon: [0.97, 0.72, 0.50, 1.0],
+            cloud_tint: [1.0, 0.90, 0.78, 1.0],
+            light_dir: LIGHT_DIR,
+            cloud_amount: game.cloud_amount(),
+            _pad2: [0.0; 3],
+        };
+        let sky_buf = Buffer::from_data(
+            self.memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::UNIFORM_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            sky_uniform,
+        )
+        .expect("sky uniform buffer");
+        let sky_set_layout = self.sky_pipeline.layout().set_layouts()[0].clone();
+        let sky_set = DescriptorSet::new(
+            self.descriptor_set_allocator.clone(),
+            sky_set_layout,
+            [
+                WriteDescriptorSet::buffer(0, sky_buf),
+                WriteDescriptorSet::image_view_sampler(
+                    1,
+                    self.cloud_a_view.clone(),
+                    self.mesh_sampler.clone(),
+                ),
+                WriteDescriptorSet::image_view_sampler(
+                    2,
+                    self.cloud_b_view.clone(),
+                    self.mesh_sampler.clone(),
+                ),
+            ],
+            [],
+        )
+        .expect("sky descriptor set");
+        let sky_index_count = self.sky_dome_indices.len() as u32;
+        builder
+            .bind_descriptor_sets(
+                PipelineBindPoint::Graphics,
+                self.sky_pipeline.layout().clone(),
+                0,
+                sky_set,
+            )
+            .expect("bind sky descriptor sets")
+            .bind_vertex_buffers(0, self.sky_dome_vertices.clone())
+            .expect("bind sky vertex buffers")
+            .bind_index_buffer(self.sky_dome_indices.clone())
+            .expect("bind sky index buffer");
+        unsafe {
+            builder
+                .draw_indexed(sky_index_count, 1, 0, 0, 0)
+                .expect("draw sky");
+        }
 
         // ---- 3D scene ----
         builder

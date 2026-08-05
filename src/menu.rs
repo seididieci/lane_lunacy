@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 
-use crate::font::{ICON_CHIP, ICON_LOGOUT, ICON_PLAY, ICON_SPEEDOMETER, ICON_STEERING};
-use crate::game::DifficultyLevel;
+use crate::font::{ICON_CHIP, ICON_LOGOUT, ICON_PLAY, ICON_SPEEDOMETER, ICON_STEERING, ICON_WEATHER};
+use crate::game::{DifficultyLevel, Weather};
 use crate::ui::{Align, Button, Column, HAlign, Insets, Node, Overlay, Panel, Spacer, Text};
 
 const BACKDROP: [f32; 4] = [0.02, 0.03, 0.05, 0.55];
@@ -22,6 +22,7 @@ const CARD_PAD: Insets = Insets::new(64.0, 48.0, 64.0, 48.0);
 pub enum MenuRow {
     Gpu,
     Difficulty,
+    Weather,
     Start,
     Exit,
 }
@@ -32,7 +33,8 @@ impl MenuRow {
         match self {
             MenuRow::Gpu => MenuRow::Gpu,
             MenuRow::Difficulty => MenuRow::Gpu,
-            MenuRow::Start => MenuRow::Difficulty,
+            MenuRow::Weather => MenuRow::Difficulty,
+            MenuRow::Start => MenuRow::Weather,
             MenuRow::Exit => MenuRow::Start,
         }
     }
@@ -41,7 +43,8 @@ impl MenuRow {
     pub fn next(self) -> Self {
         match self {
             MenuRow::Gpu => MenuRow::Difficulty,
-            MenuRow::Difficulty => MenuRow::Start,
+            MenuRow::Difficulty => MenuRow::Weather,
+            MenuRow::Weather => MenuRow::Start,
             MenuRow::Start => MenuRow::Exit,
             MenuRow::Exit => MenuRow::Exit,
         }
@@ -52,6 +55,7 @@ impl MenuRow {
 pub struct MenuState {
     pub gpu_index: usize,
     pub difficulty: DifficultyLevel,
+    pub weather: Weather,
     pub cursor: MenuRow,
     difficulty_changed: bool,
 }
@@ -61,6 +65,7 @@ impl MenuState {
         MenuState {
             gpu_index,
             difficulty: DifficultyLevel::EasyArcade,
+            weather: Weather::Auto,
             cursor: MenuRow::Gpu,
             difficulty_changed: false,
         }
@@ -100,6 +105,16 @@ impl MenuState {
         self.difficulty = levels[next];
         self.difficulty_changed = true;
     }
+
+    pub fn cycle_weather(&mut self, delta: i32) {
+        let states = [Weather::Auto, Weather::Clear, Weather::Cloudy, Weather::Rain];
+        let cur = states
+            .iter()
+            .position(|w| *w == self.weather)
+            .unwrap_or(0);
+        let next = (cur as i32 + delta).rem_euclid(states.len() as i32) as usize;
+        self.weather = states[next];
+    }
 }
 
 fn gpu_label(index: usize, names: &[String]) -> String {
@@ -118,6 +133,7 @@ pub(crate) fn build_menu_tree(menu: &MenuState, gpu_names: &[String]) -> Node {
     let title = format!("{}  LANE LUNACY", ICON_STEERING);
     let gpu_t = gpu_label(menu.gpu_index, gpu_names);
     let mode_t = format!("{}  MODE  {}", ICON_SPEEDOMETER, menu.difficulty.label());
+    let weather_t = format!("{}  WEATHER  {}", ICON_WEATHER, menu.weather.label());
     let foot = "UP/DOWN MOVE, LEFT/RIGHT CHANGE, ENTER CONFIRM";
 
     let rows = Column::new(
@@ -130,11 +146,15 @@ pub(crate) fn build_menu_tree(menu: &MenuState, gpu_names: &[String]) -> Node {
                     .focused(menu.cursor == MenuRow::Difficulty),
             ),
             Node::new(
-                Button::new(format!("{}  START", ICON_PLAY), ROW_EM, START_COLOR, 2)
+                Button::new(weather_t, ROW_EM, ROW_COLOR, 2)
+                    .focused(menu.cursor == MenuRow::Weather),
+            ),
+            Node::new(
+                Button::new(format!("{}  START", ICON_PLAY), ROW_EM, START_COLOR, 3)
                     .focused(menu.cursor == MenuRow::Start),
             ),
             Node::new(
-                Button::new(format!("{}  EXIT", ICON_LOGOUT), ROW_EM, EXIT_COLOR, 3)
+                Button::new(format!("{}  EXIT", ICON_LOGOUT), ROW_EM, EXIT_COLOR, 4)
                     .focused(menu.cursor == MenuRow::Exit),
             ),
         ],
@@ -179,9 +199,21 @@ mod tests {
         let verts = ui.build(&mut root, &atlas, 16.0 / 9.0, 0.0);
         assert!(!verts.is_empty());
 
-        // The START button must be hit-testable at the canvas center line.
+        // The START button (id 3) must be hit-testable somewhere on the canvas
+        // center line, wherever the rows land.
         let canvas = ui.virtual_size(16.0 / 9.0);
-        let center = Point::new(canvas.w / 2.0, canvas.h / 2.0);
-        assert!(ui.hit_test(&root, center).is_some());
+        let cx = canvas.w / 2.0;
+        let mut start_hit = false;
+        let mut y = 0.0;
+        while y <= canvas.h {
+            if let Some(hit) = ui.hit_test(&root, Point::new(cx, y)) {
+                if hit.id == 3 {
+                    start_hit = true;
+                    break;
+                }
+            }
+            y += 8.0;
+        }
+        assert!(start_hit, "START button must be hit-testable on the center line");
     }
 }

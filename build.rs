@@ -10,6 +10,7 @@ fn main() {
     fs::create_dir_all(&spv_dir).expect("create spv output dir");
 
     let shader_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("shaders");
+    println!("cargo:rerun-if-changed={}", shader_dir.display());
     let mut entries: Vec<_> = fs::read_dir(&shader_dir)
         .expect("read shaders dir")
         .map(|e| e.expect("shader dir entry"))

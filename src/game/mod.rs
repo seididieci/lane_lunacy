@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::game::difficulty::DifficultyTuning;
 use crate::game::traffic::{rebuild_traffic, update_traffic, Traffic, check_collision};
@@ -13,13 +13,16 @@ use crate::road::road_curve;
 pub mod difficulty;
 pub mod traffic;
 pub mod vehicle;
+pub mod weather;
 
 pub use difficulty::DifficultyLevel;
+pub use weather::Weather;
 
 const SCORE_SPEED_WEIGHT: f32 = 0.05;
 const PERFECT_SHIFT_BONUS: u32 = 250;
 const PERFECT_SHIFT_POPUP_TIME: f32 = 1.2;
 const COAST_STOP_SPEED: f32 = 0.5;
+const WEATHER_CYCLE_SPEED: f32 = 0.04;
 
 pub struct Game {
     pub vehicle: Vehicle,
@@ -32,6 +35,8 @@ pub struct Game {
     pub perfect_shift_timer: f32,
     pub speed_kmh: f32,
     pub difficulty: DifficultyLevel,
+    pub weather: Weather,
+    weather_phase: f32,
     pub score: u32,
     pub bonus_score: u32,
     pub best_score: u32,
@@ -52,6 +57,8 @@ impl Game {
             perfect_shift_timer: 0.0,
             speed_kmh: 0.0,
             difficulty: DifficultyLevel::EasyArcade,
+            weather: Weather::Auto,
+            weather_phase: random_weather_phase(),
             score: 0,
             bonus_score: 0,
             best_score: 0,
@@ -75,7 +82,24 @@ impl Game {
         self.bonus_score = 0;
         self.avg_speed = 0.0;
         self.time = 0.0;
+        self.weather_phase = random_weather_phase();
         self.rebuild_traffic();
+    }
+
+    pub fn set_weather(&mut self, weather: Weather) {
+        self.weather = weather;
+    }
+
+    /// Effective cloud coverage (0..1) for the sky. `Auto` animates a slow
+    /// cycle whose start is randomized per run.
+    pub fn cloud_amount(&self) -> f32 {
+        match self.weather {
+            Weather::Auto => {
+                let c = 0.5 + 0.5 * (self.time * WEATHER_CYCLE_SPEED + self.weather_phase).sin();
+                c.clamp(0.12, 0.9)
+            }
+            w => w.cloud_amount(),
+        }
     }
 
     pub fn set_difficulty(&mut self, difficulty: DifficultyLevel) {
@@ -190,6 +214,16 @@ impl Game {
     pub fn player_world_z(&self) -> f32 {
         -self.vehicle.distance
     }
+}
+
+/// Random phase in [0, 2π) for the Auto weather cycle, derived from the clock.
+fn random_weather_phase() -> f32 {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before epoch")
+        .as_nanos() as u64;
+    let r = (nanos ^ (nanos >> 32)) & 0x00FF_FFFF;
+    (r as f32 / 16_777_215.0) * std::f32::consts::TAU
 }
 
 #[cfg(test)]

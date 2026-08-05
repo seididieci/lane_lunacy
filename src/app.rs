@@ -133,6 +133,7 @@ impl App {
             self.game.restart();
             println!("Run restarted (difficulty changed)");
         }
+        self.game.set_weather(self.menu.weather);
         self.switch_gpu();
         self.mode = AppMode::Playing;
     }
@@ -185,6 +186,7 @@ impl App {
                 match self.menu.cursor {
                     MenuRow::Gpu => self.menu.cycle_gpu(-1, device_count),
                     MenuRow::Difficulty => self.menu.cycle_difficulty(-1),
+                    MenuRow::Weather => self.cycle_weather(-1),
                     _ => {}
                 }
             }
@@ -192,6 +194,7 @@ impl App {
                 match self.menu.cursor {
                     MenuRow::Gpu => self.menu.cycle_gpu(1, device_count),
                     MenuRow::Difficulty => self.menu.cycle_difficulty(1),
+                    MenuRow::Weather => self.cycle_weather(1),
                     _ => {}
                 }
             }
@@ -199,10 +202,17 @@ impl App {
                 MenuRow::Gpu => self.switch_gpu(),
                 MenuRow::Start => self.close_menu(),
                 MenuRow::Exit => event_loop.exit(),
-                MenuRow::Difficulty => {}
+                MenuRow::Difficulty | MenuRow::Weather => {}
             },
             _ => {}
         }
+    }
+
+    /// Cycles the menu weather selection and applies it to the live game so the
+    /// sky behind the menu updates immediately.
+    fn cycle_weather(&mut self, delta: i32) {
+        self.menu.cycle_weather(delta);
+        self.game.set_weather(self.menu.weather);
     }
 }
 

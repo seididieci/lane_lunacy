@@ -310,3 +310,42 @@ pub fn build_world_chunk(start_s: f32, chunk_len: f32) -> (Vec<Vertex3d>, Vec<u3
 
     (v, i)
 }
+
+/// Unit hemisphere (radius 1, y >= 0) centered at the origin, used for the sky
+/// dome. Drawn with `model = translate(eye) * scale(radius)` so it follows the
+/// camera; the normalized position is the sky direction sampled by the fragment
+/// shader.
+pub fn build_sky_dome(rings: u32, sectors: u32) -> (Vec<Vertex3d>, Vec<u32>) {
+    let mut v = Vec::new();
+    let mut i = Vec::new();
+
+    for r in 0..=rings {
+        let theta = (r as f32 / rings as f32) * std::f32::consts::FRAC_PI_2;
+        let y = theta.cos();
+        let ring_r = theta.sin();
+        for s in 0..=sectors {
+            let phi = (s as f32 / sectors as f32) * std::f32::consts::TAU;
+            let pos = [ring_r * phi.cos(), y, ring_r * phi.sin()];
+            v.push(Vertex3d {
+                position: pos,
+                normal: pos,
+                color: [1.0, 1.0, 1.0],
+                tex_coord: [0.0, 0.0],
+                material: 0.0,
+            });
+        }
+    }
+
+    let cols = sectors + 1;
+    for r in 0..rings {
+        for s in 0..sectors {
+            let a = r * cols + s;
+            let b = a + 1;
+            let c = (r + 1) * cols + s;
+            let d = c + 1;
+            i.extend_from_slice(&[a, b, d, a, d, c]);
+        }
+    }
+
+    (v, i)
+}

@@ -42,7 +42,7 @@ void main() {
     vec3 lit = albedo * (ambient + diff * 0.85);
 
     float fog = smoothstep(45.0, 260.0, v_depth);
-    vec3 fog_color = vec3(0.48, 0.63, 0.8);
+    vec3 fog_color = vec3(0.88, 0.70, 0.55);
     vec3 final_col = mix(lit, fog_color, fog);
     f_color = vec4(final_col, 1.0);
 }
