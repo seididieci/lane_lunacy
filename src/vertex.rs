@@ -28,3 +28,14 @@ pub struct HudVertex {
     #[format(R32G32_SFLOAT)]
     pub uv: [f32; 2],
 }
+
+#[derive(BufferContents, Vertex, Default, Clone, Copy, Debug)]
+#[repr(C)]
+pub struct ParticleVertex {
+    #[format(R32G32B32_SFLOAT)]
+    pub position: [f32; 3],
+    #[format(R32G32_SFLOAT)]
+    pub uv: [f32; 2],
+    #[format(R32G32B32A32_SFLOAT)]
+    pub color: [f32; 4],
+}

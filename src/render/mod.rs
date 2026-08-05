@@ -21,12 +21,14 @@ use vulkano::descriptor_set::allocator::{
 use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
 use vulkano::device::{Device, Queue};
 use vulkano::format::Format;
-use vulkano::image::sampler::{Sampler, SamplerAddressMode, SamplerCreateInfo};
+use vulkano::image::sampler::{
+    Sampler, SamplerAddressMode, SamplerCreateInfo, SamplerMipmapMode,
+};
 use vulkano::image::view::ImageView;
 use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
 use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
 use vulkano::pipeline::graphics::color_blend::{
-    AttachmentBlend, ColorBlendAttachmentState, ColorBlendState,
+    AttachmentBlend, BlendFactor, BlendOp, ColorBlendAttachmentState, ColorBlendState,
 };
 use vulkano::pipeline::graphics::depth_stencil::{CompareOp, DepthState, DepthStencilState};
 use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
@@ -55,13 +57,17 @@ use crate::mesh::{build_sky_dome, build_world_chunk};
 use crate::model::load_gltf_mesh_from_bytes;
 use crate::render::camera::{perspective_vulkan, Camera};
 use crate::render::cloud::generate_cloud_tile;
-use crate::render::texture::{make_mesh_buffers, upload_rgba8_texture};
+use crate::render::particles::{generate_soft_sprite, RainSystem};
+use crate::render::texture::{
+    make_mesh_buffers, upload_rgba8_texture, upload_rgba8_texture_mipmapped,
+};
 use crate::road::road_tangent;
 use crate::shaders::{self, MVP, SkyUniform};
-use crate::vertex::{HudVertex, Vertex3d};
+use crate::vertex::{HudVertex, ParticleVertex, Vertex3d};
 
 pub mod camera;
 pub mod cloud;
+pub mod particles;
 pub mod texture;
 
 const LIGHT_DIR: [f32; 4] = [0.25, 1.0, 0.4, 0.0];
@@ -94,6 +100,10 @@ pub struct Renderer {
     mesh_pipeline: Arc<GraphicsPipeline>,
     hud_pipeline: Arc<GraphicsPipeline>,
     sky_pipeline: Arc<GraphicsPipeline>,
+    particle_pipeline: Arc<GraphicsPipeline>,
+    particle_sprite_view: Arc<ImageView>,
+    particle_sampler: Arc<Sampler>,
+    rain: RainSystem,
     hud_descriptor_set: Arc<DescriptorSet>,
     mesh_sampler: Arc<Sampler>,
     world_texture_view: Arc<ImageView>,
@@ -347,6 +357,98 @@ impl Renderer {
         )
         .expect("sky pipeline");
 
+        // ---- Rain particles ----
+        let pvs = unsafe {
+            ShaderModule::new(
+                device.clone(),
+                ShaderModuleCreateInfo::new(&shaders::spv_words(shaders::PARTICLE_VERT_SPV)),
+            )
+        }
+        .expect("particle vertex shader");
+        let pfs = unsafe {
+            ShaderModule::new(
+                device.clone(),
+                ShaderModuleCreateInfo::new(&shaders::spv_words(shaders::PARTICLE_FRAG_SPV)),
+            )
+        }
+        .expect("particle fragment shader");
+        let pvs_ep = pvs.entry_point("main").unwrap();
+        let pfs_ep = pfs.entry_point("main").unwrap();
+        let particle_vertex_input = ParticleVertex::per_vertex().definition(&pvs_ep).unwrap();
+        let particle_stages = [
+            PipelineShaderStageCreateInfo::new(pvs_ep),
+            PipelineShaderStageCreateInfo::new(pfs_ep),
+        ];
+        let particle_layout = PipelineLayout::new(
+            device.clone(),
+            PipelineDescriptorSetLayoutCreateInfo::from_stages(&particle_stages)
+                .into_pipeline_layout_create_info(device.clone())
+                .unwrap(),
+        )
+        .unwrap();
+        let particle_subpass = Subpass::from(render_pass.clone(), 0).unwrap();
+        let particle_pipeline = GraphicsPipeline::new(
+            device.clone(),
+            None,
+            GraphicsPipelineCreateInfo {
+                stages: particle_stages.into_iter().collect(),
+                vertex_input_state: Some(particle_vertex_input),
+                input_assembly_state: Some(InputAssemblyState::default()),
+                viewport_state: Some(ViewportState::default()),
+                rasterization_state: Some(RasterizationState {
+                    cull_mode: CullMode::None,
+                    ..Default::default()
+                }),
+                multisample_state: Some(MultisampleState::default()),
+                depth_stencil_state: Some(DepthStencilState {
+                    depth: Some(DepthState {
+                        write_enable: false,
+                        compare_op: CompareOp::Less,
+                    }),
+                    ..Default::default()
+                }),
+                color_blend_state: Some(ColorBlendState::with_attachment_states(
+                    particle_subpass.num_color_attachments(),
+                    ColorBlendAttachmentState {
+                        blend: Some(AttachmentBlend {
+                            src_color_blend_factor: BlendFactor::SrcAlpha,
+                            dst_color_blend_factor: BlendFactor::One,
+                            color_blend_op: BlendOp::Add,
+                            src_alpha_blend_factor: BlendFactor::SrcAlpha,
+                            dst_alpha_blend_factor: BlendFactor::One,
+                            alpha_blend_op: BlendOp::Add,
+                        }),
+                        ..Default::default()
+                    },
+                )),
+                dynamic_state: [DynamicState::Viewport].into_iter().collect(),
+                subpass: Some(particle_subpass.into()),
+                ..GraphicsPipelineCreateInfo::layout(particle_layout)
+            },
+        )
+        .expect("particle pipeline");
+
+        let (particle_sprite_view, particle_sprite_mips) = upload_rgba8_texture_mipmapped(
+            memory_allocator.clone(),
+            command_allocator.clone(),
+            queue.clone(),
+            128,
+            128,
+            generate_soft_sprite(128),
+        );
+        let particle_sampler = Sampler::new(
+            device.clone(),
+            SamplerCreateInfo {
+                mag_filter: vulkano::image::sampler::Filter::Linear,
+                min_filter: vulkano::image::sampler::Filter::Linear,
+                mipmap_mode: SamplerMipmapMode::Linear,
+                address_mode: [SamplerAddressMode::ClampToEdge; 3],
+                lod: 0.0..=particle_sprite_mips.saturating_sub(1) as f32,
+                ..Default::default()
+            },
+        )
+        .expect("particle sampler");
+
         // ---- Font atlas texture ----
         let atlas_staging = Buffer::from_iter(
             memory_allocator.clone(),
@@ -571,6 +673,10 @@ impl Renderer {
             mesh_pipeline,
             hud_pipeline,
             sky_pipeline,
+            particle_pipeline,
+            particle_sprite_view,
+            particle_sampler,
+            rain: RainSystem::new(),
             hud_descriptor_set,
             mesh_sampler,
             world_texture_view,
@@ -959,6 +1065,65 @@ impl Renderer {
                     Vec3::new(tvx, 0.35, -t.distance),
                 ),
             );
+        }
+
+        // ---- Rain particles ----
+        // Additive, depth-tested (no depth write) so rain falls over the road
+        // but behind cars, and fades into the sky fog like everything else.
+        let rain_intensity = game.rain_intensity();
+        if rain_intensity > 0.0 {
+            let cam_right = cam_forward.cross(Vec3::Y);
+            self.rain.update(dt_secs, eye, game.vehicle.speed);
+            let particle_verts = self.rain.build_vertices(eye, cam_right, rain_intensity);
+            if !particle_verts.is_empty() {
+                let particle_count = particle_verts.len() as u32;
+                let mvp = self.mvp_buffer(Mat4::IDENTITY, view, proj, fog_color);
+                let particle_set_layout = self.particle_pipeline.layout().set_layouts()[0].clone();
+                let particle_set = DescriptorSet::new(
+                    self.descriptor_set_allocator.clone(),
+                    particle_set_layout,
+                    [
+                        WriteDescriptorSet::buffer(0, mvp),
+                        WriteDescriptorSet::image_view_sampler(
+                            1,
+                            self.particle_sprite_view.clone(),
+                            self.particle_sampler.clone(),
+                        ),
+                    ],
+                    [],
+                )
+                .expect("particle descriptor set");
+                let particle_buf = Buffer::from_iter(
+                    self.memory_allocator.clone(),
+                    BufferCreateInfo {
+                        usage: BufferUsage::VERTEX_BUFFER,
+                        ..Default::default()
+                    },
+                    AllocationCreateInfo {
+                        memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                        ..Default::default()
+                    },
+                    particle_verts.iter().copied(),
+                )
+                .expect("particle buffer");
+                builder
+                    .bind_pipeline_graphics(self.particle_pipeline.clone())
+                    .expect("bind particle pipeline")
+                    .bind_descriptor_sets(
+                        PipelineBindPoint::Graphics,
+                        self.particle_pipeline.layout().clone(),
+                        0,
+                        particle_set,
+                    )
+                    .expect("bind particle descriptor sets")
+                    .bind_vertex_buffers(0, particle_buf)
+                    .expect("bind particle vertex buffers");
+                unsafe {
+                    builder
+                        .draw(particle_count, 1, 0, 0)
+                        .expect("draw particles");
+                }
+            }
         }
 
         // ---- HUD ----

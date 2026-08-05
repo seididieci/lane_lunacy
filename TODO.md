@@ -25,9 +25,9 @@
 - [ ] Sun/flare sprite assets in `assets/textures/`
 
 ## 4. Particles: rain + drift dust (+ optional local clouds/mist)
-- [ ] Particle pipeline with additive blending + soft sprite texture (`assets/textures/`)
-- [ ] Reusable CPU billboard particle system: Rust-side update, vertex buffer per frame, capped count (also serves local cloud puffs/mist)
-- [ ] Rain: fast-falling streaks in a volume around the camera, tied to weather/night
+- [x] Particle pipeline with additive blending + soft sprite texture (procedural, runtime-baked)
+- [x] Reusable CPU billboard particle system: Rust-side update, vertex buffer per frame, capped count (also serves local cloud puffs/mist)
+- [x] Rain: fast-falling streaks in a volume around the camera, tied to weather/night (RAIN = full downpour; AUTO rains as its cover cycle peaks)
 - [ ] Drift dust: puffs on hard steering/sideslip (lateral velocity while speed high)
 - [ ] (Hybrid) Optional local cloud puffs / low-hanging mist near the camera via the same billboard system; the ambient sky layer stays tile-based on the dome (task 2)
 

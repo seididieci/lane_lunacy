@@ -190,7 +190,7 @@ mod tests {
 
     #[test]
     fn menu_builds_vertices_and_centers_rows() {
-        let menu = MenuState::new(0);
+        let menu = MenuState::new(0, Weather::Auto);
         let names = vec!["Test GPU".to_string()];
         let atlas = FontAtlas::load();
         let ui = Ui::new();

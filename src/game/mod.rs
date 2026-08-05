@@ -102,6 +102,19 @@ impl Game {
         }
     }
 
+    /// Rain intensity (0..1). `Rain` is always full; `Auto` ramps light rain in
+    /// as its cloud-cover cycle peaks, so AUTO periodically rains and clears.
+    pub fn rain_intensity(&self) -> f32 {
+        match self.weather {
+            Weather::Rain => 1.0,
+            Weather::Auto => {
+                let t = ((self.cloud_amount() - 0.80) / 0.20).clamp(0.0, 1.0);
+                t * t * (3.0 - 2.0 * t)
+            }
+            _ => 0.0,
+        }
+    }
+
     pub fn set_difficulty(&mut self, difficulty: DifficultyLevel) {
         if self.difficulty == difficulty {
             return;

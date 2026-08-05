@@ -8,6 +8,8 @@ pub const HUD_VERT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spv/hu
 pub const HUD_FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spv/hud.frag.spv"));
 pub const SKY_VERT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spv/sky.vert.spv"));
 pub const SKY_FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spv/sky.frag.spv"));
+pub const PARTICLE_VERT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spv/particle.vert.spv"));
+pub const PARTICLE_FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spv/particle.frag.spv"));
 
 pub fn spv_words(bytes: &[u8]) -> Vec<u32> {
     bytes
