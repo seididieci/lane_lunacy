@@ -119,6 +119,94 @@ pub fn generate_soft_sprite(size: u32) -> Vec<u8> {
     out
 }
 
+/// Bakes camera-facing red taillight quads for each rear-light center.
+/// Lights behind the camera are skipped. `intensity` (0..1) scales the glow;
+/// callers pass the effective night darkness so lights switch off by day.
+pub fn build_taillights(
+    centers: &[Vec3],
+    eye: Vec3,
+    right: Vec3,
+    intensity: f32,
+) -> Vec<ParticleVertex> {
+    if intensity <= 0.001 {
+        return Vec::new();
+    }
+    let right = right.normalize_or_zero();
+    let half_w = 0.14;
+    let half_h = 0.19;
+    let color = [1.0, 0.10, 0.10, intensity * 0.9];
+    let mut out = Vec::with_capacity(centers.len() * 6);
+    for c in centers {
+        if c.z - eye.z > 5.0 {
+            continue; // behind the camera
+        }
+        let up = Vec3::Y * half_h;
+        let side = right * half_w;
+        let tl = c - side + up;
+        let tr = c + side + up;
+        let br = c + side - up;
+        let bl = c - side - up;
+        push_quad(&mut out, tl, tr, br, bl, color);
+    }
+    out
+}
+
+/// Bakes the visible headlights of oncoming traffic: a warm-white disc with a
+/// faint halo per light, plus a soft light pool cast on the asphalt in front of
+/// each light. `lights` is a list of `(center, forward_dir)` pairs: the light
+/// at its real anchor position (lateral offset and height baked in by the
+/// caller), and the direction its beams shine. Everything behind the camera is
+/// skipped. `intensity` (0..1) scales the glow.
+pub fn build_headlights(
+    lights: &[(Vec3, Vec3)],
+    eye: Vec3,
+    right: Vec3,
+    intensity: f32,
+) -> Vec<ParticleVertex> {
+    if intensity <= 0.001 {
+        return Vec::new();
+    }
+    let right = right.normalize_or_zero();
+    let mut out = Vec::with_capacity(lights.len() * 18);
+    for (center, forward) in lights {
+        if center.z - eye.z > 5.0 {
+            continue; // behind the camera
+        }
+        let disc = [1.0, 0.98, 0.90, intensity * 0.95];
+        let halo = [1.0, 0.92, 0.75, intensity * 0.25];
+        let up = Vec3::Y * 0.22;
+        let side = right * 0.18;
+        let halo_up = Vec3::Y * 0.36;
+        let halo_side = right * 0.30;
+        // Disc.
+        let tl = *center - side + up;
+        let tr = *center + side + up;
+        let br = *center + side - up;
+        let bl = *center - side - up;
+        push_quad(&mut out, tl, tr, br, bl, disc);
+        // Soft halo around the disc.
+        let tl = *center - halo_side + halo_up;
+        let tr = *center + halo_side + halo_up;
+        let br = *center + halo_side - halo_up;
+        let bl = *center - halo_side - halo_up;
+        push_quad(&mut out, tl, tr, br, bl, halo);
+        // Light pool cast on the road ahead of the light, following the full
+        // horizontal beam direction (so it stays on the asphalt around curves).
+        let pool_center = Vec3::new(center.x, 0.02, center.z);
+        if pool_center.z - eye.z <= 5.0 {
+            let across = forward.cross(Vec3::Y).normalize_or_zero() * 1.7;
+            let along = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero() * 5.0;
+            let pool = [1.0, 0.95, 0.82, intensity * 0.18];
+            let tl = pool_center + along + across;
+            let tr = pool_center + along - across;
+            let br = pool_center - along - across;
+            let bl = pool_center - along + across;
+            push_quad(&mut out, tl, tr, br, bl, pool);
+        }
+    }
+    out
+}
+
 fn spawn_drop(rng: &mut Rng, eye: Vec3) -> Drop {
     let pos = eye + Vec3::new(
         rng.range(-BOX_X, BOX_X),
@@ -153,6 +241,49 @@ fn push_quad(
 
 /// Small xorshift PRNG (no external rand dependency).
 struct Rng(u64);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn taillights_emit_quads_and_skip_behind_the_camera() {
+        let centers = vec![
+            Vec3::new(2.0, 0.8, -10.0),
+            Vec3::new(2.0, 0.8, 20.0), // behind the eye at origin
+        ];
+        let verts = build_taillights(&centers, Vec3::ZERO, Vec3::X, 1.0);
+        assert_eq!(verts.len(), 6, "one in-front light only");
+        assert!(verts.iter().all(|v| v.color[0] > 0.9 && v.color[1] < 0.2));
+    }
+
+    #[test]
+    fn taillights_turn_off_with_zero_intensity() {
+        let centers = vec![Vec3::new(0.0, 0.0, -5.0)];
+        assert!(build_taillights(&centers, Vec3::ZERO, Vec3::X, 0.0).is_empty());
+    }
+
+    #[test]
+    fn headlights_emit_discs_halos_and_a_road_pool() {
+        let lights = vec![(Vec3::new(2.0, 0.8, -10.0), Vec3::new(0.0, 0.0, 1.0))];
+        let verts = build_headlights(&lights, Vec3::ZERO, Vec3::X, 1.0);
+        assert_eq!(verts.len(), 18, "1 disc + 1 halo + 1 pool per light = 3 quads = 18 verts");
+        assert!(
+            verts.iter().all(|v| v.color[0] > 0.9 && v.color[1] > 0.9),
+            "headlights are warm white"
+        );
+        assert!(
+            verts.iter().any(|v| v.position[1] < 0.1),
+            "the road pool lies flat on the asphalt"
+        );
+    }
+
+    #[test]
+    fn headlights_turn_off_with_zero_intensity() {
+        let lights = vec![(Vec3::new(0.0, 0.0, -5.0), Vec3::new(0.0, 0.0, 1.0))];
+        assert!(build_headlights(&lights, Vec3::ZERO, Vec3::X, 0.0).is_empty());
+    }
+}
 
 impl Rng {
     fn new() -> Self {

@@ -5,6 +5,7 @@ layout(location = 1) in vec3 v_color;
 layout(location = 2) in vec2 v_uv;
 layout(location = 3) in float v_depth;
 layout(location = 4) in float v_material;
+layout(location = 5) in vec3 v_world_pos;
 layout(location = 0) out vec4 f_color;
 
 layout(set = 0, binding = 0) uniform MVP {
@@ -13,6 +14,9 @@ layout(set = 0, binding = 0) uniform MVP {
     mat4 projection;
     vec4 light_dir;
     vec4 fog_color;
+    vec4 light_state;
+    vec4 headlight_pos;
+    vec4 headlight_dir;
 };
 
 layout(set = 0, binding = 1) uniform sampler2D tex;
@@ -20,7 +24,9 @@ layout(set = 0, binding = 1) uniform sampler2D tex;
 void main() {
     vec3 n = normalize(v_normal);
     float diff = max(dot(n, normalize(light_dir.xyz)), 0.0);
-    float ambient = 0.48;
+    float ambient = light_state.x;
+    float sun_intensity = light_state.y;
+    float night_fac = light_state.w;
     vec3 tex_col;
     // Cars (material 4) use the car colormap directly.
     if (v_material >= 3.5) {
@@ -40,7 +46,17 @@ void main() {
         }
     }
     vec3 albedo = v_color * tex_col;
-    vec3 lit = albedo * (ambient + diff * 0.85);
+    vec3 lit = albedo * (ambient + diff * sun_intensity * 0.85);
+
+    // Headlight cone cast from the player car, scaled with night darkness so
+    // only the harder difficulties actually need to switch them on.
+    vec3 to_light = headlight_pos.xyz - v_world_pos;
+    float head_dist = length(to_light);
+    vec3 L = to_light / max(head_dist, 1e-4);
+    float spot = dot(L, normalize(headlight_dir.xyz));
+    float head = smoothstep(0.90, 0.97, spot) * exp(-head_dist * 0.06);
+    head *= night_fac;
+    lit += albedo * head * 0.85;
 
     // Long, gentle fog ramp that reaches full opacity exactly at the far clip
     // plane, so distant geometry fades into the same color as the sky horizon

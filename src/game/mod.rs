@@ -37,6 +37,7 @@ pub struct Game {
     pub difficulty: DifficultyLevel,
     pub weather: Weather,
     weather_phase: f32,
+    time_of_day_phase: f32,
     pub score: u32,
     pub bonus_score: u32,
     pub best_score: u32,
@@ -59,6 +60,7 @@ impl Game {
             difficulty: DifficultyLevel::EasyArcade,
             weather: Weather::Auto,
             weather_phase: random_weather_phase(),
+            time_of_day_phase: random_weather_phase() * (24.0 / std::f32::consts::TAU),
             score: 0,
             bonus_score: 0,
             best_score: 0,
@@ -83,6 +85,7 @@ impl Game {
         self.avg_speed = 0.0;
         self.time = 0.0;
         self.weather_phase = random_weather_phase();
+        self.time_of_day_phase = random_weather_phase() * (24.0 / std::f32::consts::TAU);
         self.rebuild_traffic();
     }
 
@@ -113,6 +116,39 @@ impl Game {
             }
             _ => 0.0,
         }
+    }
+
+    /// In-game time of day in hours (0..24), advanced by the difficulty's cycle
+    /// speed from a per-run randomized start.
+    pub fn time_of_day(&self) -> f32 {
+        let tuning = self.difficulty.tuning();
+        (self.time * tuning.cycle_speed + self.time_of_day_phase) % 24.0
+    }
+
+    /// Sun elevation factor in [-1, 1]: 1 at noon, 0 at sunrise/sunset, -1 at
+    /// midnight. The day length follows the difficulty's `day_fraction`.
+    pub fn sun_elevation(&self) -> f32 {
+        let tuning = self.difficulty.tuning();
+        let hours = self.time_of_day();
+        let day_hours = tuning.day_fraction * 24.0;
+        let sunrise = (24.0 - day_hours) * 0.5;
+        let sunset = sunrise + day_hours;
+        if hours >= sunrise && hours <= sunset {
+            (std::f32::consts::PI * (hours - sunrise) / day_hours).sin()
+        } else {
+            let night = 24.0 - day_hours;
+            let n = (hours - sunset).rem_euclid(24.0) % night;
+            -(std::f32::consts::PI * n / night).sin()
+        }
+    }
+
+    /// Effective night darkness in 0..1: the elevation-driven night curve scaled
+    /// by the difficulty's `night_darkness`. Drives ambient light, moonlight,
+    /// and headlights.
+    pub fn night_fac(&self) -> f32 {
+        let tuning = self.difficulty.tuning();
+        let night = smoothstep(0.06, -0.02, self.sun_elevation());
+        night * tuning.night_darkness
     }
 
     pub fn set_difficulty(&mut self, difficulty: DifficultyLevel) {
@@ -239,6 +275,12 @@ fn random_weather_phase() -> f32 {
     (r as f32 / 16_777_215.0) * std::f32::consts::TAU
 }
 
+/// GLSL-style smoothstep over a generic `edge0 > edge1` interval.
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,5 +373,29 @@ mod tests {
         assert_eq!(game.perfect_shift_timer, 0.0);
         assert_eq!(game.vehicle.boost, 0.0);
         assert!(game.engine_heat > 0.0, "red-zone shift heats the engine");
+    }
+
+    #[test]
+    fn sun_is_up_at_noon_and_down_at_midnight() {
+        let mut game = Game::new();
+        // Fix the phase so 0 in-game seconds = 12:00 noon.
+        game.time_of_day_phase = 12.0;
+        assert_eq!(game.sun_elevation(), 1.0, "sun peaks at noon");
+        assert_eq!(game.night_fac(), 0.0);
+
+        // 12 in-game hours later it is midnight.
+        game.time = 12.0 / game.difficulty.tuning().cycle_speed;
+        assert_eq!(game.sun_elevation(), -1.0, "sun bottoms at midnight");
+        assert!(game.night_fac() > 0.0, "night darkness active");
+    }
+
+    #[test]
+    fn time_of_day_loops_through_24_hours() {
+        let mut game = Game::new();
+        game.time_of_day_phase = 0.0;
+        let day_hours = 24.0 / game.difficulty.tuning().cycle_speed;
+        assert_eq!(game.time_of_day(), 0.0);
+        game.time = day_hours;
+        assert_eq!(game.time_of_day(), 0.0, "wraps back to midnight");
     }
 }

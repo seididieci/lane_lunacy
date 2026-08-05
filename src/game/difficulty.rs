@@ -29,6 +29,12 @@ pub struct DifficultyTuning {
     pub engine_heat_rate: f32,
     /// Engine heat shed per second while below the danger zone.
     pub engine_heat_cool: f32,
+    /// Fraction of the day/night cycle with the sun above the horizon.
+    pub day_fraction: f32,
+    /// Day/night cycle speed, in hours of in-game time per real second.
+    pub cycle_speed: f32,
+    /// How dark night gets (0..1); HARD is darkest so headlights matter.
+    pub night_darkness: f32,
 }
 
 impl DifficultyLevel {
@@ -53,6 +59,9 @@ impl DifficultyLevel {
                 wreck_limit: 7,
                 engine_heat_rate: 0.3,
                 engine_heat_cool: 0.22,
+                day_fraction: 0.82,
+                cycle_speed: 0.05,
+                night_darkness: 0.6,
             },
             DifficultyLevel::Normal => DifficultyTuning {
                 traffic_count: 5,
@@ -73,6 +82,9 @@ impl DifficultyLevel {
                 wreck_limit: 6,
                 engine_heat_rate: 0.4,
                 engine_heat_cool: 0.2,
+                day_fraction: 0.62,
+                cycle_speed: 0.06,
+                night_darkness: 0.7,
             },
             DifficultyLevel::Hard => DifficultyTuning {
                 traffic_count: 6,
@@ -93,6 +105,9 @@ impl DifficultyLevel {
                 wreck_limit: 5,
                 engine_heat_rate: 0.55,
                 engine_heat_cool: 0.18,
+                day_fraction: 0.45,
+                cycle_speed: 0.1,
+                night_darkness: 1.0,
             },
         }
     }

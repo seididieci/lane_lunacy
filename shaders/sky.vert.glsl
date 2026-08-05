@@ -18,6 +18,7 @@ layout(set = 0, binding = 0) uniform SkyUniform {
     vec4 cloud_tint;
     vec4 light_dir;
     float cloud_amount;
+    vec4 sun_state;
 };
 
 void main() {

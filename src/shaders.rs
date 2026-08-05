@@ -10,6 +10,8 @@ pub const SKY_VERT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spv/sk
 pub const SKY_FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spv/sky.frag.spv"));
 pub const PARTICLE_VERT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spv/particle.vert.spv"));
 pub const PARTICLE_FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spv/particle.frag.spv"));
+pub const FLARE_VERT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spv/flare.vert.spv"));
+pub const FLARE_FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spv/flare.frag.spv"));
 
 pub fn spv_words(bytes: &[u8]) -> Vec<u32> {
     bytes
@@ -26,6 +28,9 @@ pub struct MVP {
     pub projection: [[f32; 4]; 4],
     pub light_dir: [f32; 4],
     pub fog_color: [f32; 4],
+    pub light_state: [f32; 4],
+    pub headlight_pos: [f32; 4],
+    pub headlight_dir: [f32; 4],
 }
 
 #[derive(BufferContents, Clone, Copy, Debug)]
@@ -41,5 +46,5 @@ pub struct SkyUniform {
     pub cloud_tint: [f32; 4],
     pub light_dir: [f32; 4],
     pub cloud_amount: f32,
-    pub _pad2: [f32; 3],
+    pub sun_state: [f32; 4],
 }

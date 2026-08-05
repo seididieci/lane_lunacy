@@ -107,12 +107,24 @@ fn top_right(game: &Game) -> Node {
                 EM_SM,
                 DIM,
             )),
+            Node::new(Text::new(
+                format!("TIME {}", clock_time(game.time_of_day())),
+                EM_SM,
+                DIM,
+            )),
         ],
         ROW_GAP,
         HAlign::Right,
     );
     let panel = Panel::wrap(PANEL_BG, PANEL_INSETS, Node::new(col));
     margin(Node::new(panel), Insets::new(0.0, EDGE, EDGE, 0.0))
+}
+
+/// Formats a 0..24 hour-of-day value as a 24h "HH:MM" clock string.
+fn clock_time(hours: f32) -> String {
+    let h = (hours.floor() as i32).rem_euclid(24);
+    let m = ((hours - hours.floor()) * 60.0).floor() as i32;
+    format!("{h:02}:{m:02}")
 }
 
 /// Speed + RPM circular gauges, side by side at the bottom center.
@@ -214,5 +226,13 @@ mod tests {
         over.game_over = true;
         let mut over_root = build_hud_tree(&over);
         assert!(!ui.build(&mut over_root, &atlas, 16.0 / 9.0, 0.0).is_empty());
+    }
+
+    #[test]
+    fn clock_time_formats_24h_hh_mm() {
+        assert_eq!(clock_time(0.0), "00:00");
+        assert_eq!(clock_time(12.5), "12:30");
+        assert_eq!(clock_time(23.99), "23:59");
+        assert_eq!(clock_time(24.5), "00:30", "wraps past midnight");
     }
 }

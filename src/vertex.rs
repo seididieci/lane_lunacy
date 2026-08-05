@@ -39,3 +39,16 @@ pub struct ParticleVertex {
     #[format(R32G32B32A32_SFLOAT)]
     pub color: [f32; 4],
 }
+
+#[derive(BufferContents, Vertex, Default, Clone, Copy, Debug)]
+#[repr(C)]
+pub struct FlareVertex {
+    #[format(R32G32_SFLOAT)]
+    pub position: [f32; 2],
+    #[format(R32G32B32A32_SFLOAT)]
+    pub color: [f32; 4],
+    #[format(R32G32_SFLOAT)]
+    pub uv: [f32; 2],
+    #[format(R32_SFLOAT)]
+    pub kind: f32,
+}

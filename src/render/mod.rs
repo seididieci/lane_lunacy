@@ -54,23 +54,25 @@ use vulkano::{Validated, VulkanError};
 use crate::font::FontAtlas;
 use crate::game::Game;
 use crate::mesh::{build_sky_dome, build_world_chunk};
-use crate::model::load_gltf_mesh_from_bytes;
+use crate::model::{load_gltf_mesh_from_bytes, CarLightAnchors};
 use crate::render::camera::{perspective_vulkan, Camera};
 use crate::render::cloud::generate_cloud_tile;
+use crate::render::daynight::Lights;
 use crate::render::particles::{generate_soft_sprite, RainSystem};
 use crate::render::texture::{
     make_mesh_buffers, upload_rgba8_texture, upload_rgba8_texture_mipmapped,
 };
 use crate::road::road_tangent;
 use crate::shaders::{self, MVP, SkyUniform};
-use crate::vertex::{HudVertex, ParticleVertex, Vertex3d};
+use crate::vertex::{FlareVertex, HudVertex, ParticleVertex, Vertex3d};
 
 pub mod camera;
 pub mod cloud;
+pub mod daynight;
+pub mod flare;
 pub mod particles;
 pub mod texture;
 
-const LIGHT_DIR: [f32; 4] = [0.25, 1.0, 0.4, 0.0];
 const WORLD_CHUNK_LEN: f32 = 260.0;
 const WORLD_CHUNKS_BEHIND: i32 = 1;
 const WORLD_CHUNKS_AHEAD: i32 = 6;
@@ -101,6 +103,10 @@ pub struct Renderer {
     hud_pipeline: Arc<GraphicsPipeline>,
     sky_pipeline: Arc<GraphicsPipeline>,
     particle_pipeline: Arc<GraphicsPipeline>,
+    flare_pipeline: Arc<GraphicsPipeline>,
+    flare_core_view: Arc<ImageView>,
+    flare_streak_view: Arc<ImageView>,
+    flare_sampler: Arc<Sampler>,
     particle_sprite_view: Arc<ImageView>,
     particle_sampler: Arc<Sampler>,
     rain: RainSystem,
@@ -120,12 +126,23 @@ pub struct Renderer {
     world_anchor_chunk: i32,
     car_vertices: Subbuffer<[Vertex3d]>,
     car_indices: Subbuffer<[u32]>,
-    traffic_meshes: Vec<(Subbuffer<[Vertex3d]>, Subbuffer<[u32]>)>,
+    player_anchors: CarLightAnchors,
+    traffic_meshes: Vec<(Subbuffer<[Vertex3d]>, Subbuffer<[u32]>, CarLightAnchors)>,
     viewport: Viewport,
     pub recreate: bool,
     camera_heading: f32,
     fences: Vec<Option<Arc<FenceSignalFuture<Box<dyn GpuFuture>>>>>,
     previous_fence_i: u32,
+}
+
+/// Rotation aligning a traffic car to its lane direction. Cars on the right
+/// (lane > 0) drive toward -Z; oncoming cars (lane < 0) face +Z.
+fn traffic_rotation(lane: f32, distance: f32) -> glam::Quat {
+    if lane > 0.0 {
+        glam::Quat::from_rotation_y(f32::atan2(-road_tangent(distance), 1.0))
+    } else {
+        glam::Quat::from_rotation_y(f32::atan2(road_tangent(distance), -1.0))
+    }
 }
 
 impl Renderer {
@@ -449,6 +466,105 @@ impl Renderer {
         )
         .expect("particle sampler");
 
+        // ---- Sun lens flare ----
+        let fvs = unsafe {
+            ShaderModule::new(
+                device.clone(),
+                ShaderModuleCreateInfo::new(&shaders::spv_words(shaders::FLARE_VERT_SPV)),
+            )
+        }
+        .expect("flare vertex shader");
+        let ffs = unsafe {
+            ShaderModule::new(
+                device.clone(),
+                ShaderModuleCreateInfo::new(&shaders::spv_words(shaders::FLARE_FRAG_SPV)),
+            )
+        }
+        .expect("flare fragment shader");
+        let fvs_ep = fvs.entry_point("main").unwrap();
+        let ffs_ep = ffs.entry_point("main").unwrap();
+        let flare_vertex_input = FlareVertex::per_vertex().definition(&fvs_ep).unwrap();
+        let flare_stages = [
+            PipelineShaderStageCreateInfo::new(fvs_ep),
+            PipelineShaderStageCreateInfo::new(ffs_ep),
+        ];
+        let flare_layout = PipelineLayout::new(
+            device.clone(),
+            PipelineDescriptorSetLayoutCreateInfo::from_stages(&flare_stages)
+                .into_pipeline_layout_create_info(device.clone())
+                .unwrap(),
+        )
+        .unwrap();
+        let flare_subpass = Subpass::from(render_pass.clone(), 0).unwrap();
+        let flare_pipeline = GraphicsPipeline::new(
+            device.clone(),
+            None,
+            GraphicsPipelineCreateInfo {
+                stages: flare_stages.into_iter().collect(),
+                vertex_input_state: Some(flare_vertex_input),
+                input_assembly_state: Some(InputAssemblyState::default()),
+                viewport_state: Some(ViewportState::default()),
+                rasterization_state: Some(RasterizationState {
+                    cull_mode: CullMode::Back,
+                    ..Default::default()
+                }),
+                multisample_state: Some(MultisampleState::default()),
+                depth_stencil_state: Some(DepthStencilState {
+                    depth: None,
+                    ..Default::default()
+                }),
+                color_blend_state: Some(ColorBlendState::with_attachment_states(
+                    flare_subpass.num_color_attachments(),
+                    ColorBlendAttachmentState {
+                        blend: Some(AttachmentBlend {
+                            src_color_blend_factor: BlendFactor::SrcAlpha,
+                            dst_color_blend_factor: BlendFactor::One,
+                            color_blend_op: BlendOp::Add,
+                            src_alpha_blend_factor: BlendFactor::SrcAlpha,
+                            dst_alpha_blend_factor: BlendFactor::One,
+                            alpha_blend_op: BlendOp::Add,
+                        }),
+                        ..Default::default()
+                    },
+                )),
+                dynamic_state: [DynamicState::Viewport].into_iter().collect(),
+                subpass: Some(flare_subpass.into()),
+                ..GraphicsPipelineCreateInfo::layout(flare_layout)
+            },
+        )
+        .expect("flare pipeline");
+
+        let (flare_core_view, flare_core_mips) = upload_rgba8_texture_mipmapped(
+            memory_allocator.clone(),
+            command_allocator.clone(),
+            queue.clone(),
+            64,
+            64,
+            flare::generate_sun_core(64),
+        );
+        let (flare_streak_view, flare_streak_mips) = upload_rgba8_texture_mipmapped(
+            memory_allocator.clone(),
+            command_allocator.clone(),
+            queue.clone(),
+            256,
+            32,
+            flare::generate_flare_streak(256, 32),
+        );
+        let flare_sampler = Sampler::new(
+            device.clone(),
+            SamplerCreateInfo {
+                mag_filter: vulkano::image::sampler::Filter::Linear,
+                min_filter: vulkano::image::sampler::Filter::Linear,
+                mipmap_mode: SamplerMipmapMode::Linear,
+                address_mode: [SamplerAddressMode::ClampToEdge; 3],
+                lod: 0.0..=flare_core_mips
+                    .max(flare_streak_mips)
+                    .saturating_sub(1) as f32,
+                ..Default::default()
+            },
+        )
+        .expect("flare sampler");
+
         // ---- Font atlas texture ----
         let atlas_staging = Buffer::from_iter(
             memory_allocator.clone(),
@@ -623,10 +739,11 @@ impl Renderer {
         let (sky_dome_vertices, sky_dome_indices) =
             make_mesh_buffers(memory_allocator.clone(), dome_vertices, dome_indices);
 
-        let player_mesh = load_gltf_mesh_from_bytes(PLAYER_MODEL_GLB, "player_race_future.glb")
-            .expect("failed to load embedded player model");
+        let (car_vertices, car_indices, player_anchors) =
+            load_gltf_mesh_from_bytes(PLAYER_MODEL_GLB, "player_race_future.glb")
+                .expect("failed to load embedded player model");
         let (car_vertices, car_indices) =
-            make_mesh_buffers(memory_allocator.clone(), player_mesh.0, player_mesh.1);
+            make_mesh_buffers(memory_allocator.clone(), car_vertices, car_indices);
 
         let traffic_models = [
             ("traffic_sedan.glb", TRAFFIC_SEDAN_GLB),
@@ -636,9 +753,10 @@ impl Renderer {
         ];
         let mut traffic_meshes = Vec::new();
         for (label, bytes) in traffic_models {
-            let mesh = load_gltf_mesh_from_bytes(bytes, label)
+            let (vertices, indices, anchors) = load_gltf_mesh_from_bytes(bytes, label)
                 .unwrap_or_else(|e| panic!("failed to load embedded traffic model {label}: {e}"));
-            traffic_meshes.push(make_mesh_buffers(memory_allocator.clone(), mesh.0, mesh.1));
+            let (vertices, indices) = make_mesh_buffers(memory_allocator.clone(), vertices, indices);
+            traffic_meshes.push((vertices, indices, anchors));
         }
 
         let extent = swapchain.image_extent();
@@ -674,6 +792,10 @@ impl Renderer {
             hud_pipeline,
             sky_pipeline,
             particle_pipeline,
+            flare_pipeline,
+            flare_core_view,
+            flare_streak_view,
+            flare_sampler,
             particle_sprite_view,
             particle_sampler,
             rain: RainSystem::new(),
@@ -693,6 +815,7 @@ impl Renderer {
             world_anchor_chunk: i32::MIN,
             car_vertices,
             car_indices,
+            player_anchors,
             traffic_meshes,
             viewport,
             recreate: false,
@@ -797,13 +920,31 @@ impl Renderer {
         self.recreate = false;
     }
 
-    fn mvp_buffer(&self, model: Mat4, view: Mat4, proj: Mat4, fog_color: [f32; 4]) -> Subbuffer<MVP> {
+    fn mvp_buffer(
+        &self,
+        model: Mat4,
+        view: Mat4,
+        proj: Mat4,
+        lights: &Lights,
+        time_of_day: f32,
+        fog_color: [f32; 4],
+        headlight_pos: [f32; 4],
+        headlight_dir: [f32; 4],
+    ) -> Subbuffer<MVP> {
         let mvp = MVP {
             model: model.to_cols_array_2d(),
             view: view.to_cols_array_2d(),
             projection: proj.to_cols_array_2d(),
-            light_dir: LIGHT_DIR,
+            light_dir: lights.light_dir,
             fog_color,
+            light_state: [
+                lights.ambient,
+                lights.sun_intensity,
+                time_of_day,
+                lights.night_fac,
+            ],
+            headlight_pos,
+            headlight_dir,
         };
         Buffer::from_data(
             self.memory_allocator.clone(),
@@ -818,6 +959,79 @@ impl Renderer {
             mvp,
         )
         .expect("mvp buffer")
+    }
+
+    /// Binds the particle pipeline and draws camera-facing billboard quads.
+    /// Shared by rain and the night taillights.
+    fn draw_particles(
+        &self,
+        builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+        verts: &[ParticleVertex],
+        view: Mat4,
+        proj: Mat4,
+        lights: &Lights,
+        time_of_day: f32,
+        fog_color: [f32; 4],
+        headlight_pos: [f32; 4],
+        headlight_dir: [f32; 4],
+    ) {
+        if verts.is_empty() {
+            return;
+        }
+        let particle_count = verts.len() as u32;
+        let mvp = self.mvp_buffer(
+            Mat4::IDENTITY,
+            view,
+            proj,
+            lights,
+            time_of_day,
+            fog_color,
+            headlight_pos,
+            headlight_dir,
+        );
+        let particle_set_layout = self.particle_pipeline.layout().set_layouts()[0].clone();
+        let particle_set = DescriptorSet::new(
+            self.descriptor_set_allocator.clone(),
+            particle_set_layout,
+            [
+                WriteDescriptorSet::buffer(0, mvp),
+                WriteDescriptorSet::image_view_sampler(
+                    1,
+                    self.particle_sprite_view.clone(),
+                    self.particle_sampler.clone(),
+                ),
+            ],
+            [],
+        )
+        .expect("particle descriptor set");
+        let particle_buf = Buffer::from_iter(
+            self.memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::VERTEX_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            verts.iter().copied(),
+        )
+        .expect("particle buffer");
+        builder
+            .bind_pipeline_graphics(self.particle_pipeline.clone())
+            .expect("bind particle pipeline")
+            .bind_descriptor_sets(
+                PipelineBindPoint::Graphics,
+                self.particle_pipeline.layout().clone(),
+                0,
+                particle_set,
+            )
+            .expect("bind particle descriptor sets")
+            .bind_vertex_buffers(0, particle_buf)
+            .expect("bind particle vertex buffers");
+        unsafe {
+            builder.draw(particle_count, 1, 0, 0).expect("draw particles");
+        }
     }
 
     /// Waits for all pending work on the backing device, so its swapchain and
@@ -853,20 +1067,17 @@ impl Renderer {
         let aspect = self.viewport.extent[0] / self.viewport.extent[1];
         let proj = perspective_vulkan(60.0f32.to_radians(), aspect, 0.1, 600.0);
 
-        // Fog color mirrors the sky shader's horizon at t=0 so the mesh fades
-        // into exactly the same color the sky dome shows at the horizon line,
-        // including the weather dim/overcast shift.
+        // Day/night lighting: the sun sweeps through the day, giving way to
+        // faint moonlight at night. The palettes also mirror the weather cover
+        // so the fog color matches the sky horizon exactly.
         let cover = {
             let t = ((game.cloud_amount() - 0.10) / 0.90).clamp(0.0, 1.0);
             t * t * (3.0 - 2.0 * t)
         };
-        let dim = 1.0 - 0.22 * cover;
-        let fog_color = [
-            (0.55 + (0.60 - 0.55) * cover) * dim,
-            (0.70 + (0.60 - 0.70) * cover) * dim,
-            (0.92 + (0.63 - 0.92) * cover) * dim,
-            1.0,
-        ];
+        let (palette, lights) =
+            daynight::compute(game.sun_elevation(), cover, game.night_fac());
+        let fog_color = palette.fog_color;
+        let time_of_day = game.time_of_day();
 
         self.ensure_world_chunks_for_player(game.vehicle.distance);
         let car_pos = Vec3::new(game.player_world_x(), 0.0, game.player_world_z());
@@ -922,12 +1133,17 @@ impl Renderer {
             projection: proj.to_cols_array_2d(),
             time: self.sky_time,
             _pad: [0.0; 3],
-            zenith: [0.18, 0.42, 0.83, 1.0],
-            horizon: [0.55, 0.70, 0.92, 1.0],
-            cloud_tint: [1.0, 0.97, 0.92, 1.0],
-            light_dir: LIGHT_DIR,
+            zenith: palette.zenith,
+            horizon: palette.horizon,
+            cloud_tint: palette.cloud_tint,
+            light_dir: lights.light_dir,
             cloud_amount: game.cloud_amount(),
-            _pad2: [0.0; 3],
+            sun_state: [
+                game.sun_elevation(),
+                lights.day_fac,
+                time_of_day,
+                lights.sun_intensity,
+            ],
         };
         let sky_buf = Buffer::from_data(
             self.memory_allocator.clone(),
@@ -986,13 +1202,32 @@ impl Renderer {
             .bind_pipeline_graphics(self.mesh_pipeline.clone())
             .expect("bind mesh pipeline");
 
+        // Headlight cone from the player car, aimed slightly down the road.
+        let head_forward = Vec3::new(game.vehicle.heading.sin(), 0.0, -game.vehicle.heading.cos());
+        let headlight_pos = [
+            game.player_world_x() + head_forward.x * 2.5,
+            0.9,
+            game.player_world_z() + head_forward.z * 2.5,
+            1.0,
+        ];
+        let headlight_dir = [head_forward.x, -0.15, head_forward.z, 0.0];
+
         let draw = |builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
                     vertices: Subbuffer<[Vertex3d]>,
                     indices: Subbuffer<[u32]>,
                     texture: Arc<ImageView>,
                     model: Mat4| {
             let index_count = indices.len() as u32;
-            let mvp = self.mvp_buffer(model, view, proj, fog_color);
+            let mvp = self.mvp_buffer(
+                model,
+                view,
+                proj,
+                &lights,
+                time_of_day,
+                fog_color,
+                headlight_pos,
+                headlight_dir,
+            );
             let set_layout = self.mesh_pipeline.layout().set_layouts()[0].clone();
             let set = DescriptorSet::new(
                 self.descriptor_set_allocator.clone(),
@@ -1047,12 +1282,8 @@ impl Renderer {
         // traffic
         for (idx, t) in game.traffic.iter().enumerate() {
             let tvx = crate::road::road_curve(t.distance) + t.lane;
-            let traffic_rot = if t.lane > 0.0 {
-                glam::Quat::from_rotation_y(f32::atan2(-road_tangent(t.distance), 1.0))
-            } else {
-                glam::Quat::from_rotation_y(f32::atan2(road_tangent(t.distance), -1.0))
-            };
-            let (traffic_vertices, traffic_indices) =
+            let traffic_rot = traffic_rotation(t.lane, t.distance);
+            let (traffic_vertices, traffic_indices, _anchors) =
                 &self.traffic_meshes[idx % self.traffic_meshes.len()];
             draw(
                 &mut builder,
@@ -1067,61 +1298,141 @@ impl Renderer {
             );
         }
 
-        // ---- Rain particles ----
-        // Additive, depth-tested (no depth write) so rain falls over the road
-        // but behind cars, and fades into the sky fog like everything else.
+        // ---- Particles (rain + night taillights) ----
+        // Additive, depth-tested (no depth write) so particles fall over the
+        // road but behind cars, and fade into the sky fog like everything else.
+        let mut particle_verts = Vec::new();
         let rain_intensity = game.rain_intensity();
         if rain_intensity > 0.0 {
             let cam_right = cam_forward.cross(Vec3::Y);
             self.rain.update(dt_secs, eye, game.vehicle.speed);
-            let particle_verts = self.rain.build_vertices(eye, cam_right, rain_intensity);
-            if !particle_verts.is_empty() {
-                let particle_count = particle_verts.len() as u32;
-                let mvp = self.mvp_buffer(Mat4::IDENTITY, view, proj, fog_color);
-                let particle_set_layout = self.particle_pipeline.layout().set_layouts()[0].clone();
-                let particle_set = DescriptorSet::new(
-                    self.descriptor_set_allocator.clone(),
-                    particle_set_layout,
-                    [
-                        WriteDescriptorSet::buffer(0, mvp),
-                        WriteDescriptorSet::image_view_sampler(
-                            1,
-                            self.particle_sprite_view.clone(),
-                            self.particle_sampler.clone(),
-                        ),
-                    ],
-                    [],
-                )
-                .expect("particle descriptor set");
-                let particle_buf = Buffer::from_iter(
-                    self.memory_allocator.clone(),
-                    BufferCreateInfo {
-                        usage: BufferUsage::VERTEX_BUFFER,
-                        ..Default::default()
-                    },
-                    AllocationCreateInfo {
-                        memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                        ..Default::default()
-                    },
-                    particle_verts.iter().copied(),
-                )
-                .expect("particle buffer");
-                builder
-                    .bind_pipeline_graphics(self.particle_pipeline.clone())
-                    .expect("bind particle pipeline")
-                    .bind_descriptor_sets(
-                        PipelineBindPoint::Graphics,
-                        self.particle_pipeline.layout().clone(),
-                        0,
-                        particle_set,
+            particle_verts = self.rain.build_vertices(eye, cam_right, rain_intensity);
+        }
+        let night_fac = game.night_fac();
+        if night_fac > 0.02 {
+            let cam_right = cam_forward.cross(Vec3::Y);
+            let mut tail_centers = Vec::with_capacity(game.traffic.len() * 2 + 2);
+            let mut head_lights = Vec::with_capacity(game.traffic.len() * 2);
+
+            // The player car's own rear taillights, from its model anchors.
+            let player_rot = glam::Quat::from_rotation_y(-game.vehicle.heading);
+            let p_base = Vec3::new(game.player_world_x(), 0.03, game.player_world_z());
+            let pa = &self.player_anchors;
+            tail_centers.push(p_base + player_rot * Vec3::new(-pa.lateral, pa.taillight_y, pa.long_half));
+            tail_centers.push(p_base + player_rot * Vec3::new(pa.lateral, pa.taillight_y, pa.long_half));
+
+            for (idx, t) in game.traffic.iter().enumerate() {
+                let tvx = crate::road::road_curve(t.distance) + t.lane;
+                let rot = traffic_rotation(t.lane, t.distance);
+                let anchors = &self.traffic_meshes[idx % self.traffic_meshes.len()].2;
+                let car_pos = Vec3::new(tvx, 0.35, -t.distance);
+                if t.lane > 0.0 {
+                    // Same direction: red taillights at the rear (facing away).
+                    tail_centers.push(car_pos + rot * Vec3::new(-anchors.lateral, anchors.taillight_y, anchors.long_half));
+                    tail_centers.push(car_pos + rot * Vec3::new(anchors.lateral, anchors.taillight_y, anchors.long_half));
+                } else {
+                    // Oncoming: warm headlights at the front, shining at us.
+                    let forward = (rot * Vec3::new(0.0, 0.0, -1.0)).normalize();
+                    head_lights.push((car_pos + rot * Vec3::new(-anchors.lateral, anchors.headlight_y, -anchors.long_half), forward));
+                    head_lights.push((car_pos + rot * Vec3::new(anchors.lateral, anchors.headlight_y, -anchors.long_half), forward));
+                }
+            }
+            particle_verts.append(&mut particles::build_taillights(
+                &tail_centers,
+                eye,
+                cam_right,
+                night_fac,
+            ));
+            particle_verts.append(&mut particles::build_headlights(
+                &head_lights,
+                eye,
+                cam_right,
+                night_fac,
+            ));
+        }
+        if !particle_verts.is_empty() {
+            self.draw_particles(
+                &mut builder,
+                &particle_verts,
+                view,
+                proj,
+                &lights,
+                time_of_day,
+                fog_color,
+                headlight_pos,
+                headlight_dir,
+            );
+        }
+
+        // ---- Sun lens flare ----
+        // Project the sun (a world direction) into NDC and fan additive sprites
+        // along the sun->screen-center axis, faded by brightness, cloud cover,
+        // and how far off-screen the sun is.
+        if lights.sun_intensity > 0.0 {
+            let sun_dir = Vec3::new(
+                lights.light_dir[0],
+                lights.light_dir[1],
+                lights.light_dir[2],
+            );
+            let view_dir = view.transform_vector3(sun_dir);
+            if view_dir.z < 0.0 {
+                let clip = proj * view_dir.extend(1.0);
+                let sun_ndc = [clip.x / clip.w, clip.y / clip.w];
+                let off = (sun_ndc[0].abs().max(sun_ndc[1].abs()) - 0.9).max(0.0);
+                let off_fade = 1.0 / (1.0 + off * 8.0);
+                let flare_intensity = lights.sun_intensity * (1.0 - 0.9 * cover) * off_fade;
+                let flare_verts = flare::build_flare_verts(sun_ndc, aspect, flare_intensity);
+                if !flare_verts.is_empty() {
+                    let flare_set_layout = self.flare_pipeline.layout().set_layouts()[0].clone();
+                    let flare_set = DescriptorSet::new(
+                        self.descriptor_set_allocator.clone(),
+                        flare_set_layout,
+                        [
+                            WriteDescriptorSet::image_view_sampler(
+                                0,
+                                self.flare_core_view.clone(),
+                                self.flare_sampler.clone(),
+                            ),
+                            WriteDescriptorSet::image_view_sampler(
+                                1,
+                                self.flare_streak_view.clone(),
+                                self.flare_sampler.clone(),
+                            ),
+                        ],
+                        [],
                     )
-                    .expect("bind particle descriptor sets")
-                    .bind_vertex_buffers(0, particle_buf)
-                    .expect("bind particle vertex buffers");
-                unsafe {
+                    .expect("flare descriptor set");
+                    let flare_buf = Buffer::from_iter(
+                        self.memory_allocator.clone(),
+                        BufferCreateInfo {
+                            usage: BufferUsage::VERTEX_BUFFER,
+                            ..Default::default()
+                        },
+                        AllocationCreateInfo {
+                            memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                            ..Default::default()
+                        },
+                        flare_verts.iter().copied(),
+                    )
+                    .expect("flare buffer");
+                    let flare_vertex_count = flare_buf.len() as u32;
                     builder
-                        .draw(particle_count, 1, 0, 0)
-                        .expect("draw particles");
+                        .bind_pipeline_graphics(self.flare_pipeline.clone())
+                        .expect("bind flare pipeline")
+                        .bind_descriptor_sets(
+                            PipelineBindPoint::Graphics,
+                            self.flare_pipeline.layout().clone(),
+                            0,
+                            flare_set,
+                        )
+                        .expect("bind flare descriptor sets")
+                        .bind_vertex_buffers(0, flare_buf)
+                        .expect("bind flare vertex buffers");
+                    unsafe {
+                        builder
+                            .draw(flare_vertex_count, 1, 0, 0)
+                            .expect("draw flare");
+                    }
                 }
             }
         }
