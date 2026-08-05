@@ -96,7 +96,7 @@ impl Game {
         match self.weather {
             Weather::Auto => {
                 let c = 0.5 + 0.5 * (self.time * WEATHER_CYCLE_SPEED + self.weather_phase).sin();
-                c.clamp(0.12, 0.9)
+                c.clamp(0.08, 1.0)
             }
             w => w.cloud_amount(),
         }

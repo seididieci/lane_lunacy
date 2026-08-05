@@ -17,7 +17,7 @@
 - [x] Cloud layer image with wrap-around scrolling; tie to time-of-day palette (task 5)
 - [x] Register new shaders in `src/shaders.rs`
 - [x] Procedural seamless cloud tiles (two cross-faded layers, per-run seed) + golden-hour palette
-- [~] Weather state: `cloud_amount` uniform (clear / partly / dramatic), menu-selectable AUTO/CLEAR/CLOUDY/RAIN; RAIN is the placeholder hook for task 4 rain particles — partially done: the visible delta between weather states is still too subtle and needs tuning (sky barely changes on weather switch)
+- [x] Weather state: `cloud_amount` uniform (clear / partly / dramatic), menu-selectable AUTO/CLEAR/CLOUDY/RAIN; RAIN is the placeholder hook for task 4 rain particles — coverage range spread across the full 0..1 scale with a threshold curve (CLEAR stays genuinely clear), cloud tiles densified into scattered clusters (no single wrapping bank), sunlit clouds brightened to pop against the azure sky, and cloud presence emphasised in the low horizon band the camera frames; RAIN darkens the whole sky
 
 ## 3. Sun + lens flare
 - [ ] Sun billboard at the time-of-day sun direction (from task 5)

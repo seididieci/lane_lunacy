@@ -61,11 +61,11 @@ pub struct MenuState {
 }
 
 impl MenuState {
-    pub fn new(gpu_index: usize) -> Self {
+    pub fn new(gpu_index: usize, weather: Weather) -> Self {
         MenuState {
             gpu_index,
             difficulty: DifficultyLevel::EasyArcade,
-            weather: Weather::Auto,
+            weather,
             cursor: MenuRow::Gpu,
             difficulty_changed: false,
         }

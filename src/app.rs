@@ -14,7 +14,7 @@ use vulkano::instance::Instance;
 use vulkano::swapchain::Surface;
 
 use crate::font::FontAtlas;
-use crate::game::Game;
+use crate::game::{Game, Weather};
 use crate::gpu::{create_graphics_context, enumerate_devices, select_physical_device};
 use crate::hud::build_hud_tree;
 use crate::input::Input;
@@ -45,7 +45,9 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(instance: Arc<Instance>, gpu_index: usize) -> Self {
+    pub fn new(instance: Arc<Instance>, gpu_index: usize, weather: Weather) -> Self {
+        let mut game = Game::new();
+        game.set_weather(weather);
         Self {
             instance,
             window: None,
@@ -53,9 +55,9 @@ impl App {
             renderer: None,
             gpu_names: Vec::new(),
             active_gpu_index: gpu_index,
-            menu: MenuState::new(gpu_index),
+            menu: MenuState::new(gpu_index, weather),
             mode: AppMode::Menu,
-            game: Game::new(),
+            game,
             input: Input::default(),
             ui: Ui::new(),
             font_atlas: FontAtlas::load(),

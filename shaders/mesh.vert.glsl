@@ -17,6 +17,7 @@ layout(set = 0, binding = 0) uniform MVP {
     mat4 view;
     mat4 projection;
     vec4 light_dir;
+    vec4 fog_color;
 };
 
 void main() {

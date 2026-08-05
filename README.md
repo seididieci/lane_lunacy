@@ -111,6 +111,9 @@ cargo run --release
 
 # force a specific GPU (see the [index] shown in the start menu)
 cargo run --release -- --gpu 1
+
+# start with a fixed sky state (auto | clear | cloudy | rain)
+cargo run --release -- --weather rain
 ```
 
 That's it. The first build takes a few minutes while shaderc compiles glslang;

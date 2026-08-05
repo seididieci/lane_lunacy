@@ -23,6 +23,7 @@ pub struct MVP {
     pub view: [[f32; 4]; 4],
     pub projection: [[f32; 4]; 4],
     pub light_dir: [f32; 4],
+    pub fog_color: [f32; 4],
 }
 
 #[derive(BufferContents, Clone, Copy, Debug)]

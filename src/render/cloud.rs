@@ -29,7 +29,11 @@ pub fn generate_cloud_tile(size: u32, seed: u64) -> Vec<u8> {
             let sy = y + (wy - 0.5) * warp;
 
             // Distinct puffs from a mid-frequency base + a little breakup.
-            let base = fbm(seed, size, sx, sy, 6, 4);
+            // A generous threshold keeps the tile mostly covered with real
+            // cloud mass (instead of a near-empty field of specks), and enough
+            // base cells break it into scattered clusters around the sky so it
+            // never collapses into one continuous wrapping bank.
+            let base = fbm(seed, size, sx, sy, 8, 4);
             let detail = fbm(
                 seed ^ 0xA5A5_A5A5_F0F0_F0F0,
                 size,
@@ -39,7 +43,7 @@ pub fn generate_cloud_tile(size: u32, seed: u64) -> Vec<u8> {
                 3,
             );
             let shape = (base * 0.8 + detail * 0.2).clamp(0.0, 1.0);
-            let cov = smoothstep((shape - 0.63) / (0.85 - 0.63)).powf(1.3);
+            let cov = smoothstep((shape - 0.45) / (0.75 - 0.45));
             let lum = (220.0 + cov * 35.0) as u8;
 
             out.push(lum);

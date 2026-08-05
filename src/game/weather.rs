@@ -21,14 +21,25 @@ impl Weather {
         }
     }
 
-    /// Base cloud coverage (0..1) for the fixed states; `Auto` resolves to a
-    /// value mid-range that the run cycle animates around.
+    /// Parses a `--weather` CLI value (case-insensitive) into a weather state.
+    pub fn parse(s: &str) -> Option<Weather> {
+        match s.to_ascii_lowercase().as_str() {
+            "auto" => Some(Weather::Auto),
+            "clear" => Some(Weather::Clear),
+            "cloudy" => Some(Weather::Cloudy),
+            "rain" => Some(Weather::Rain),
+            _ => None,
+        }
+    }
+
+    /// Base cloud coverage (0..1) for the fixed states, spread across the full
+    /// range so each weather setting reads as a clearly different sky.
     pub fn cloud_amount(self) -> f32 {
         match self {
             Weather::Auto => 0.5,
             Weather::Clear => 0.15,
-            Weather::Cloudy => 0.55,
-            Weather::Rain => 0.9,
+            Weather::Cloudy => 0.65,
+            Weather::Rain => 1.0,
         }
     }
 }

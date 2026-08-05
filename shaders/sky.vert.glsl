@@ -13,13 +13,11 @@ layout(set = 0, binding = 0) uniform SkyUniform {
     mat4 view;
     mat4 projection;
     float time;
-    vec3 padding;
     vec4 zenith;
     vec4 horizon;
     vec4 cloud_tint;
     vec4 light_dir;
     float cloud_amount;
-    vec3 padding2;
 };
 
 void main() {

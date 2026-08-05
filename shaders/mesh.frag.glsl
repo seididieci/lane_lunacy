@@ -12,6 +12,7 @@ layout(set = 0, binding = 0) uniform MVP {
     mat4 view;
     mat4 projection;
     vec4 light_dir;
+    vec4 fog_color;
 };
 
 layout(set = 0, binding = 1) uniform sampler2D tex;
@@ -41,8 +42,10 @@ void main() {
     vec3 albedo = v_color * tex_col;
     vec3 lit = albedo * (ambient + diff * 0.85);
 
-    float fog = smoothstep(45.0, 260.0, v_depth);
-    vec3 fog_color = vec3(0.88, 0.70, 0.55);
-    vec3 final_col = mix(lit, fog_color, fog);
+    // Long, gentle fog ramp that reaches full opacity exactly at the far clip
+    // plane, so distant geometry fades into the same color as the sky horizon
+    // instead of forming a visible band.
+    float fog = smoothstep(100.0, 600.0, v_depth);
+    vec3 final_col = mix(lit, fog_color.rgb, fog);
     f_color = vec4(final_col, 1.0);
 }

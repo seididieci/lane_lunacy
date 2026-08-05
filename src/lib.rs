@@ -21,7 +21,9 @@ use vulkano::instance::{Instance, InstanceCreateFlags, InstanceCreateInfo};
 use vulkano::swapchain::Surface;
 use vulkano::VulkanLibrary;
 
-pub fn run(gpu_index: usize) {
+use crate::game::Weather;
+
+pub fn run(gpu_index: usize, weather: Weather) {
     let event_loop = EventLoop::new().expect("failed to create event loop");
 
     let library = VulkanLibrary::new().expect("failed to load the Vulkan library");
@@ -37,6 +39,6 @@ pub fn run(gpu_index: usize) {
     )
     .expect("failed to create instance");
 
-    let mut app = app::App::new(instance, gpu_index);
+    let mut app = app::App::new(instance, gpu_index, weather);
     event_loop.run_app(&mut app).expect("event loop failed");
 }

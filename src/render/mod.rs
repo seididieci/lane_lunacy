@@ -691,12 +691,13 @@ impl Renderer {
         self.recreate = false;
     }
 
-    fn mvp_buffer(&self, model: Mat4, view: Mat4, proj: Mat4) -> Subbuffer<MVP> {
+    fn mvp_buffer(&self, model: Mat4, view: Mat4, proj: Mat4, fog_color: [f32; 4]) -> Subbuffer<MVP> {
         let mvp = MVP {
             model: model.to_cols_array_2d(),
             view: view.to_cols_array_2d(),
             projection: proj.to_cols_array_2d(),
             light_dir: LIGHT_DIR,
+            fog_color,
         };
         Buffer::from_data(
             self.memory_allocator.clone(),
@@ -745,6 +746,22 @@ impl Renderer {
 
         let aspect = self.viewport.extent[0] / self.viewport.extent[1];
         let proj = perspective_vulkan(60.0f32.to_radians(), aspect, 0.1, 600.0);
+
+        // Fog color mirrors the sky shader's horizon at t=0 so the mesh fades
+        // into exactly the same color the sky dome shows at the horizon line,
+        // including the weather dim/overcast shift.
+        let cover = {
+            let t = ((game.cloud_amount() - 0.10) / 0.90).clamp(0.0, 1.0);
+            t * t * (3.0 - 2.0 * t)
+        };
+        let dim = 1.0 - 0.22 * cover;
+        let fog_color = [
+            (0.55 + (0.60 - 0.55) * cover) * dim,
+            (0.70 + (0.60 - 0.70) * cover) * dim,
+            (0.92 + (0.63 - 0.92) * cover) * dim,
+            1.0,
+        ];
+
         self.ensure_world_chunks_for_player(game.vehicle.distance);
         let car_pos = Vec3::new(game.player_world_x(), 0.0, game.player_world_z());
         let dt_secs = dt.as_secs_f32().min(0.05);
@@ -799,9 +816,9 @@ impl Renderer {
             projection: proj.to_cols_array_2d(),
             time: self.sky_time,
             _pad: [0.0; 3],
-            zenith: [0.24, 0.38, 0.66, 1.0],
-            horizon: [0.97, 0.72, 0.50, 1.0],
-            cloud_tint: [1.0, 0.90, 0.78, 1.0],
+            zenith: [0.18, 0.42, 0.83, 1.0],
+            horizon: [0.55, 0.70, 0.92, 1.0],
+            cloud_tint: [1.0, 0.97, 0.92, 1.0],
             light_dir: LIGHT_DIR,
             cloud_amount: game.cloud_amount(),
             _pad2: [0.0; 3],
@@ -869,7 +886,7 @@ impl Renderer {
                     texture: Arc<ImageView>,
                     model: Mat4| {
             let index_count = indices.len() as u32;
-            let mvp = self.mvp_buffer(model, view, proj);
+            let mvp = self.mvp_buffer(model, view, proj, fog_color);
             let set_layout = self.mesh_pipeline.layout().set_layouts()[0].clone();
             let set = DescriptorSet::new(
                 self.descriptor_set_allocator.clone(),
