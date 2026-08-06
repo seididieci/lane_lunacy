@@ -38,6 +38,9 @@ pub struct ParticleVertex {
     pub uv: [f32; 2],
     #[format(R32G32B32A32_SFLOAT)]
     pub color: [f32; 4],
+    /// Which sprite atlas cell to sample (0 = rain gaussian, 1..=3 = cloud).
+    #[format(R32_SFLOAT)]
+    pub sprite_variant: f32,
 }
 
 #[derive(BufferContents, Vertex, Default, Clone, Copy, Debug)]

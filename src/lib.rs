@@ -12,6 +12,7 @@ pub mod model;
 pub mod render;
 pub mod road;
 pub mod shaders;
+pub mod surface;
 pub mod ui;
 pub mod vertex;
 

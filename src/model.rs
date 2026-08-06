@@ -141,7 +141,7 @@ fn append_node_meshes(
                     color: *vertex_colors.get(idx).unwrap_or(&[1.0, 1.0, 1.0]),
                     tex_coord: *tex_coords.get(idx).unwrap_or(&[0.0, 0.0]),
                     // Car meshes use their own colormap texture, not the world atlas.
-                    material: 4.0,
+                    material: crate::surface::MAT_CAR,
                 });
             }
 

@@ -3,6 +3,7 @@
 layout(location = 0) in vec2 v_uv;
 layout(location = 1) in vec4 v_color;
 layout(location = 2) in float v_depth;
+layout(location = 3) in float v_variant;
 layout(location = 0) out vec4 f_color;
 
 layout(set = 0, binding = 1) uniform sampler2D sprite;
@@ -15,8 +16,12 @@ layout(set = 0, binding = 0) uniform MVP {
     vec4 fog_color;
 };
 
+// Horizontal sprite atlas: cell 0 = rain gaussian, cells 1..=3 = cloud shapes.
+const float CELL_W = 0.25;
+
 void main() {
-    vec4 tex = texture(sprite, v_uv);
+    vec2 cell_uv = vec2(v_uv.x * CELL_W + v_variant * CELL_W, v_uv.y);
+    vec4 tex = texture(sprite, cell_uv);
     vec3 col = tex.rgb * v_color.rgb;
     float alpha = tex.a * v_color.a;
     // Fade with the same fog ramp as the road so distant streaks melt into

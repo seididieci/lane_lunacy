@@ -28,8 +28,8 @@ void main() {
     float sun_intensity = light_state.y;
     float night_fac = light_state.w;
     vec3 tex_col;
-    // Cars (material 4) use the car colormap directly.
-    if (v_material >= 3.5) {
+    // Cars (material 99) use the car colormap directly.
+    if (v_material >= 90.0) {
         tex_col = texture(tex, v_uv).rgb;
     } else {
         // World texture atlas, one row of 4 slots:

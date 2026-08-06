@@ -3,10 +3,12 @@
 layout(location = 0) in vec3 position;
 layout(location = 1) in vec2 uv;
 layout(location = 2) in vec4 color;
+layout(location = 3) in float sprite_variant;
 
 layout(location = 0) out vec2 v_uv;
 layout(location = 1) out vec4 v_color;
 layout(location = 2) out float v_depth;
+layout(location = 3) out float v_variant;
 
 layout(set = 0, binding = 0) uniform MVP {
     mat4 model;
@@ -19,6 +21,7 @@ layout(set = 0, binding = 0) uniform MVP {
 void main() {
     v_uv = uv;
     v_color = color;
+    v_variant = sprite_variant;
     vec4 view_pos = view * vec4(position, 1.0);
     v_depth = -view_pos.z;
     gl_Position = projection * view_pos;

@@ -12,6 +12,8 @@ pub struct Vehicle {
     pub heading: f32,
     /// Remaining seconds of perfect-shift acceleration boost.
     pub boost: f32,
+    /// Whether the player was holding throttle this frame (drives launch dust).
+    pub throttle: bool,
 }
 
 impl Vehicle {
@@ -24,6 +26,7 @@ impl Vehicle {
             gear: 1,
             heading: 0.0,
             boost: 0.0,
+            throttle: false,
         }
     }
 
@@ -35,6 +38,7 @@ impl Vehicle {
         self.gear = 1;
         self.heading = 0.0;
         self.boost = 0.0;
+        self.throttle = false;
     }
 
     /// RPM at the current speed and gear. Idles at standstill, reaches
@@ -121,6 +125,7 @@ impl Vehicle {
             self.speed -= COAST_DECEL * dt;
         }
         self.speed = self.speed.clamp(0.0, speed_limit);
+        self.throttle = drivetrain_live && input.throttle;
     }
 }
 

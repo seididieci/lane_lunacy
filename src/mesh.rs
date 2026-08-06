@@ -1,31 +1,13 @@
 // SPDX-License-Identifier: MIT
 
 use crate::road::{road_curve, ROAD_HALF};
+use crate::surface::{material_at, SurfaceMaterial};
 use crate::vertex::Vertex3d;
 
-/// Texture atlas slots (see mesh.frag.glsl), left to right.
-const MAT_ASPHALT_BASE: f32 = 0.0;
-const MAT_ASPHALT_WORN: f32 = 1.0;
-const MAT_ASPHALT_CRACKED: f32 = 2.0;
-const MAT_GRASS: f32 = 3.0;
-/// UV scale (tiles per metre). Kept intentionally low so texture detail stays subtle.
-const ASPHALT_SCALE: f32 = 0.32;
-const GRASS_SCALE: f32 = 0.10;
-
-/// Picks an asphalt variant per long block so worn/cracked stretches appear
-/// occasionally and subtly instead of alternating every few metres.
-fn road_material(s: f32) -> f32 {
-    let block = (s / 96.0).floor() as i32;
-    let h = block.wrapping_mul(1_103_515_245).wrapping_add(12_345);
-    let r = ((h >> 16) & 0x7fff) as f32 / 32767.0;
-    if r < 0.03 {
-        MAT_ASPHALT_CRACKED
-    } else if r < 0.15 {
-        MAT_ASPHALT_WORN
-    } else {
-        MAT_ASPHALT_BASE
-    }
-}
+/// Shortcuts for the ribbon cross-section's fixed surfaces. The asphalt slots
+/// and UV scales live in `surface.rs` so the mesh and gameplay agree.
+const ASPHALT_BASE: SurfaceMaterial = SurfaceMaterial::AsphaltBase;
+const GRASS: SurfaceMaterial = SurfaceMaterial::Grass;
 
 fn push_quad(
     v: &mut Vec<Vertex3d>,
@@ -93,8 +75,8 @@ pub fn build_world_chunk(start_s: f32, chunk_len: f32) -> (Vec<Vertex3d>, Vec<u3
             [x1 - 44.0, 0.0, z1],
             [0.0, 1.0, 0.0],
             ground,
-            MAT_GRASS,
-            GRASS_SCALE,
+            GRASS.atlas_slot(),
+            GRASS.uv_scale(),
         );
         s_ground += step;
     }
@@ -114,6 +96,9 @@ pub fn build_world_chunk(start_s: f32, chunk_len: f32) -> (Vec<Vertex3d>, Vec<u3
         let x1 = road_curve(s1);
         let z0 = -s0;
         let z1 = -s1;
+        let asphalt = material_at(s0, 0.0);
+        let asphalt_slot = asphalt.atlas_slot();
+        let asphalt_scale = asphalt.uv_scale();
 
         // asphalt
         push_quad(
@@ -125,8 +110,8 @@ pub fn build_world_chunk(start_s: f32, chunk_len: f32) -> (Vec<Vertex3d>, Vec<u3
             [x1 - half_w, 0.02, z1],
             [0.0, 1.0, 0.0],
             road,
-            road_material(s0),
-            ASPHALT_SCALE,
+            asphalt_slot,
+            asphalt_scale,
         );
 
         let shoulder_col = if ((s0 / 4.0) as i32) % 2 == 0 {
@@ -145,8 +130,8 @@ pub fn build_world_chunk(start_s: f32, chunk_len: f32) -> (Vec<Vertex3d>, Vec<u3
             [x1 - half_w - 0.55, 0.021, z1],
             [0.0, 1.0, 0.0],
             shoulder_col,
-            MAT_ASPHALT_BASE,
-            ASPHALT_SCALE,
+            ASPHALT_BASE.atlas_slot(),
+            ASPHALT_BASE.uv_scale(),
         );
 
         // right shoulder strip
@@ -159,8 +144,8 @@ pub fn build_world_chunk(start_s: f32, chunk_len: f32) -> (Vec<Vertex3d>, Vec<u3
             [x1 + half_w, 0.021, z1],
             [0.0, 1.0, 0.0],
             shoulder_col,
-            MAT_ASPHALT_BASE,
-            ASPHALT_SCALE,
+            ASPHALT_BASE.atlas_slot(),
+            ASPHALT_BASE.uv_scale(),
         );
 
         // grass verge strips to soften shoulder->terrain transition
@@ -173,8 +158,8 @@ pub fn build_world_chunk(start_s: f32, chunk_len: f32) -> (Vec<Vertex3d>, Vec<u3
             [x1 - half_w - 1.1, 0.016, z1],
             [0.0, 1.0, 0.0],
             verge,
-            MAT_GRASS,
-            GRASS_SCALE,
+            GRASS.atlas_slot(),
+            GRASS.uv_scale(),
         );
         push_quad(
             &mut v,
@@ -185,8 +170,8 @@ pub fn build_world_chunk(start_s: f32, chunk_len: f32) -> (Vec<Vertex3d>, Vec<u3
             [x1 + half_w + 0.55, 0.016, z1],
             [0.0, 1.0, 0.0],
             verge,
-            MAT_GRASS,
-            GRASS_SCALE,
+            GRASS.atlas_slot(),
+            GRASS.uv_scale(),
         );
 
         // edge lines
@@ -199,8 +184,8 @@ pub fn build_world_chunk(start_s: f32, chunk_len: f32) -> (Vec<Vertex3d>, Vec<u3
             [x1 - half_w + 0.10, 0.025, z1],
             [0.0, 1.0, 0.0],
             edge_line,
-            MAT_ASPHALT_BASE,
-            ASPHALT_SCALE,
+            ASPHALT_BASE.atlas_slot(),
+            ASPHALT_BASE.uv_scale(),
         );
         push_quad(
             &mut v,
@@ -211,8 +196,8 @@ pub fn build_world_chunk(start_s: f32, chunk_len: f32) -> (Vec<Vertex3d>, Vec<u3
             [x1 + half_w - 0.18, 0.025, z1],
             [0.0, 1.0, 0.0],
             edge_line,
-            MAT_ASPHALT_BASE,
-            ASPHALT_SCALE,
+            ASPHALT_BASE.atlas_slot(),
+            ASPHALT_BASE.uv_scale(),
         );
 
         // dashed center line
@@ -226,8 +211,8 @@ pub fn build_world_chunk(start_s: f32, chunk_len: f32) -> (Vec<Vertex3d>, Vec<u3
                 [x1 - 0.09, 0.026, z1],
                 [0.0, 1.0, 0.0],
                 center_line,
-                MAT_ASPHALT_BASE,
-                ASPHALT_SCALE,
+                ASPHALT_BASE.atlas_slot(),
+                ASPHALT_BASE.uv_scale(),
             );
         }
         s += step;
@@ -246,8 +231,8 @@ pub fn build_world_chunk(start_s: f32, chunk_len: f32) -> (Vec<Vertex3d>, Vec<u3
                 [px - 0.07, 0.0, z - 0.07],
                 [px + 0.07, 1.05, z + 0.07],
                 [0.93, 0.93, 0.9],
-                MAT_ASPHALT_BASE,
-                ASPHALT_SCALE,
+                ASPHALT_BASE.atlas_slot(),
+                ASPHALT_BASE.uv_scale(),
             );
             push_box(
                 &mut v,
@@ -259,8 +244,8 @@ pub fn build_world_chunk(start_s: f32, chunk_len: f32) -> (Vec<Vertex3d>, Vec<u3
                 } else {
                     [0.24, 0.58, 0.95]
                 },
-                MAT_ASPHALT_BASE,
-                ASPHALT_SCALE,
+                ASPHALT_BASE.atlas_slot(),
+                ASPHALT_BASE.uv_scale(),
             );
         }
         post_s += 18.0;
@@ -299,8 +284,8 @@ pub fn build_world_chunk(start_s: f32, chunk_len: f32) -> (Vec<Vertex3d>, Vec<u3
                     [min_x, base_y, z0],
                     [max_x, top_y, z1],
                     *col,
-                    MAT_GRASS,
-                    GRASS_SCALE,
+                    GRASS.atlas_slot(),
+                    GRASS.uv_scale(),
                 );
             }
         }

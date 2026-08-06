@@ -1,18 +1,22 @@
 // SPDX-License-Identifier: MIT
 
-//! CPU billboard rain particles.
+//! CPU billboard rain particles, drift dust, and traffic lights.
 //!
 //! `RainSystem` keeps a fixed pool of streak drops inside a camera-following
 //! box, advances them each frame (fast fall with wrap-around respawn), and
 //! bakes the billboard quads into a per-frame vertex buffer. Streaks lean
 //! along the apparent motion (gravity plus the player's forward speed) so the
-//! rain reads as streaming toward the camera. The billboard build is the
-//! reusable piece: the same CPU-quad pass can later feed dust puffs or mist.
+//! rain reads as streaming toward the camera. `DustSystem` spawns clumped,
+//! slow-drifting cloud puffs on hard steering/sideslip; `build_taillights`
+//! and `build_headlights` are the night-time traffic glows. All share the same
+//! camera-facing CPU-quad pass and a sprite atlas (cell 0 = rain gaussian,
+//! cells 1..=3 = organic cloud shapes).
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use glam::Vec3;
 
+use crate::surface::DustProfile;
 use crate::vertex::ParticleVertex;
 
 const MAX_DROPS: usize = 700;
@@ -89,10 +93,189 @@ impl RainSystem {
             let bottom = d.pos - d.axis * half_len;
             let l = -right * half_w;
             let r = right * half_w;
-            push_quad(&mut out, top + l, top + r, bottom + r, bottom + l, color);
+            push_quad(&mut out, top + l, top + r, bottom + r, bottom + l, color, 0.0);
         }
         out
     }
+}
+
+/// Ground-constrained dust clouds kicked up on hard steering/sideslip.
+/// World-stationary (the camera drives past them), capped and recycled.
+const MAX_PUFFS: usize = 384;
+/// Emission ticks per second at full drift; each tick spawns a small clump.
+const PUFFS_PER_SEC: f32 = 22.0;
+/// Puffs spawned per emission tick, tightly clustered so they overlap into a
+/// single cloud instead of reading as separate dots.
+const PUFFS_PER_TICK: usize = 5;
+/// Weak gravity so the cloud lingers and drifts gently upward ("evaporating")
+/// instead of collapsing onto the asphalt or billowing like steam.
+const PUFF_GRAVITY: f32 = -1.0;
+/// Longest puff life in seconds; randomized below this so puffs desync. Long
+/// enough that at low speed the cloud stays around the tires, rises into a
+/// visible haze and fades in place, while at speed the car/camera drives past
+/// it so it streams backward through the camera and culls behind the eye.
+const PUFF_MAX_LIFE: f32 = 2.4;
+/// Lowest height a puff's center keeps (the road plane is y=0.02 with depth
+/// write on; sitting above it avoids being depth-culled by the asphalt).
+const PUFF_MIN_Y: f32 = 0.08;
+
+#[derive(Clone, Copy, Debug)]
+struct Puff {
+    pos: Vec3,
+    vel: Vec3,
+    life: f32,
+    size: f32,
+    color: Vec3,
+    alpha: f32,
+    variant: f32,
+    up: f32,
+}
+
+pub struct DustSystem {
+    puffs: Vec<Puff>,
+    rng: Rng,
+    spawn_accum: f32,
+}
+
+impl DustSystem {
+    pub fn new() -> Self {
+        DustSystem {
+            puffs: Vec::with_capacity(MAX_PUFFS),
+            rng: Rng::new(),
+            spawn_accum: 0.0,
+        }
+    }
+
+    /// Advances alive puffs and spawns fresh clumps from `drift` (0..1), the
+    /// material-scaled drift metric. Puffs rise off the rear corners, drift
+    /// slowly backward and upward, and fade out after lingering.
+    pub fn update(
+        &mut self,
+        dt: f32,
+        drift: f32,
+        profile: &DustProfile,
+        rear_points: [Vec3; 2],
+        car_forward: Vec3,
+    ) {
+        for p in &mut self.puffs {
+            p.life -= dt;
+            p.vel.y += PUFF_GRAVITY * dt;
+            p.pos += p.vel * dt;
+            if p.pos.y < PUFF_MIN_Y {
+                p.pos.y = PUFF_MIN_Y;
+                p.vel.y = p.vel.y.abs() * 0.2;
+            }
+        }
+        self.puffs.retain(|p| p.life > 0.0);
+
+        if drift <= 0.001 {
+            return;
+        }
+        self.spawn_accum += drift * PUFFS_PER_SEC * dt;
+        while self.spawn_accum >= 1.0 {
+            self.spawn_accum -= 1.0;
+            self.spawn_clump(profile, &rear_points, car_forward);
+        }
+    }
+
+    /// Spawns a tight clump at one rear corner: a few puffs within a few
+    /// centimeters of each other, pushed outward off the tire and gently
+    /// backward and up, so the cluster hangs together, spreads across the road
+    /// behind the car and rises into a visible cloud before fading.
+    fn spawn_clump(&mut self, profile: &DustProfile, rear_points: &[Vec3; 2], car_forward: Vec3) {
+        let idx = (self.rng.next() & 1) as usize;
+        let wheel = rear_points[idx];
+        // The rear points are the left (index 0) and right (index 1) corners;
+        // outward means away from the car's centerline along the right vector.
+        let outward = car_forward.cross(Vec3::Y) * if idx == 1 { 1.0 } else { -1.0 };
+        for _ in 0..PUFFS_PER_TICK {
+            if self.puffs.len() >= MAX_PUFFS {
+                self.puffs.remove(0);
+            }
+            let kick_back = -car_forward * self.rng.range(0.4, 1.0);
+            let vel = kick_back
+                + outward * self.rng.range(0.3, 0.7)
+                + Vec3::new(
+                    self.rng.range(-0.15, 0.15),
+                    self.rng.range(0.6, 1.2),
+                    self.rng.range(-0.15, 0.15),
+                );
+            self.puffs.push(Puff {
+                pos: wheel
+                    + Vec3::new(
+                        self.rng.range(-0.05, 0.05),
+                        self.rng.range(0.10, 0.25),
+                        self.rng.range(-0.05, 0.05),
+                    ),
+                vel,
+                life: self.rng.range(1.5, PUFF_MAX_LIFE),
+                size: 0.42 * profile.puff_scale * self.rng.range(0.85, 1.15),
+                color: Vec3::from(profile.color),
+                alpha: profile.alpha * 0.28,
+                variant: 1.0 + (self.rng.next() % 3) as f32,
+                up: self.rng.range(0.7, 1.4),
+            });
+        }
+    }
+
+    /// Bakes one camera-facing cloud quad per puff. Puffs behind the camera
+    /// are skipped; size swells slowly and alpha pops in fast, holds, then
+    /// fades out in the last part of the puff's life.
+    pub fn build_vertices(&self, eye: Vec3, right: Vec3) -> Vec<ParticleVertex> {
+        let right = right.normalize_or_zero();
+        let mut out = Vec::with_capacity(self.puffs.len() * 6);
+        for p in &self.puffs {
+            if p.pos.z - eye.z > 5.0 {
+                continue;
+            }
+            let t = 1.0 - p.life / PUFF_MAX_LIFE;
+            let fade = smoothstep(0.0, 0.12, t) * (1.0 - smoothstep(0.55, 1.0, t));
+            let size = p.size * (0.9 + t * 0.7);
+            let color = [p.color.x, p.color.y, p.color.z, p.alpha * fade];
+            let side = right * size;
+            let up = Vec3::Y * size * 0.7 * p.up;
+            let tl = p.pos - side + up;
+            let tr = p.pos + side + up;
+            let br = p.pos + side - up;
+            let bl = p.pos - side - up;
+            push_quad(&mut out, tl, tr, br, bl, color, p.variant);
+        }
+        out
+    }
+}
+
+/// Drift intensity (0..1) driving dust emission, scaled by the surface's
+/// dustiness (`emission`). Combines three physical cues plus a minimal
+/// baseline so dustier materials always trail a little:
+///   - sideslip (`lateral_velocity`), the world-space lateral offset rate;
+///   - hard steering (`steer`), so yanking the wheel bursts dust instantly
+///     even before slip builds up;
+///   - launch/traction (`throttle` at low speed), so take-off kicks a cloud.
+pub fn drift_intensity(
+    speed: f32,
+    lateral_velocity: f32,
+    steer: f32,
+    throttle: bool,
+    emission: f32,
+) -> f32 {
+    if speed <= 0.0 || emission <= 0.0 {
+        return 0.0;
+    }
+    let speed_gate = smoothstep(6.0, 18.0, speed);
+    let slip = (lateral_velocity.abs() / 4.0).clamp(0.0, 1.0) * speed_gate;
+    let steer_kick = smoothstep(0.6, 0.9, steer.abs()) * speed_gate;
+    let launch = if throttle {
+        (1.0 - speed / 6.0).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let combined = (slip + steer_kick + launch + 0.12).clamp(0.0, 1.0);
+    combined * emission
+}
+
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 /// Bakes a soft radial RGBA sprite (gaussian blob, white core fading to clear)
@@ -113,6 +296,67 @@ pub fn generate_soft_sprite(size: u32) -> Vec<u8> {
             out.push(255);
             out.push(255);
             out.push(255);
+            out.push((a * 255.0) as u8);
+        }
+    }
+    out
+}
+
+/// Bakes an organic, irregular cloud sprite (RGBA) for dust puffs. A large
+/// central blob plus a couple of near-center lobes guarantee a dense core,
+/// while scattered outer blobs shape the billowy rim. Alpha uses a soft
+/// saturating falloff so overlapping plateaus merge seamlessly into one
+/// churning cloud instead of separate dots. Different seeds reshape the
+/// scattered lobes while keeping the guaranteed core.
+pub fn generate_cloud_sprite(size: u32, seed: u64) -> Vec<u8> {
+    let n = size as usize;
+    let mut s = seed | 1;
+    let mut next = move || {
+        let mut x = s;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        s = x;
+        x as f32 / u64::MAX as f32
+    };
+    // Blob kernels: (offset_x, offset_y, radius) in -1..1 cell units.
+    let blobs: Vec<(f32, f32, f32)> = (0..8)
+        .map(|i| match i {
+            0 => (0.0, 0.0, 0.30 + next() * 0.08),
+            1 => ((next() - 0.5) * 0.36, (next() - 0.5) * 0.36, 0.18 + next() * 0.10),
+            _ => ((next() - 0.5) * 0.8, (next() - 0.5) * 0.8, 0.15 + next() * 0.20),
+        })
+        .collect();
+    let center = (n as f32 - 1.0) * 0.5;
+    let radius = n as f32 * 0.5;
+    let mut out = Vec::with_capacity(n * n * 4);
+    for py in 0..n {
+        for px in 0..n {
+            let nx = (px as f32 - center) / radius; // -1..1
+            let ny = (py as f32 - center) / radius;
+            // Hard-transparent rim so atlas cells never bleed under bilinear
+            // filtering.
+            if nx.abs() > 0.92 || ny.abs() > 0.92 {
+                out.extend_from_slice(&[255, 255, 255, 0]);
+                continue;
+            }
+            let mut d = 0.0;
+            for &(bx, by, br) in &blobs {
+                let dx = nx - bx;
+                let dy = ny - by;
+                d += (-(dx * dx + dy * dy) / (br * br)).exp();
+            }
+            // Soft saturating falloff: dense interiors reach full alpha, the
+            // single rim fades to clear.
+            let a = 1.0 - (-d * 2.2).exp();
+            // Low-frequency internal shading (gently darker lobes): kept low in
+            // contrast so overlapping puffs read as one smooth haze rather than
+            // bright spots/rings when they blend together.
+            let shade = 0.72 + 0.28 * d / (d + 0.8);
+            let c = (255.0 * shade).clamp(0.0, 255.0);
+            out.push(c as u8);
+            out.push(c as u8);
+            out.push(c as u8);
             out.push((a * 255.0) as u8);
         }
     }
@@ -146,7 +390,7 @@ pub fn build_taillights(
         let tr = c + side + up;
         let br = c + side - up;
         let bl = c - side - up;
-        push_quad(&mut out, tl, tr, br, bl, color);
+        push_quad(&mut out, tl, tr, br, bl, color, 0.0);
     }
     out
 }
@@ -183,13 +427,13 @@ pub fn build_headlights(
         let tr = *center + side + up;
         let br = *center + side - up;
         let bl = *center - side - up;
-        push_quad(&mut out, tl, tr, br, bl, disc);
+        push_quad(&mut out, tl, tr, br, bl, disc, 0.0);
         // Soft halo around the disc.
         let tl = *center - halo_side + halo_up;
         let tr = *center + halo_side + halo_up;
         let br = *center + halo_side - halo_up;
         let bl = *center - halo_side - halo_up;
-        push_quad(&mut out, tl, tr, br, bl, halo);
+        push_quad(&mut out, tl, tr, br, bl, halo, 0.0);
         // Light pool cast on the road ahead of the light, following the full
         // horizontal beam direction (so it stays on the asphalt around curves).
         let pool_center = Vec3::new(center.x, 0.02, center.z);
@@ -201,7 +445,7 @@ pub fn build_headlights(
             let tr = pool_center + along - across;
             let br = pool_center - along - across;
             let bl = pool_center - along + across;
-            push_quad(&mut out, tl, tr, br, bl, pool);
+            push_quad(&mut out, tl, tr, br, bl, pool, 0.0);
         }
     }
     out
@@ -230,13 +474,14 @@ fn push_quad(
     br: Vec3,
     bl: Vec3,
     color: [f32; 4],
+    sprite_variant: f32,
 ) {
-    out.push(ParticleVertex { position: tl.to_array(), uv: [0.0, 0.0], color });
-    out.push(ParticleVertex { position: tr.to_array(), uv: [1.0, 0.0], color });
-    out.push(ParticleVertex { position: br.to_array(), uv: [1.0, 1.0], color });
-    out.push(ParticleVertex { position: tl.to_array(), uv: [0.0, 0.0], color });
-    out.push(ParticleVertex { position: br.to_array(), uv: [1.0, 1.0], color });
-    out.push(ParticleVertex { position: bl.to_array(), uv: [0.0, 1.0], color });
+    out.push(ParticleVertex { position: tl.to_array(), uv: [0.0, 0.0], color, sprite_variant });
+    out.push(ParticleVertex { position: tr.to_array(), uv: [1.0, 0.0], color, sprite_variant });
+    out.push(ParticleVertex { position: br.to_array(), uv: [1.0, 1.0], color, sprite_variant });
+    out.push(ParticleVertex { position: tl.to_array(), uv: [0.0, 0.0], color, sprite_variant });
+    out.push(ParticleVertex { position: br.to_array(), uv: [1.0, 1.0], color, sprite_variant });
+    out.push(ParticleVertex { position: bl.to_array(), uv: [0.0, 1.0], color, sprite_variant });
 }
 
 /// Small xorshift PRNG (no external rand dependency).
@@ -264,6 +509,34 @@ mod tests {
     }
 
     #[test]
+    fn traffic_lights_use_the_rain_sprite_cell() {
+        let centers = vec![Vec3::new(0.0, 0.0, -5.0)];
+        let verts = build_taillights(&centers, Vec3::ZERO, Vec3::X, 1.0);
+        assert!(verts.iter().all(|v| v.sprite_variant == 0.0));
+        let lights = vec![(Vec3::new(0.0, 0.0, -5.0), Vec3::new(0.0, 0.0, 1.0))];
+        let verts = build_headlights(&lights, Vec3::ZERO, Vec3::X, 1.0);
+        assert!(verts.iter().all(|v| v.sprite_variant == 0.0));
+    }
+
+    #[test]
+    fn cloud_sprites_are_opaque_in_the_middle_and_transparent_at_the_rim() {
+        let sprite = generate_cloud_sprite(128, 42);
+        let n = 128usize;
+        let max_alpha = sprite
+            .chunks_exact(4)
+            .map(|px| px[3])
+            .max()
+            .unwrap_or(0) as f32
+            / 255.0;
+        assert!(max_alpha > 0.9, "the cloud core is dense: {max_alpha}");
+        // Rim texels must be fully transparent so atlas cells don't bleed.
+        for (px, py) in [(0usize, 0usize), (n - 1, 0), (0, n - 1), (n - 1, n - 1)] {
+            let idx = (py * n + px) * 4 + 3;
+            assert_eq!(sprite[idx], 0, "rim texel must be transparent");
+        }
+    }
+
+    #[test]
     fn headlights_emit_discs_halos_and_a_road_pool() {
         let lights = vec![(Vec3::new(2.0, 0.8, -10.0), Vec3::new(0.0, 0.0, 1.0))];
         let verts = build_headlights(&lights, Vec3::ZERO, Vec3::X, 1.0);
@@ -282,6 +555,99 @@ mod tests {
     fn headlights_turn_off_with_zero_intensity() {
         let lights = vec![(Vec3::new(0.0, 0.0, -5.0), Vec3::new(0.0, 0.0, 1.0))];
         assert!(build_headlights(&lights, Vec3::ZERO, Vec3::X, 0.0).is_empty());
+    }
+
+    #[test]
+    fn drift_intensity_gates_on_speed_slip_steer_launch_and_material() {
+        // Non-dusty surface or standstill -> no dust.
+        assert_eq!(drift_intensity(40.0, 6.0, 1.0, false, 0.0), 0.0);
+        assert_eq!(drift_intensity(0.0, 6.0, 1.0, true, 1.0), 0.0);
+
+        // Straight cruise on a dusty surface: only the minimal ambient trail.
+        let ambient = drift_intensity(40.0, 0.0, 0.0, false, 1.0);
+        assert!((0.0..0.3).contains(&ambient), "minimal ambient baseline: {ambient}");
+
+        // Each cue adds dust over the baseline.
+        let slip = drift_intensity(40.0, 6.0, 0.0, false, 1.0);
+        let steer = drift_intensity(40.0, 0.0, 1.0, false, 1.0);
+        let launch = drift_intensity(3.0, 0.0, 0.0, true, 1.0);
+        assert!(slip > ambient, "sideslip adds dust");
+        assert!(steer > ambient, "hard steering adds dust");
+        assert!(launch > ambient, "launch adds dust");
+
+        // Emission scales the whole thing.
+        let dusty = drift_intensity(40.0, 6.0, 1.0, false, 1.0);
+        let worn = drift_intensity(40.0, 6.0, 1.0, false, 0.6);
+        assert!(worn > 0.0 && worn < dusty, "dust scales with emission");
+    }
+
+    #[test]
+    fn dust_spawns_on_drift_and_builds_camera_facing_quads() {
+        let mut dust = DustSystem::new();
+        let profile = DustProfile {
+            emission: 1.0,
+            color: [0.5, 0.45, 0.4],
+            puff_scale: 1.0,
+            alpha: 0.6,
+        };
+        let rear = [
+            Vec3::new(-0.9, 0.0, -2.0),
+            Vec3::new(0.9, 0.0, -2.0),
+        ];
+        dust.update(0.5, 1.0, &profile, rear, Vec3::NEG_Z);
+        assert!(!dust.puffs.is_empty(), "drift spawns puffs");
+        let verts = dust.build_vertices(Vec3::ZERO, Vec3::X);
+        assert_eq!(verts.len(), dust.puffs.len() * 6, "one quad per puff");
+        assert!(
+            verts.iter().all(|v| v.position[1] < 1.5),
+            "dust stays a low cloud near the road surface"
+        );
+        assert!(
+            verts
+                .iter()
+                .all(|v| (1.0..=3.0).contains(&v.sprite_variant)),
+            "dust uses cloud sprite cells"
+        );
+    }
+
+    #[test]
+    fn dust_culls_puffs_behind_the_camera() {
+        let mut dust = DustSystem::new();
+        let profile = DustProfile {
+            emission: 1.0,
+            color: [0.5, 0.45, 0.4],
+            puff_scale: 1.0,
+            alpha: 0.6,
+        };
+        // Rear points behind the eye (z > 5); driving toward +Z keeps them there.
+        let rear = [
+            Vec3::new(-0.9, 0.0, 10.0),
+            Vec3::new(0.9, 0.0, 10.0),
+        ];
+        dust.update(0.5, 1.0, &profile, rear, Vec3::Z);
+        assert!(!dust.puffs.is_empty(), "a full second of drift must spawn puffs");
+        assert!(dust.build_vertices(Vec3::ZERO, Vec3::X).is_empty());
+    }
+
+    #[test]
+    fn dust_puffs_age_out_and_stop_spawning_without_drift() {
+        let mut dust = DustSystem::new();
+        let profile = DustProfile {
+            emission: 1.0,
+            color: [0.5, 0.45, 0.4],
+            puff_scale: 1.0,
+            alpha: 0.6,
+        };
+        let rear = [
+            Vec3::new(-0.9, 0.0, -2.0),
+            Vec3::new(0.9, 0.0, -2.0),
+        ];
+        dust.update(1.0, 1.0, &profile, rear, Vec3::NEG_Z);
+        assert!(!dust.puffs.is_empty());
+        // All puffs die within 2.5s of life; no drift spawns replacements.
+        dust.update(2.5, 0.0, &profile, rear, Vec3::NEG_Z);
+        assert!(dust.puffs.is_empty());
+        assert!(dust.build_vertices(Vec3::ZERO, Vec3::X).is_empty());
     }
 }
 

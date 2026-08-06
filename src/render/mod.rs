@@ -58,12 +58,13 @@ use crate::model::{load_gltf_mesh_from_bytes, CarLightAnchors};
 use crate::render::camera::{perspective_vulkan, Camera};
 use crate::render::cloud::generate_cloud_tile;
 use crate::render::daynight::Lights;
-use crate::render::particles::{generate_soft_sprite, RainSystem};
+use crate::render::particles::{generate_soft_sprite, drift_intensity, DustSystem, RainSystem};
 use crate::render::texture::{
     make_mesh_buffers, upload_rgba8_texture, upload_rgba8_texture_mipmapped,
 };
-use crate::road::road_tangent;
+use crate::road::{road_tangent, CAR_HALF_W, CAR_LEN};
 use crate::shaders::{self, MVP, SkyUniform};
+use crate::surface::material_at;
 use crate::vertex::{FlareVertex, HudVertex, ParticleVertex, Vertex3d};
 
 pub mod camera;
@@ -103,6 +104,7 @@ pub struct Renderer {
     hud_pipeline: Arc<GraphicsPipeline>,
     sky_pipeline: Arc<GraphicsPipeline>,
     particle_pipeline: Arc<GraphicsPipeline>,
+    dust_pipeline: Arc<GraphicsPipeline>,
     flare_pipeline: Arc<GraphicsPipeline>,
     flare_core_view: Arc<ImageView>,
     flare_streak_view: Arc<ImageView>,
@@ -110,6 +112,7 @@ pub struct Renderer {
     particle_sprite_view: Arc<ImageView>,
     particle_sampler: Arc<Sampler>,
     rain: RainSystem,
+    dust: DustSystem,
     hud_descriptor_set: Arc<DescriptorSet>,
     mesh_sampler: Arc<Sampler>,
     world_texture_view: Arc<ImageView>,
@@ -408,8 +411,8 @@ impl Renderer {
             device.clone(),
             None,
             GraphicsPipelineCreateInfo {
-                stages: particle_stages.into_iter().collect(),
-                vertex_input_state: Some(particle_vertex_input),
+                stages: particle_stages.clone().into_iter().collect(),
+                vertex_input_state: Some(particle_vertex_input.clone()),
                 input_assembly_state: Some(InputAssemblyState::default()),
                 viewport_state: Some(ViewportState::default()),
                 rasterization_state: Some(RasterizationState {
@@ -439,28 +442,86 @@ impl Renderer {
                     },
                 )),
                 dynamic_state: [DynamicState::Viewport].into_iter().collect(),
-                subpass: Some(particle_subpass.into()),
-                ..GraphicsPipelineCreateInfo::layout(particle_layout)
+                subpass: Some(particle_subpass.clone().into()),
+                ..GraphicsPipelineCreateInfo::layout(particle_layout.clone())
             },
         )
         .expect("particle pipeline");
 
-        let (particle_sprite_view, particle_sprite_mips) = upload_rgba8_texture_mipmapped(
+        // Dust uses normal alpha blending instead of additive: the cloud must
+        // accumulate opacity smoothly where puffs overlap, rather than adding
+        // RGB and producing bright bokeh/interference rings at the seams.
+        let dust_pipeline = GraphicsPipeline::new(
+            device.clone(),
+            None,
+            GraphicsPipelineCreateInfo {
+                stages: particle_stages.into_iter().collect(),
+                vertex_input_state: Some(particle_vertex_input),
+                input_assembly_state: Some(InputAssemblyState::default()),
+                viewport_state: Some(ViewportState::default()),
+                rasterization_state: Some(RasterizationState {
+                    cull_mode: CullMode::None,
+                    ..Default::default()
+                }),
+                multisample_state: Some(MultisampleState::default()),
+                depth_stencil_state: Some(DepthStencilState {
+                    depth: Some(DepthState {
+                        write_enable: false,
+                        compare_op: CompareOp::Less,
+                    }),
+                    ..Default::default()
+                }),
+                color_blend_state: Some(ColorBlendState::with_attachment_states(
+                    particle_subpass.num_color_attachments(),
+                    ColorBlendAttachmentState {
+                        blend: Some(AttachmentBlend {
+                            src_color_blend_factor: BlendFactor::SrcAlpha,
+                            dst_color_blend_factor: BlendFactor::OneMinusSrcAlpha,
+                            color_blend_op: BlendOp::Add,
+                            src_alpha_blend_factor: BlendFactor::SrcAlpha,
+                            dst_alpha_blend_factor: BlendFactor::OneMinusSrcAlpha,
+                            alpha_blend_op: BlendOp::Add,
+                        }),
+                        ..Default::default()
+                    },
+                )),
+                dynamic_state: [DynamicState::Viewport].into_iter().collect(),
+                subpass: Some(particle_subpass.into()),
+                ..GraphicsPipelineCreateInfo::layout(particle_layout)
+            },
+        )
+        .expect("dust pipeline");
+
+        // Sprite atlas for the particle pipeline: a horizontal strip of four
+        // 128x128 cells. Cell 0 = rain gaussian (also used by taillights and
+        // headlights, variant 0); cells 1..=3 = organic cloud shapes for dust.
+        let sprite_atlas_w = 512u32;
+        let sprite_atlas_h = 128u32;
+        let mut sprite_atlas = Vec::with_capacity((sprite_atlas_w * sprite_atlas_h * 4) as usize);
+        let gaussian = generate_soft_sprite(128);
+        sprite_atlas.extend_from_slice(&gaussian);
+        for seed in [
+            0x9E3779B97F4A7C15u64,
+            0xBF58476D1CE4E5B9u64,
+            0x94D049BB133111EBu64,
+        ] {
+            sprite_atlas.extend_from_slice(&particles::generate_cloud_sprite(128, seed));
+        }
+        let particle_sprite_view = upload_rgba8_texture(
             memory_allocator.clone(),
             command_allocator.clone(),
             queue.clone(),
-            128,
-            128,
-            generate_soft_sprite(128),
+            sprite_atlas_w,
+            sprite_atlas_h,
+            sprite_atlas,
         );
         let particle_sampler = Sampler::new(
             device.clone(),
             SamplerCreateInfo {
                 mag_filter: vulkano::image::sampler::Filter::Linear,
                 min_filter: vulkano::image::sampler::Filter::Linear,
-                mipmap_mode: SamplerMipmapMode::Linear,
                 address_mode: [SamplerAddressMode::ClampToEdge; 3],
-                lod: 0.0..=particle_sprite_mips.saturating_sub(1) as f32,
+                lod: 0.0..=0.0,
                 ..Default::default()
             },
         )
@@ -792,6 +853,7 @@ impl Renderer {
             hud_pipeline,
             sky_pipeline,
             particle_pipeline,
+            dust_pipeline,
             flare_pipeline,
             flare_core_view,
             flare_streak_view,
@@ -799,6 +861,7 @@ impl Renderer {
             particle_sprite_view,
             particle_sampler,
             rain: RainSystem::new(),
+            dust: DustSystem::new(),
             hud_descriptor_set,
             mesh_sampler,
             world_texture_view,
@@ -966,6 +1029,7 @@ impl Renderer {
     fn draw_particles(
         &self,
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+        pipeline: &Arc<GraphicsPipeline>,
         verts: &[ParticleVertex],
         view: Mat4,
         proj: Mat4,
@@ -989,7 +1053,7 @@ impl Renderer {
             headlight_pos,
             headlight_dir,
         );
-        let particle_set_layout = self.particle_pipeline.layout().set_layouts()[0].clone();
+        let particle_set_layout = pipeline.layout().set_layouts()[0].clone();
         let particle_set = DescriptorSet::new(
             self.descriptor_set_allocator.clone(),
             particle_set_layout,
@@ -1018,11 +1082,11 @@ impl Renderer {
         )
         .expect("particle buffer");
         builder
-            .bind_pipeline_graphics(self.particle_pipeline.clone())
+            .bind_pipeline_graphics(pipeline.clone())
             .expect("bind particle pipeline")
             .bind_descriptor_sets(
                 PipelineBindPoint::Graphics,
-                self.particle_pipeline.layout().clone(),
+                pipeline.layout().clone(),
                 0,
                 particle_set,
             )
@@ -1298,16 +1362,40 @@ impl Renderer {
             );
         }
 
-        // ---- Particles (rain + night taillights) ----
+        // ---- Particles (rain + night taillights + drift dust) ----
         // Additive, depth-tested (no depth write) so particles fall over the
         // road but behind cars, and fade into the sky fog like everything else.
         let mut particle_verts = Vec::new();
+        let mut dust_verts = Vec::new();
         let rain_intensity = game.rain_intensity();
         if rain_intensity > 0.0 {
             let cam_right = cam_forward.cross(Vec3::Y);
             self.rain.update(dt_secs, eye, game.vehicle.speed);
             particle_verts = self.rain.build_vertices(eye, cam_right, rain_intensity);
         }
+
+        // Drift dust: puffs kicked up on hard steering/sideslip, launch, and
+        // (minimally) just driving over dustier surfaces, scaled by the road
+        // material under the car (asphalt worn/cracked kick more).
+        {
+            let cam_right = cam_forward.cross(Vec3::Y);
+            let v = &game.vehicle;
+            let lateral_v =
+                v.speed * (v.heading.sin() - road_tangent(v.distance) * v.heading.cos());
+            let profile = material_at(v.distance, v.offset).dust_profile();
+            let drift = drift_intensity(v.speed, lateral_v, v.steer, v.throttle, profile.emission);
+            // Rear corners just outside the body so the car mesh can't occlude
+            // the puffs, raised off the road so they aren't depth-culled by it.
+            let p_rot = glam::Quat::from_rotation_y(-v.heading);
+            let base = Vec3::new(game.player_world_x(), 0.12, game.player_world_z());
+            let rear = [
+                base + p_rot * Vec3::new(-(CAR_HALF_W + 0.25), 0.0, CAR_LEN * 0.5 + 0.1),
+                base + p_rot * Vec3::new(CAR_HALF_W + 0.25, 0.0, CAR_LEN * 0.5 + 0.1),
+            ];
+            self.dust.update(dt_secs, drift, &profile, rear, cam_forward);
+            dust_verts.append(&mut self.dust.build_vertices(eye, cam_right));
+        }
+
         let night_fac = game.night_fac();
         if night_fac > 0.02 {
             let cam_right = cam_forward.cross(Vec3::Y);
@@ -1350,9 +1438,24 @@ impl Renderer {
                 night_fac,
             ));
         }
+        if !dust_verts.is_empty() {
+            self.draw_particles(
+                &mut builder,
+                &self.dust_pipeline,
+                &dust_verts,
+                view,
+                proj,
+                &lights,
+                time_of_day,
+                fog_color,
+                headlight_pos,
+                headlight_dir,
+            );
+        }
         if !particle_verts.is_empty() {
             self.draw_particles(
                 &mut builder,
+                &self.particle_pipeline,
                 &particle_verts,
                 view,
                 proj,
