@@ -1,9 +1,44 @@
-# Graphics Upgrade TODO
+# Lane Lunacy TODO
 
 > Art assets: add PNGs under `assets/textures/`, embed with `include_bytes!`, and
 > upload via `upload_rgba8_texture`. Update `LICENSE-ASSETS` for any new art.
 
-> Ordered by implementation difficulty (easiest first).
+> Feature tasks are ordered by implementation difficulty (easiest first).
+
+## 0. Refactor: SOLID + reuse + layering + a programmatic "eye"
+
+Goals:
+- SOLID principles, maximum code reuse, and clean layering.
+- A headless "programmatic eye": render deterministic frames offscreen to CPU
+  buffers, write PNGs the agent can view, and emit numeric probes that are
+  assertable in tests — instead of human-taken screenshots.
+
+Target layering (top → bottom):
+- `presenters` — windowed `Renderer` (swapchain) | `render/snapshot.rs` (offscreen + readback + PNG + probes)
+- `record.rs` — `record_frame(builder, &SceneResources, &Frame, framebuffer)`, one command-buffer recorder for any target
+- `scene.rs` — GPU resources built once: pipelines, textures, models, mesh buffers, samplers
+- `frame.rs` — pure CPU per-frame math: view/proj, palette, lights, sky uniform, headlight arrays, particle/flare/hud verts (no vulkano types, unit-testable)
+- domain — `game/`, `road`, `surface`, `vertex`
+
+Order: build the eye first (baseline), refactor, then re-run snapshots to prove
+visual parity.
+
+- [x] `--snapshot` CLI (path, `--time`, `--weather`, `--size`, `--seed`); headless branch in `main.rs` before winit
+- [x] Headless GPU context: Instance/Device/queue without a surface (no present queue); reuse `gpu.rs`
+- [x] Extract pure CPU `Frame` + builder from `render()` (no vulkano types)
+- [ ] Deterministic scene seeding: injectable seed for cloud tiles, weather phase, start hour (traffic already deterministic)
+- [ ] Extract `SceneResources` (pipelines, textures, models, buffers, samplers) shared by windowed + offscreen
+- [ ] Extract `record.rs` command-buffer recorder reused by both presenters
+- [ ] `snapshot.rs`: offscreen color+depth images, framebuffer, render, readback via `copy_image_to_buffer`, PNG via `image`
+- [ ] Probes: CPU (sun NDC, flare intensity, projector road coverage, wet/night fac) + GPU from pixels (sky-top lum, road-center lum, sun-disc max lum, flare bloom); print/JSON
+- [ ] Capture baseline snapshots + probe JSON (noon clear, midnight rain, dusk) as golden reference
+- [ ] Pipeline factory `graphics_pipeline()` (stages, vertex input, blend, depth, cull, samples) killing the 6 duplicated blocks in `render/mod.rs`
+- [ ] Deduplicate math: shared `smoothstep`/`mix`; remove copies in `game/mod.rs`, `daynight.rs`, `flare.rs`
+- [ ] Bundle headlight/projector arrays into structs; shrink `mvp_buffer`/`draw_particles` signatures (ISP)
+- [ ] Decouple windowed `Renderer` to only own swapchain/acquire/present; delegate math + recording
+- [ ] Snapshot regression tests: CPU probes always run; GPU probe tests gated behind `LANE_SNAPSHOT_TESTS=1`
+- [ ] Re-run baselines after refactor; diff probe JSON + PNG to prove visual parity
+- [ ] `cargo test`, `cargo build`, clippy/fmt clean; document snapshot usage in README
 
 ## 1. Realistic road textures
 - [x] Create/replace asphalt + grass tile textures under `assets/textures/`

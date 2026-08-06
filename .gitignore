@@ -1,6 +1,9 @@
 # Build artifacts
 /target
 
+# Snapshot render output
+/snapshots
+
 # Compiled SPIR-V shaders (generated from shaders/*.glsl)
 shaders/*.spv
 

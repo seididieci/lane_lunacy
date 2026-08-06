@@ -3,7 +3,9 @@
 use std::sync::Arc;
 
 use vulkano::device::physical::{PhysicalDevice, PhysicalDeviceType};
-use vulkano::device::{Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo, QueueFlags};
+use vulkano::device::{
+    Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo, QueueFlags,
+};
 use vulkano::instance::Instance;
 use vulkano::swapchain::Surface;
 
@@ -73,6 +75,36 @@ pub fn create_graphics_context(
                 khr_swapchain: true,
                 ..DeviceExtensions::empty()
             },
+            ..Default::default()
+        },
+    )
+    .expect("failed to create device");
+    let queue = queues.next().unwrap();
+
+    (device, queue)
+}
+
+/// Creates a device + queue for offscreen rendering without a window/surface.
+/// Only needs a `GRAPHICS` queue family (no present support), and no swapchain
+/// extension. Used by the headless `--snapshot` path.
+pub fn create_graphics_context_headless(
+    physical: &Arc<PhysicalDevice>,
+) -> (Arc<Device>, Arc<Queue>) {
+    let queue_family_index = physical
+        .queue_family_properties()
+        .iter()
+        .enumerate()
+        .find(|(_, q)| q.queue_flags.intersects(QueueFlags::GRAPHICS))
+        .map(|(i, _)| i as u32)
+        .expect("no queue family with graphics support");
+
+    let (device, mut queues) = Device::new(
+        physical.clone(),
+        DeviceCreateInfo {
+            queue_create_infos: vec![QueueCreateInfo {
+                queue_family_index,
+                ..Default::default()
+            }],
             ..Default::default()
         },
     )

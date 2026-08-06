@@ -21,9 +21,7 @@ use vulkano::descriptor_set::allocator::{
 use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
 use vulkano::device::{Device, Queue};
 use vulkano::format::Format;
-use vulkano::image::sampler::{
-    Sampler, SamplerAddressMode, SamplerCreateInfo, SamplerMipmapMode,
-};
+use vulkano::image::sampler::{Sampler, SamplerAddressMode, SamplerCreateInfo, SamplerMipmapMode};
 use vulkano::image::view::ImageView;
 use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
 use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
@@ -55,22 +53,21 @@ use crate::font::FontAtlas;
 use crate::game::Game;
 use crate::mesh::{build_sky_dome, build_world_chunk};
 use crate::model::{load_gltf_mesh_from_bytes, CarLightAnchors};
-use crate::render::camera::{perspective_vulkan, Camera};
 use crate::render::cloud::generate_cloud_tile;
 use crate::render::daynight::Lights;
-use crate::render::particles::{generate_soft_sprite, drift_intensity, DustSystem, RainSystem};
+use crate::render::frame::{build_frame, traffic_rotation, MAX_TRAFFIC_HEADLIGHTS};
+use crate::render::particles::{generate_soft_sprite, DustSystem, RainSystem};
 use crate::render::texture::{
     make_mesh_buffers, upload_rgba8_texture, upload_rgba8_texture_mipmapped,
 };
-use crate::road::{road_tangent, CAR_HALF_W, CAR_LEN};
-use crate::shaders::{self, MVP, SkyUniform};
-use crate::surface::material_at;
+use crate::shaders::{self, MVP};
 use crate::vertex::{FlareVertex, HudVertex, ParticleVertex, Vertex3d};
 
 pub mod camera;
 pub mod cloud;
 pub mod daynight;
 pub mod flare;
+pub mod frame;
 pub mod particles;
 pub mod texture;
 
@@ -78,9 +75,7 @@ const WORLD_CHUNK_LEN: f32 = 260.0;
 const WORLD_CHUNKS_BEHIND: i32 = 1;
 const WORLD_CHUNKS_AHEAD: i32 = 6;
 
-const SKY_RADIUS: f32 = 550.0;
 const CLOUD_TILE: u32 = 256;
-const MAX_TRAFFIC_HEADLIGHTS: usize = 16;
 
 const PLAYER_MODEL_GLB: &[u8] = include_bytes!("../../assets/models/player_race_future.glb");
 const TRAFFIC_SEDAN_GLB: &[u8] = include_bytes!("../../assets/models/traffic_sedan.glb");
@@ -133,21 +128,12 @@ pub struct Renderer {
     car_indices: Subbuffer<[u32]>,
     player_anchors: CarLightAnchors,
     traffic_meshes: Vec<(Subbuffer<[Vertex3d]>, Subbuffer<[u32]>, CarLightAnchors)>,
+    traffic_anchors: Vec<CarLightAnchors>,
     viewport: Viewport,
     pub recreate: bool,
     camera_heading: f32,
     fences: Vec<Option<Arc<FenceSignalFuture<Box<dyn GpuFuture>>>>>,
     previous_fence_i: u32,
-}
-
-/// Rotation aligning a traffic car to its lane direction. Cars on the right
-/// (lane > 0) drive toward -Z; oncoming cars (lane < 0) face +Z.
-fn traffic_rotation(lane: f32, distance: f32) -> glam::Quat {
-    if lane > 0.0 {
-        glam::Quat::from_rotation_y(f32::atan2(-road_tangent(distance), 1.0))
-    } else {
-        glam::Quat::from_rotation_y(f32::atan2(road_tangent(distance), -1.0))
-    }
 }
 
 impl Renderer {
@@ -745,7 +731,11 @@ impl Renderer {
                 .to_rgba8(),
         ];
         let slot_w = slot_textures[0].dimensions().0;
-        let atlas_h = slot_textures.iter().map(|t| t.dimensions().1).max().unwrap();
+        let atlas_h = slot_textures
+            .iter()
+            .map(|t| t.dimensions().1)
+            .max()
+            .unwrap();
         let atlas_w = slot_w * slot_textures.len() as u32;
         let mut atlas = vec![0u8; (atlas_w * atlas_h * 4) as usize];
         for (slot, tex) in slot_textures.iter().enumerate() {
@@ -790,7 +780,8 @@ impl Renderer {
         let cloud_a = generate_cloud_tile(CLOUD_TILE, seed);
         let cloud_b = generate_cloud_tile(
             CLOUD_TILE,
-            seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407),
+            seed.wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407),
         );
         let cloud_a_view = upload_rgba8_texture(
             memory_allocator.clone(),
@@ -829,9 +820,11 @@ impl Renderer {
         for (label, bytes) in traffic_models {
             let (vertices, indices, anchors) = load_gltf_mesh_from_bytes(bytes, label)
                 .unwrap_or_else(|e| panic!("failed to load embedded traffic model {label}: {e}"));
-            let (vertices, indices) = make_mesh_buffers(memory_allocator.clone(), vertices, indices);
+            let (vertices, indices) =
+                make_mesh_buffers(memory_allocator.clone(), vertices, indices);
             traffic_meshes.push((vertices, indices, anchors));
         }
+        let traffic_anchors: Vec<_> = traffic_meshes.iter().map(|m| m.2).collect();
 
         let extent = swapchain.image_extent();
         let viewport = Viewport {
@@ -894,6 +887,7 @@ impl Renderer {
             car_indices,
             player_anchors,
             traffic_meshes,
+            traffic_anchors,
             viewport,
             recreate: false,
             camera_heading: 0.0,
@@ -1120,7 +1114,9 @@ impl Renderer {
             .bind_vertex_buffers(0, particle_buf)
             .expect("bind particle vertex buffers");
         unsafe {
-            builder.draw(particle_count, 1, 0, 0).expect("draw particles");
+            builder
+                .draw(particle_count, 1, 0, 0)
+                .expect("draw particles");
         }
     }
 
@@ -1155,40 +1151,39 @@ impl Renderer {
         }
 
         let aspect = self.viewport.extent[0] / self.viewport.extent[1];
-        let proj = perspective_vulkan(60.0f32.to_radians(), aspect, 0.1, 600.0);
 
-        // Day/night lighting: the sun sweeps through the day, giving way to
-        // faint moonlight at night. The palettes also mirror the weather cover
-        // so the fog color matches the sky horizon exactly.
-        let cover = {
-            let t = ((game.cloud_amount() - 0.10) / 0.90).clamp(0.0, 1.0);
-            t * t * (3.0 - 2.0 * t)
-        };
-        let (palette, lights) = daynight::compute(
-            game.sun_elevation(),
-            game.time_of_day(),
-            game.difficulty.tuning().day_fraction,
-            cover,
-            game.night_fac(),
-        );
-        let fog_color = palette.fog_color;
-        let time_of_day = game.time_of_day();
-        let wet_fac = game.rain_intensity();
-
+        // Everything per-frame is computed on the CPU into a pure `Frame`:
+        // camera, day/night lights, sky uniform, headlight projectors,
+        // particles, and flare. The same builder drives the headless snapshot
+        // path, so windowed and offline renders are pixel-identical.
         self.ensure_world_chunks_for_player(game.vehicle.distance);
-        let car_pos = Vec3::new(game.player_world_x(), 0.0, game.player_world_z());
-        let dt_secs = dt.as_secs_f32().min(0.05);
-        self.sky_time += dt_secs;
-        let diff = game.vehicle.heading - self.camera_heading;
-        self.camera_heading += diff * (dt_secs * 3.0).min(1.0);
-        let cam_forward = Vec3::new(self.camera_heading.sin(), 0.0, -self.camera_heading.cos());
-        let eye = car_pos - cam_forward * 8.0 + Vec3::new(0.0, 4.0, 0.0);
-        let look_at = car_pos + cam_forward * 4.0 + Vec3::new(0.0, 3.6, 0.0);
-        let cam = Camera {
-            eye,
-            forward: (look_at - eye).normalize(),
-        };
-        let view = cam.view();
+        let frame = build_frame(
+            game,
+            dt,
+            aspect,
+            &mut self.sky_time,
+            &mut self.camera_heading,
+            &mut self.rain,
+            &mut self.dust,
+            &self.player_anchors,
+            &self.traffic_anchors,
+            hud_verts.to_vec(),
+        );
+
+        let view = frame.view;
+        let proj = frame.proj;
+        let lights = frame.lights;
+        let fog_color = frame.fog_color;
+        let wet_fac = frame.wet_fac;
+        let headlight_pos = frame.headlight_pos;
+        let headlight_dir = frame.headlight_dir;
+        let traffic_head_pos = frame.traffic_head_pos;
+        let traffic_head_dir = frame.traffic_head_dir;
+        let traffic_head_state = frame.traffic_head_state;
+        let sky_uniform = frame.sky_uniform;
+        let particle_verts = frame.particle_verts;
+        let dust_verts = frame.dust_verts;
+        let flare_verts = frame.flare_verts;
 
         let mut builder = AutoCommandBufferBuilder::primary(
             self.command_allocator.clone(),
@@ -1218,29 +1213,6 @@ impl Renderer {
             .bind_pipeline_graphics(self.sky_pipeline.clone())
             .expect("bind sky pipeline");
 
-        let sky_uniform = SkyUniform {
-            model: Mat4::from_scale_rotation_translation(
-                Vec3::splat(SKY_RADIUS),
-                glam::Quat::IDENTITY,
-                eye,
-            )
-            .to_cols_array_2d(),
-            view: view.to_cols_array_2d(),
-            projection: proj.to_cols_array_2d(),
-            time: self.sky_time,
-            _pad: [0.0; 3],
-            zenith: palette.zenith,
-            horizon: palette.horizon,
-            cloud_tint: palette.cloud_tint,
-            light_dir: lights.light_dir,
-            cloud_amount: game.cloud_amount(),
-            sun_state: [
-                game.sun_elevation(),
-                lights.day_fac,
-                time_of_day,
-                lights.sun_intensity,
-            ],
-        };
         let sky_buf = Buffer::from_data(
             self.memory_allocator.clone(),
             BufferCreateInfo {
@@ -1297,57 +1269,6 @@ impl Renderer {
         builder
             .bind_pipeline_graphics(self.mesh_pipeline.clone())
             .expect("bind mesh pipeline");
-
-        // Headlight cone from the player car, aimed slightly down the road.
-        let head_forward = Vec3::new(game.vehicle.heading.sin(), 0.0, -game.vehicle.heading.cos());
-        let headlight_pos = [
-            game.player_world_x() + head_forward.x * 2.5,
-            0.9,
-            game.player_world_z() + head_forward.z * 2.5,
-            1.0,
-        ];
-        let headlight_dir = [head_forward.x, -0.15, head_forward.z, 0.0];
-        let night_fac = lights.night_fac;
-
-        // Traffic headlight anchors are used in two ways:
-        // 1) projected onto asphalt in the mesh shader for uniform road light
-        //    (ALL cars, so same-direction cars light the road ahead too),
-        // 2) as visible lamp sprites in the particle pass (oncoming only; the
-        //    rear of same-direction cars shows red taillights instead).
-        let mut oncoming_head_lights = Vec::with_capacity(game.traffic.len() * 2);
-        let mut traffic_projectors = Vec::with_capacity(game.traffic.len() * 2);
-        if night_fac > 0.02 {
-            for (idx, t) in game.traffic.iter().enumerate() {
-                let tvx = crate::road::road_curve(t.distance) + t.lane;
-                let rot = traffic_rotation(t.lane, t.distance);
-                let anchors = &self.traffic_meshes[idx % self.traffic_meshes.len()].2;
-                let car_pos = Vec3::new(tvx, 0.35, -t.distance);
-                let forward = (rot * Vec3::new(0.0, 0.0, -1.0)).normalize();
-                let left = car_pos
-                    + rot * Vec3::new(-anchors.lateral, anchors.headlight_y, -anchors.long_half);
-                let right = car_pos
-                    + rot * Vec3::new(anchors.lateral, anchors.headlight_y, -anchors.long_half);
-                traffic_projectors.push((left, forward));
-                traffic_projectors.push((right, forward));
-                if t.lane < 0.0 {
-                    oncoming_head_lights.push((left, forward));
-                    oncoming_head_lights.push((right, forward));
-                }
-            }
-        }
-        let mut traffic_head_pos = [[0.0; 4]; MAX_TRAFFIC_HEADLIGHTS];
-        let mut traffic_head_dir = [[0.0; 4]; MAX_TRAFFIC_HEADLIGHTS];
-        let mut traffic_head_state = [[0.0; 4]; MAX_TRAFFIC_HEADLIGHTS];
-        for (i, (center, forward)) in traffic_projectors
-            .iter()
-            .take(MAX_TRAFFIC_HEADLIGHTS)
-            .enumerate()
-        {
-            traffic_head_pos[i] = [center.x, center.y, center.z, 1.0];
-            traffic_head_dir[i] = [forward.x, -0.13, forward.z, 0.0];
-            // [strength, max_dist, cos_inner, cos_outer]
-            traffic_head_state[i] = [0.95, 20.0, 0.965, 0.90];
-        }
 
         let draw = |builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
                     vertices: Subbuffer<[Vertex3d]>,
@@ -1441,72 +1362,6 @@ impl Renderer {
         // ---- Particles (rain + night taillights + drift dust) ----
         // Additive, depth-tested (no depth write) so particles fall over the
         // road but behind cars, and fade into the sky fog like everything else.
-        let mut particle_verts = Vec::new();
-        let mut dust_verts = Vec::new();
-        let rain_intensity = wet_fac;
-        if rain_intensity > 0.0 {
-            let cam_right = cam_forward.cross(Vec3::Y);
-            self.rain.update(dt_secs, eye, game.vehicle.speed);
-            particle_verts = self.rain.build_vertices(eye, cam_right, rain_intensity);
-        }
-
-        // Drift dust: puffs kicked up on hard steering/sideslip, launch, and
-        // (minimally) just driving over dustier surfaces, scaled by the road
-        // material under the car (asphalt worn/cracked kick more).
-        {
-            let cam_right = cam_forward.cross(Vec3::Y);
-            let v = &game.vehicle;
-            let lateral_v =
-                v.speed * (v.heading.sin() - road_tangent(v.distance) * v.heading.cos());
-            let profile = material_at(v.distance, v.offset).dust_profile();
-            let drift = drift_intensity(v.speed, lateral_v, v.steer, v.throttle, profile.emission);
-            // Rear corners just outside the body so the car mesh can't occlude
-            // the puffs, raised off the road so they aren't depth-culled by it.
-            let p_rot = glam::Quat::from_rotation_y(-v.heading);
-            let base = Vec3::new(game.player_world_x(), 0.12, game.player_world_z());
-            let rear = [
-                base + p_rot * Vec3::new(-(CAR_HALF_W + 0.25), 0.0, CAR_LEN * 0.5 + 0.1),
-                base + p_rot * Vec3::new(CAR_HALF_W + 0.25, 0.0, CAR_LEN * 0.5 + 0.1),
-            ];
-            self.dust.update(dt_secs, drift, &profile, rear, cam_forward);
-            dust_verts.append(&mut self.dust.build_vertices(eye, cam_right));
-        }
-
-        if night_fac > 0.02 {
-            let cam_right = cam_forward.cross(Vec3::Y);
-            let mut tail_centers = Vec::with_capacity(game.traffic.len() * 2 + 2);
-
-            // The player car's own rear taillights, from its model anchors.
-            let player_rot = glam::Quat::from_rotation_y(-game.vehicle.heading);
-            let p_base = Vec3::new(game.player_world_x(), 0.03, game.player_world_z());
-            let pa = &self.player_anchors;
-            tail_centers.push(p_base + player_rot * Vec3::new(-pa.lateral, pa.taillight_y, pa.long_half));
-            tail_centers.push(p_base + player_rot * Vec3::new(pa.lateral, pa.taillight_y, pa.long_half));
-
-            for (idx, t) in game.traffic.iter().enumerate() {
-                let tvx = crate::road::road_curve(t.distance) + t.lane;
-                let rot = traffic_rotation(t.lane, t.distance);
-                let anchors = &self.traffic_meshes[idx % self.traffic_meshes.len()].2;
-                let car_pos = Vec3::new(tvx, 0.35, -t.distance);
-                if t.lane > 0.0 {
-                    // Same direction: red taillights at the rear (facing away).
-                    tail_centers.push(car_pos + rot * Vec3::new(-anchors.lateral, anchors.taillight_y, anchors.long_half));
-                    tail_centers.push(car_pos + rot * Vec3::new(anchors.lateral, anchors.taillight_y, anchors.long_half));
-                }
-            }
-            particle_verts.append(&mut particles::build_taillights(
-                &tail_centers,
-                eye,
-                cam_right,
-                night_fac,
-            ));
-            particle_verts.append(&mut particles::build_headlights(
-                &oncoming_head_lights,
-                eye,
-                cam_right,
-                night_fac,
-            ));
-        }
         if !dust_verts.is_empty() {
             self.draw_particles(
                 &mut builder,
@@ -1543,82 +1398,63 @@ impl Renderer {
         }
 
         // ---- Sun lens flare ----
-        // Project the sun (a world direction) into NDC and fan additive sprites
-        // along the sun->screen-center axis, faded by brightness, cloud cover,
-        // and how far off-screen the sun is.
-        if lights.sun_intensity > 0.0 {
-            let sun_dir = Vec3::new(
-                lights.light_dir[0],
-                lights.light_dir[1],
-                lights.light_dir[2],
-            );
-            let view_dir = view.transform_vector3(sun_dir);
-            if view_dir.z < 0.0 {
-                let clip = proj * view_dir.extend(1.0);
-                // Projection is Vulkan y-down; flip y so flare positions use the
-                // shader's y-up NDC convention (same as the HUD).
-                let sun_ndc = [clip.x / clip.w, -clip.y / clip.w];
-                let off = (sun_ndc[0].abs().max(sun_ndc[1].abs()) - 0.9).max(0.0);
-                let off_fade = 1.0 / (1.0 + off * 8.0);
-                let flare_intensity = lights.sun_intensity * (1.0 - 0.9 * cover) * off_fade;
-                let flare_verts = flare::build_flare_verts(sun_ndc, aspect, flare_intensity);
-                if !flare_verts.is_empty() {
-                    let flare_set_layout = self.flare_pipeline.layout().set_layouts()[0].clone();
-                    let flare_set = DescriptorSet::new(
-                        self.descriptor_set_allocator.clone(),
-                        flare_set_layout,
-                        [
-                            WriteDescriptorSet::image_view_sampler(
-                                0,
-                                self.flare_core_view.clone(),
-                                self.flare_sampler.clone(),
-                            ),
-                            WriteDescriptorSet::image_view_sampler(
-                                1,
-                                self.flare_streak_view.clone(),
-                                self.flare_sampler.clone(),
-                            ),
-                            WriteDescriptorSet::image_view_sampler(
-                                2,
-                                self.flare_ring_view.clone(),
-                                self.flare_sampler.clone(),
-                            ),
-                        ],
-                        [],
-                    )
-                    .expect("flare descriptor set");
-                    let flare_buf = Buffer::from_iter(
-                        self.memory_allocator.clone(),
-                        BufferCreateInfo {
-                            usage: BufferUsage::VERTEX_BUFFER,
-                            ..Default::default()
-                        },
-                        AllocationCreateInfo {
-                            memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                            ..Default::default()
-                        },
-                        flare_verts.iter().copied(),
-                    )
-                    .expect("flare buffer");
-                    let flare_vertex_count = flare_buf.len() as u32;
-                    builder
-                        .bind_pipeline_graphics(self.flare_pipeline.clone())
-                        .expect("bind flare pipeline")
-                        .bind_descriptor_sets(
-                            PipelineBindPoint::Graphics,
-                            self.flare_pipeline.layout().clone(),
-                            0,
-                            flare_set,
-                        )
-                        .expect("bind flare descriptor sets")
-                        .bind_vertex_buffers(0, flare_buf)
-                        .expect("bind flare vertex buffers");
-                    unsafe {
-                        builder
-                            .draw(flare_vertex_count, 1, 0, 0)
-                            .expect("draw flare");
-                    }
-                }
+        // Quads are baked into the CPU Frame (NDC positions, fan layout,
+        // intensity); we only upload and draw them here.
+        if !flare_verts.is_empty() {
+            let flare_set_layout = self.flare_pipeline.layout().set_layouts()[0].clone();
+            let flare_set = DescriptorSet::new(
+                self.descriptor_set_allocator.clone(),
+                flare_set_layout,
+                [
+                    WriteDescriptorSet::image_view_sampler(
+                        0,
+                        self.flare_core_view.clone(),
+                        self.flare_sampler.clone(),
+                    ),
+                    WriteDescriptorSet::image_view_sampler(
+                        1,
+                        self.flare_streak_view.clone(),
+                        self.flare_sampler.clone(),
+                    ),
+                    WriteDescriptorSet::image_view_sampler(
+                        2,
+                        self.flare_ring_view.clone(),
+                        self.flare_sampler.clone(),
+                    ),
+                ],
+                [],
+            )
+            .expect("flare descriptor set");
+            let flare_buf = Buffer::from_iter(
+                self.memory_allocator.clone(),
+                BufferCreateInfo {
+                    usage: BufferUsage::VERTEX_BUFFER,
+                    ..Default::default()
+                },
+                AllocationCreateInfo {
+                    memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                    ..Default::default()
+                },
+                flare_verts.iter().copied(),
+            )
+            .expect("flare buffer");
+            let flare_vertex_count = flare_buf.len() as u32;
+            builder
+                .bind_pipeline_graphics(self.flare_pipeline.clone())
+                .expect("bind flare pipeline")
+                .bind_descriptor_sets(
+                    PipelineBindPoint::Graphics,
+                    self.flare_pipeline.layout().clone(),
+                    0,
+                    flare_set,
+                )
+                .expect("bind flare descriptor sets")
+                .bind_vertex_buffers(0, flare_buf)
+                .expect("bind flare vertex buffers");
+            unsafe {
+                builder
+                    .draw(flare_vertex_count, 1, 0, 0)
+                    .expect("draw flare");
             }
         }
 
