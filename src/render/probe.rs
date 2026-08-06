@@ -67,7 +67,7 @@ pub fn compute_cpu(game: &Game, frame: &Frame) -> CpuProbe {
         sun_ndc: frame.sun_ndc,
         flare_intensity: frame.flare_intensity,
         projector_road_coverage: projector_road_coverage(game),
-        wet_fac: frame.wet_fac,
+        wet_fac: frame.uniforms.wet_fac,
         night_fac: frame.night_fac,
     }
 }

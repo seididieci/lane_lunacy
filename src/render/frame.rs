@@ -28,25 +28,41 @@ use crate::vertex::{FlareVertex, HudVertex, ParticleVertex};
 pub const SKY_RADIUS: f32 = 550.0;
 pub const MAX_TRAFFIC_HEADLIGHTS: usize = 16;
 
+/// Camera + lighting context shared by every draw in a frame. One bundle keeps
+/// the recorder and the `SceneResources` draw methods from threading half a
+/// dozen `Mat4`/`Lights`/scalar parameters through every call site.
+#[derive(Clone, Copy)]
+pub struct FrameUniforms {
+    pub view: Mat4,
+    pub proj: Mat4,
+    pub lights: Lights,
+    pub wet_fac: f32,
+    pub fog_color: [f32; 4],
+}
+
+/// Headlight projector payload for one frame: the player's cone plus the
+/// oncoming/same-direction traffic cones, packed exactly as the mesh and
+/// particle shaders expect them.
+#[derive(Clone, Copy)]
+pub struct Headlights {
+    pub pos: [f32; 4],
+    pub dir: [f32; 4],
+    pub traffic_pos: [[f32; 4]; MAX_TRAFFIC_HEADLIGHTS],
+    pub traffic_dir: [[f32; 4]; MAX_TRAFFIC_HEADLIGHTS],
+    pub traffic_state: [[f32; 4]; MAX_TRAFFIC_HEADLIGHTS],
+}
+
 /// One fully-computed frame, ready to be recorded into a command buffer. All
 /// scene math (camera, day/night, projectors, particles, flare) is baked here
 /// on the CPU so both presenters can share a single recording pass.
 pub struct Frame {
     pub aspect: f32,
-    pub view: Mat4,
-    pub proj: Mat4,
+    pub uniforms: FrameUniforms,
     pub eye: Vec3,
     pub cam_forward: Vec3,
-    pub lights: Lights,
-    pub fog_color: [f32; 4],
-    pub wet_fac: f32,
     pub night_fac: f32,
     pub sky_uniform: SkyUniform,
-    pub headlight_pos: [f32; 4],
-    pub headlight_dir: [f32; 4],
-    pub traffic_head_pos: [[f32; 4]; MAX_TRAFFIC_HEADLIGHTS],
-    pub traffic_head_dir: [[f32; 4]; MAX_TRAFFIC_HEADLIGHTS],
-    pub traffic_head_state: [[f32; 4]; MAX_TRAFFIC_HEADLIGHTS],
+    pub headlights: Headlights,
     pub particle_verts: Vec<ParticleVertex>,
     pub dust_verts: Vec<ParticleVertex>,
     pub flare_verts: Vec<FlareVertex>,
@@ -312,20 +328,24 @@ pub fn build_frame(
 
     Frame {
         aspect,
-        view,
-        proj,
+        uniforms: FrameUniforms {
+            view,
+            proj,
+            lights,
+            wet_fac,
+            fog_color,
+        },
         eye,
         cam_forward,
-        lights,
-        fog_color,
-        wet_fac,
         night_fac,
         sky_uniform,
-        headlight_pos,
-        headlight_dir,
-        traffic_head_pos,
-        traffic_head_dir,
-        traffic_head_state,
+        headlights: Headlights {
+            pos: headlight_pos,
+            dir: headlight_dir,
+            traffic_pos: traffic_head_pos,
+            traffic_dir: traffic_head_dir,
+            traffic_state: traffic_head_state,
+        },
         particle_verts,
         dust_verts,
         flare_verts,
@@ -382,7 +402,7 @@ mod tests {
         let frame = frame_for(&game);
         assert!(frame.sun_ndc.is_some(), "sun should be visible at noon");
         assert!(frame.flare_intensity > 0.5, "sun flare strong at noon");
-        assert!(frame.lights.sun_intensity > 0.9);
+        assert!(frame.uniforms.lights.sun_intensity > 0.9);
         assert_eq!(frame.night_fac, 0.0);
         assert!(frame.particle_verts.is_empty(), "no taillights by day");
     }
@@ -392,7 +412,7 @@ mod tests {
         let game = deterministic_game(0.0, Weather::Rain);
         let frame = frame_for(&game);
         assert!(frame.night_fac > 0.3, "night darkness active");
-        assert!(frame.wet_fac > 0.9, "rain fully wet");
+        assert!(frame.uniforms.wet_fac > 0.9, "rain fully wet");
         // Taillights/headlight discs are only oncoming + same-direction traffic
         // which we cleared, so the player's own taillights remain (2 centers).
         assert!(!frame.particle_verts.is_empty(), "player taillights lit");
@@ -409,7 +429,7 @@ mod tests {
     fn rain_intensity_scales_with_weather() {
         let clear = deterministic_game(12.0, Weather::Clear);
         let rain = deterministic_game(12.0, Weather::Rain);
-        assert_eq!(frame_for(&clear).wet_fac, 0.0);
-        assert!(frame_for(&rain).wet_fac > 0.9);
+        assert_eq!(frame_for(&clear).uniforms.wet_fac, 0.0);
+        assert!(frame_for(&rain).uniforms.wet_fac > 0.9);
     }
 }

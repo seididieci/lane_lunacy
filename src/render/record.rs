@@ -41,16 +41,8 @@ pub fn record_frame(
     viewport: &Viewport,
 ) -> Arc<PrimaryAutoCommandBuffer> {
     let Frame {
-        view,
-        proj,
-        lights,
-        fog_color,
-        wet_fac,
-        headlight_pos,
-        headlight_dir,
-        traffic_head_pos,
-        traffic_head_dir,
-        traffic_head_state,
+        uniforms,
+        headlights,
         sky_uniform,
         particle_verts,
         dust_verts,
@@ -150,19 +142,7 @@ pub fn record_frame(
                 texture: Arc<ImageView>,
                 model: Mat4| {
         let index_count = indices.len() as u32;
-        let mvp = scene.mvp_buffer(
-            model,
-            *view,
-            *proj,
-            lights,
-            *wet_fac,
-            *fog_color,
-            *headlight_pos,
-            *headlight_dir,
-            *traffic_head_pos,
-            *traffic_head_dir,
-            *traffic_head_state,
-        );
+        let mvp = scene.mvp_buffer(model, uniforms, headlights);
         let set_layout = scene.mesh_pipeline.layout().set_layouts()[0].clone();
         let set = DescriptorSet::new(
             scene.descriptor_set_allocator.clone(),
@@ -237,37 +217,15 @@ pub fn record_frame(
     // Additive, depth-tested (no depth write) so particles fall over the
     // road but behind cars, and fade into the sky fog like everything else.
     if !dust_verts.is_empty() {
-        scene.draw_particles(
-            &mut builder,
-            &scene.dust_pipeline,
-            dust_verts,
-            *view,
-            *proj,
-            lights,
-            *wet_fac,
-            *fog_color,
-            *headlight_pos,
-            *headlight_dir,
-            *traffic_head_pos,
-            *traffic_head_dir,
-            *traffic_head_state,
-        );
+        scene.draw_particles(&mut builder, &scene.dust_pipeline, dust_verts, uniforms, headlights);
     }
     if !particle_verts.is_empty() {
         scene.draw_particles(
             &mut builder,
             &scene.particle_pipeline,
             particle_verts,
-            *view,
-            *proj,
-            lights,
-            *wet_fac,
-            *fog_color,
-            *headlight_pos,
-            *headlight_dir,
-            *traffic_head_pos,
-            *traffic_head_dir,
-            *traffic_head_state,
+            uniforms,
+            headlights,
         );
     }
 

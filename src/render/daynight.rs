@@ -40,6 +40,7 @@ pub struct SkyPalette {
 }
 
 /// Per-frame lighting values for the mesh and particle shaders.
+#[derive(Clone, Copy)]
 pub struct Lights {
     /// Sun (day) or moon (night) direction in world space.
     pub light_dir: [f32; 4],

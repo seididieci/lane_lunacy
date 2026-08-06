@@ -36,9 +36,8 @@ use crate::font::FontAtlas;
 use crate::mesh::build_sky_dome;
 use crate::model::{load_gltf_mesh_from_bytes, CarLightAnchors};
 use crate::render::cloud::generate_cloud_tile;
-use crate::render::daynight::Lights;
 use crate::render::flare;
-use crate::render::frame::MAX_TRAFFIC_HEADLIGHTS;
+use crate::render::frame::{FrameUniforms, Headlights};
 use crate::render::particles::{generate_cloud_sprite, generate_soft_sprite};
 use crate::render::pipeline::{graphics_pipeline, load_shaders, Blend, Depth, PipelineSpec};
 use crate::render::texture::{
@@ -535,17 +534,23 @@ impl SceneResources {
     pub fn mvp_buffer(
         &self,
         model: Mat4,
-        view: Mat4,
-        proj: Mat4,
-        lights: &Lights,
-        wet_fac: f32,
-        fog_color: [f32; 4],
-        headlight_pos: [f32; 4],
-        headlight_dir: [f32; 4],
-        traffic_head_pos: [[f32; 4]; MAX_TRAFFIC_HEADLIGHTS],
-        traffic_head_dir: [[f32; 4]; MAX_TRAFFIC_HEADLIGHTS],
-        traffic_head_state: [[f32; 4]; MAX_TRAFFIC_HEADLIGHTS],
+        uniforms: &FrameUniforms,
+        headlights: &Headlights,
     ) -> Subbuffer<MVP> {
+        let FrameUniforms {
+            view,
+            proj,
+            lights,
+            wet_fac,
+            fog_color,
+        } = *uniforms;
+        let Headlights {
+            pos: headlight_pos,
+            dir: headlight_dir,
+            traffic_pos: traffic_head_pos,
+            traffic_dir: traffic_head_dir,
+            traffic_state: traffic_head_state,
+        } = *headlights;
         let mvp = MVP {
             model: model.to_cols_array_2d(),
             view: view.to_cols_array_2d(),
@@ -586,34 +591,14 @@ impl SceneResources {
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
         pipeline: &Arc<GraphicsPipeline>,
         verts: &[ParticleVertex],
-        view: Mat4,
-        proj: Mat4,
-        lights: &Lights,
-        wet_fac: f32,
-        fog_color: [f32; 4],
-        headlight_pos: [f32; 4],
-        headlight_dir: [f32; 4],
-        traffic_head_pos: [[f32; 4]; MAX_TRAFFIC_HEADLIGHTS],
-        traffic_head_dir: [[f32; 4]; MAX_TRAFFIC_HEADLIGHTS],
-        traffic_head_state: [[f32; 4]; MAX_TRAFFIC_HEADLIGHTS],
+        uniforms: &FrameUniforms,
+        headlights: &Headlights,
     ) {
         if verts.is_empty() {
             return;
         }
         let particle_count = verts.len() as u32;
-        let mvp = self.mvp_buffer(
-            Mat4::IDENTITY,
-            view,
-            proj,
-            lights,
-            wet_fac,
-            fog_color,
-            headlight_pos,
-            headlight_dir,
-            traffic_head_pos,
-            traffic_head_dir,
-            traffic_head_state,
-        );
+        let mvp = self.mvp_buffer(Mat4::IDENTITY, uniforms, headlights);
         let set_layout = pipeline.layout().set_layouts()[0].clone();
         let set = DescriptorSet::new(
             self.descriptor_set_allocator.clone(),
