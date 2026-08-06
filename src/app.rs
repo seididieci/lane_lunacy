@@ -18,6 +18,7 @@ use crate::game::{Game, Weather};
 use crate::gpu::{create_graphics_context, enumerate_devices, select_physical_device};
 use crate::hud::build_hud_tree;
 use crate::input::Input;
+use crate::render::daynight;
 use crate::menu::{build_menu_tree, MenuRow, MenuState};
 use crate::render::Renderer;
 use crate::ui::Ui;
@@ -45,9 +46,27 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(instance: Arc<Instance>, gpu_index: usize, weather: Weather) -> Self {
+    pub fn new(
+        instance: Arc<Instance>,
+        gpu_index: usize,
+        weather: Weather,
+        start_hour: Option<f32>,
+    ) -> Self {
         let mut game = Game::new();
         game.set_weather(weather);
+        if let Some(hour) = start_hour {
+            game.set_start_hour(hour);
+            // Hint where the sun sits at spawn so the flare can be lined up.
+            let day_fraction = game.difficulty.tuning().day_fraction;
+            let dir = daynight::sun_direction(game.sun_elevation(), game.time_of_day(), day_fraction);
+            let az = dir[0].atan2(dir[2]).to_degrees().rem_euclid(360.0);
+            let elev = dir[1]
+                .atan2((dir[0] * dir[0] + dir[2] * dir[2]).sqrt())
+                .to_degrees();
+            println!(
+                "--time {hour}: sun azimuth {az:.0}°, elevation {elev:.0}° (az 0° = +Z, 90° = +X)"
+            );
+        }
         Self {
             instance,
             window: None,

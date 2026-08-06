@@ -38,6 +38,9 @@ pub struct Game {
     pub weather: Weather,
     weather_phase: f32,
     time_of_day_phase: f32,
+    /// When set (via `--time`), the day/night cycle always restarts at this
+    /// hour instead of a randomized one, so runs are reproducible for testing.
+    start_hour: Option<f32>,
     pub score: u32,
     pub bonus_score: u32,
     pub best_score: u32,
@@ -60,7 +63,8 @@ impl Game {
             difficulty: DifficultyLevel::EasyArcade,
             weather: Weather::Auto,
             weather_phase: random_weather_phase(),
-            time_of_day_phase: random_weather_phase() * (24.0 / std::f32::consts::TAU),
+            time_of_day_phase: random_start_hour(),
+            start_hour: None,
             score: 0,
             bonus_score: 0,
             best_score: 0,
@@ -85,12 +89,21 @@ impl Game {
         self.avg_speed = 0.0;
         self.time = 0.0;
         self.weather_phase = random_weather_phase();
-        self.time_of_day_phase = random_weather_phase() * (24.0 / std::f32::consts::TAU);
+        self.time_of_day_phase = self.start_hour.unwrap_or_else(random_start_hour);
         self.rebuild_traffic();
     }
 
     pub fn set_weather(&mut self, weather: Weather) {
         self.weather = weather;
+    }
+
+    /// Pins the day/night cycle to start at `hours` (0..24) on this and every
+    /// restart, so the exact lighting conditions can be reproduced. Wraps the
+    /// value into [0, 24).
+    pub fn set_start_hour(&mut self, hours: f32) {
+        let hours = hours.rem_euclid(24.0);
+        self.start_hour = Some(hours);
+        self.time_of_day_phase = hours;
     }
 
     /// Effective cloud coverage (0..1) for the sky. `Auto` animates a slow
@@ -275,6 +288,11 @@ fn random_weather_phase() -> f32 {
     (r as f32 / 16_777_215.0) * std::f32::consts::TAU
 }
 
+/// Random starting hour (0..24) for the day/night cycle when no `--time` is set.
+fn random_start_hour() -> f32 {
+    random_weather_phase() * (24.0 / std::f32::consts::TAU)
+}
+
 /// GLSL-style smoothstep over a generic `edge0 > edge1` interval.
 fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
@@ -397,5 +415,32 @@ mod tests {
         assert_eq!(game.time_of_day(), 0.0);
         game.time = day_hours;
         assert_eq!(game.time_of_day(), 0.0, "wraps back to midnight");
+    }
+
+    #[test]
+    fn set_start_hour_pins_the_clock() {
+        let mut game = Game::new();
+        game.set_start_hour(18.0);
+        assert_eq!(game.time_of_day(), 18.0);
+        assert!(game.sun_elevation() > 0.0, "early evening sun still up");
+    }
+
+    #[test]
+    fn restart_keeps_a_pinned_start_hour() {
+        let mut game = Game::new();
+        game.set_start_hour(6.0);
+        game.restart();
+        assert_eq!(game.time_of_day(), 6.0, "restart keeps the pinned hour");
+        // A restart without a pin keeps the random behavior (just must be valid).
+        let mut random = Game::new();
+        random.restart();
+        assert!((0.0..24.0).contains(&random.time_of_day()));
+    }
+
+    #[test]
+    fn set_start_hour_wraps_past_24_hours() {
+        let mut game = Game::new();
+        game.set_start_hour(26.0);
+        assert_eq!(game.time_of_day(), 2.0, "wraps into [0, 24)");
     }
 }

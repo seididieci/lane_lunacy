@@ -24,7 +24,7 @@ use vulkano::VulkanLibrary;
 
 use crate::game::Weather;
 
-pub fn run(gpu_index: usize, weather: Weather) {
+pub fn run(gpu_index: usize, weather: Weather, start_hour: Option<f32>) {
     let event_loop = EventLoop::new().expect("failed to create event loop");
 
     let library = VulkanLibrary::new().expect("failed to load the Vulkan library");
@@ -40,6 +40,6 @@ pub fn run(gpu_index: usize, weather: Weather) {
     )
     .expect("failed to create instance");
 
-    let mut app = app::App::new(instance, gpu_index, weather);
+    let mut app = app::App::new(instance, gpu_index, weather, start_hour);
     event_loop.run_app(&mut app).expect("event loop failed");
 }

@@ -2,13 +2,20 @@
 
 //! Day/night sky palette and lighting computation (pure, unit-testable).
 //!
-//! Everything here is a function of the sun elevation, weather cover, and the
-//! difficulty's night darkness. It feeds the sky uniforms, the mesh lights,
-//! and the lens-flare gating in `render/mod.rs`.
+//! Everything here is a function of the sun elevation, the time of day, the
+//! weather cover, and the difficulty's night darkness. It feeds the sky
+//! uniforms, the mesh lights, and the lens-flare gating in `render/mod.rs`.
 
-// Sun sweeps along this fixed azimuth in world space (keeps today's look).
-const SUN_AZ_X: f32 = 0.25;
-const SUN_AZ_Z: f32 = 0.4;
+// The sun's azimuth at sunrise and sunset (radians, `atan2(x, z)` convention).
+// Across the daylight hours the sun sweeps east -> south -> west between these
+// two bearings, so its position is locked to the time of day.
+const SUN_AZ_SUNRISE: f32 = 55.0_f32.to_radians();
+const SUN_AZ_SUNSET: f32 = 305.0_f32.to_radians();
+
+// Horizontal magnitude of the sun direction, kept equal to the old fixed
+// azimuth length so the noon elevation angle (and the whole elevation curve)
+// look exactly as they did before the sun started sweeping.
+const SUN_HORIZONTAL: f32 = 0.4717;
 
 const DAY_ZENITH: [f32; 3] = [0.18, 0.42, 0.83];
 const DAY_HORIZON: [f32; 3] = [0.55, 0.70, 0.92];
@@ -18,9 +25,6 @@ const NIGHT_HORIZON: [f32; 3] = [0.04, 0.05, 0.09];
 const NIGHT_CLOUD_TINT: [f32; 3] = [0.22, 0.24, 0.32];
 const OVERCAST_HORIZON: [f32; 3] = [0.60, 0.60, 0.63];
 const DUSK_WARM: [f32; 3] = [0.85, 0.45, 0.22];
-
-/// Faint moonlight direction used whenever the sun is below the horizon.
-const MOON_DIR: [f32; 3] = [-0.3, 0.5, -0.35];
 
 /// Sky colors passed to the sky dome shader (alpha is unused there).
 pub struct SkyPalette {
@@ -45,8 +49,39 @@ pub struct Lights {
     pub night_fac: f32,
 }
 
+/// Sun azimuth in radians for any hour of the day, sweeping east -> west over
+/// the daylight span and extrapolating (wrapped) through the night. The moon is
+/// the antipode of this same sweep.
+fn solar_azimuth(hours: f32, day_fraction: f32) -> f32 {
+    let day_hours = day_fraction * 24.0;
+    let sunrise = (24.0 - day_hours) * 0.5;
+    let t = (hours - sunrise) / day_hours;
+    (SUN_AZ_SUNRISE + (SUN_AZ_SUNSET - SUN_AZ_SUNRISE) * t).rem_euclid(std::f32::consts::TAU)
+}
+
+/// World-space direction toward the sun for a frame (the day branch of
+/// `compute`). Also used at startup to hint where the sun sits in the sky.
+pub fn sun_direction(sun_elevation: f32, hours: f32, day_fraction: f32) -> [f32; 3] {
+    let az = solar_azimuth(hours, day_fraction);
+    vec3_normalize([
+        az.sin() * SUN_HORIZONTAL,
+        sun_elevation,
+        az.cos() * SUN_HORIZONTAL,
+    ])
+}
+
 /// Computes the sky palettes and lights for a frame.
-pub fn compute(sun_elevation: f32, cover: f32, night_fac: f32) -> (SkyPalette, Lights) {
+///
+/// `hours` is the in-game time of day (0..24) and `day_fraction` the share of
+/// the cycle with the sun above the horizon; together they place the sun, and
+/// the moon (its antipode), at a position locked to the day/night cycle.
+pub fn compute(
+    sun_elevation: f32,
+    hours: f32,
+    day_fraction: f32,
+    cover: f32,
+    night_fac: f32,
+) -> (SkyPalette, Lights) {
     let day_fac = smoothstep(-0.02, 0.08, sun_elevation);
     let night_curve = 1.0 - day_fac;
 
@@ -62,11 +97,19 @@ pub fn compute(sun_elevation: f32, cover: f32, night_fac: f32) -> (SkyPalette, L
     let dim = 1.0 - 0.22 * cover;
     let fog_color = mix3(horizon, OVERCAST_HORIZON, cover).map(|c| c * dim);
 
-    let (light_dir, sun_intensity) = if sun_elevation > 0.0 {
-        let d = vec3_normalize([SUN_AZ_X, sun_elevation, SUN_AZ_Z]);
+    let (light_dir, sun_intensity) = if sun_elevation >= 0.0 {
+        let d = sun_direction(sun_elevation, hours, day_fraction);
         (d, smoothstep(0.0, 0.12, sun_elevation))
     } else {
-        (MOON_DIR, night_fac * 0.14)
+        // The moon is the sun's antipode: mirrored azimuth, mirrored elevation.
+        let sun_az = solar_azimuth(hours, day_fraction);
+        let moon_az = (sun_az + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU);
+        let d = vec3_normalize([
+            moon_az.sin() * SUN_HORIZONTAL,
+            -sun_elevation,
+            moon_az.cos() * SUN_HORIZONTAL,
+        ]);
+        (d, night_fac * 0.14)
     };
 
     let ambient = mix(0.48, 0.06, night_fac);
@@ -114,9 +157,24 @@ fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
 mod tests {
     use super::*;
 
+    // EasyArcade's day/night tuning: 82% daylight.
+    const DAY_FRACTION: f32 = 0.82;
+
+    fn day_hours() -> f32 {
+        DAY_FRACTION * 24.0
+    }
+
+    fn sunrise() -> f32 {
+        (24.0 - day_hours()) * 0.5
+    }
+
+    fn sunset() -> f32 {
+        sunrise() + day_hours()
+    }
+
     #[test]
     fn noon_sun_points_up_and_day_fac_peaks() {
-        let (_, lights) = compute(1.0, 0.0, 0.0);
+        let (_, lights) = compute(1.0, 12.0, DAY_FRACTION, 0.0, 0.0);
         assert!(lights.light_dir[1] > 0.7, "sun high at noon");
         assert!(lights.day_fac > 0.99);
         assert!(lights.ambient > 0.4, "bright ambient by day");
@@ -124,8 +182,8 @@ mod tests {
 
     #[test]
     fn midnight_uses_moonlight_and_dark_ambient() {
-        let (_, lights) = compute(-1.0, 0.0, 1.0);
-        assert_eq!(lights.light_dir, [MOON_DIR[0], MOON_DIR[1], MOON_DIR[2], 0.0]);
+        let (_, lights) = compute(-1.0, 0.0, DAY_FRACTION, 0.0, 1.0);
+        assert!(lights.light_dir[1] > 0.7, "moon high at midnight");
         assert!(lights.day_fac < 0.01);
         assert!(lights.sun_intensity < 0.15, "moonlight is faint");
         assert!(lights.ambient < 0.1, "night ambient is dark");
@@ -133,16 +191,77 @@ mod tests {
 
     #[test]
     fn night_sky_is_darker_than_day() {
-        let (day, _) = compute(1.0, 0.0, 0.0);
-        let (night, _) = compute(-1.0, 0.0, 1.0);
+        let (day, _) = compute(1.0, 12.0, DAY_FRACTION, 0.0, 0.0);
+        let (night, _) = compute(-1.0, 0.0, DAY_FRACTION, 0.0, 1.0);
         assert!(night.zenith[0] < day.zenith[0]);
         assert!(night.fog_color[0] < day.fog_color[0]);
     }
 
     #[test]
     fn weather_dims_the_fog_color() {
-        let (clear, _) = compute(0.6, 0.0, 0.0);
-        let (rainy, _) = compute(0.6, 1.0, 0.0);
+        let (clear, _) = compute(0.6, 12.0, DAY_FRACTION, 0.0, 0.0);
+        let (rainy, _) = compute(0.6, 12.0, DAY_FRACTION, 1.0, 0.0);
         assert!(rainy.fog_color[0] < clear.fog_color[0]);
+    }
+
+    #[test]
+    fn sun_azimuth_sweeps_east_to_south_to_west() {
+        let (_, rise) = compute(0.0, sunrise(), DAY_FRACTION, 0.0, 0.0);
+        let (_, noon) = compute(1.0, 12.0, DAY_FRACTION, 0.0, 0.0);
+        let (_, set) = compute(0.0, sunset(), DAY_FRACTION, 0.0, 0.0);
+        let az = |l: &Lights| {
+            l.light_dir[0]
+                .atan2(l.light_dir[2])
+                .rem_euclid(std::f32::consts::TAU)
+        };
+        assert!((az(&rise) - SUN_AZ_SUNRISE).abs() < 1e-3, "sun rises in the east");
+        assert!((az(&noon) - std::f32::consts::PI).abs() < 1e-3, "sun crosses the south at noon");
+        assert!((az(&set) - SUN_AZ_SUNSET).abs() < 1e-3, "sun sets in the west");
+    }
+
+    #[test]
+    fn moon_is_the_suns_antipode() {
+        // Slightly after sunset the moon rises opposite where the sun just set.
+        let (_, dusk) = compute(-0.1, sunset() + 0.5, DAY_FRACTION, 0.0, 0.5);
+        assert!(dusk.light_dir[1] > 0.0, "moon rising above the horizon");
+        let dusk_az = dusk.light_dir[0]
+            .atan2(dusk.light_dir[2])
+            .rem_euclid(std::f32::consts::TAU);
+        let expected =
+            (solar_azimuth(sunset() + 0.5, DAY_FRACTION) + std::f32::consts::PI)
+                .rem_euclid(std::f32::consts::TAU);
+        assert!((dusk_az - expected).abs() < 1e-3, "moon azimuth mirrors the sun");
+
+        // Midnight: moon straight up, antipodal to the extrapolated sun.
+        let (_, midnight) = compute(-1.0, 0.0, DAY_FRACTION, 0.0, 1.0);
+        assert!(midnight.light_dir[1] > 0.7, "moon high at midnight");
+        let midnight_az = midnight.light_dir[0]
+            .atan2(midnight.light_dir[2])
+            .rem_euclid(std::f32::consts::TAU);
+        let expected = (solar_azimuth(0.0, DAY_FRACTION) + std::f32::consts::PI)
+            .rem_euclid(std::f32::consts::TAU);
+        assert!((midnight_az - expected).abs() < 1e-3, "midnight moon mirrors the sun");
+    }
+
+    #[test]
+    fn elevation_curve_is_preserved_while_the_sun_sweeps() {
+        // The azimuth sweep must not change the elevation curve: for a given
+        // elevation factor the sun's elevation angle stays the same, so only
+        // the horizontal direction rotates.
+        let (_, rise) = compute(0.0, sunrise(), DAY_FRACTION, 0.0, 0.0);
+        let (_, noon) = compute(1.0, 12.0, DAY_FRACTION, 0.0, 0.0);
+        let (_, set) = compute(0.0, sunset(), DAY_FRACTION, 0.0, 0.0);
+        let elev = |l: &Lights| {
+            let horiz =
+                (l.light_dir[0] * l.light_dir[0] + l.light_dir[2] * l.light_dir[2]).sqrt();
+            l.light_dir[1].atan2(horiz)
+        };
+        let expected_noon = 1.0_f32.atan2(SUN_HORIZONTAL);
+        assert!(
+            (elev(&noon) - expected_noon).abs() < 1e-3,
+            "noon elevation angle unchanged from the fixed-azimuth look"
+        );
+        assert!(elev(&rise).abs() < 1e-3, "sun on the horizon at sunrise");
+        assert!(elev(&set).abs() < 1e-3, "sun on the horizon at sunset");
     }
 }

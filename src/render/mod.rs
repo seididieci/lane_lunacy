@@ -566,7 +566,9 @@ impl Renderer {
                 input_assembly_state: Some(InputAssemblyState::default()),
                 viewport_state: Some(ViewportState::default()),
                 rasterization_state: Some(RasterizationState {
-                    cull_mode: CullMode::Back,
+                    // Screen-space quads use the same winding as the HUD, so no
+                    // back-face culling (all triangles would be culled).
+                    cull_mode: CullMode::None,
                     ..Default::default()
                 }),
                 multisample_state: Some(MultisampleState::default()),
@@ -796,7 +798,7 @@ impl Renderer {
             cloud_b,
         );
 
-        let (dome_vertices, dome_indices) = build_sky_dome(10, 32);
+        let (dome_vertices, dome_indices) = build_sky_dome(32, 128);
         let (sky_dome_vertices, sky_dome_indices) =
             make_mesh_buffers(memory_allocator.clone(), dome_vertices, dome_indices);
 
@@ -1138,8 +1140,13 @@ impl Renderer {
             let t = ((game.cloud_amount() - 0.10) / 0.90).clamp(0.0, 1.0);
             t * t * (3.0 - 2.0 * t)
         };
-        let (palette, lights) =
-            daynight::compute(game.sun_elevation(), cover, game.night_fac());
+        let (palette, lights) = daynight::compute(
+            game.sun_elevation(),
+            game.time_of_day(),
+            game.difficulty.tuning().day_fraction,
+            cover,
+            game.night_fac(),
+        );
         let fog_color = palette.fog_color;
         let time_of_day = game.time_of_day();
 
@@ -1480,7 +1487,9 @@ impl Renderer {
             let view_dir = view.transform_vector3(sun_dir);
             if view_dir.z < 0.0 {
                 let clip = proj * view_dir.extend(1.0);
-                let sun_ndc = [clip.x / clip.w, clip.y / clip.w];
+                // Projection is Vulkan y-down; flip y so flare positions use the
+                // shader's y-up NDC convention (same as the HUD).
+                let sun_ndc = [clip.x / clip.w, -clip.y / clip.w];
                 let off = (sun_ndc[0].abs().max(sun_ndc[1].abs()) - 0.9).max(0.0);
                 let off_fade = 1.0 / (1.0 + off * 8.0);
                 let flare_intensity = lights.sun_intensity * (1.0 - 0.9 * cover) * off_fade;

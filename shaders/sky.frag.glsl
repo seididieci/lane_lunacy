@@ -111,19 +111,20 @@ void main() {
     float sun_vis = smoothstep(0.0, 0.04, sun_elevation) * mix(1.0, 0.12, cover);
     if (sun_elevation > 0.0) {
         float sun_dot = max(dot(dir, sun), 0.0);
-        // Bright disc plus a compact halo, both muted by cloud cover.
-        float disc = smoothstep(0.9996, 0.9999, sun_dot) * sun_vis;
-        float halo = pow(sun_dot, 8.0) * sun_vis;
+        // Bright disc plus a compact halo, both muted by cloud cover. The disc
+        // threshold is wide enough that the coarse sky dome always samples it.
+        float disc = smoothstep(0.9985, 0.9996, sun_dot) * sun_vis;
+        float halo = pow(sun_dot, 24.0) * sun_vis;
         vec3 sun_col = mix(horizon.rgb, vec3(1.0, 0.95, 0.85), 0.5);
-        col += disc * sun_col * 3.0 + halo * sun_col * 0.35;
+        col += disc * sun_col * 3.0 + halo * sun_col * 0.5;
     } else {
         // Faint pale moon disc and a small glow, fading out toward dusk.
         float moon_dot = max(dot(dir, sun), 0.0);
         float moon_fade = 1.0 - day_fac;
-        float moon_disc = smoothstep(0.99975, 0.9999, moon_dot) * moon_fade;
+        float moon_disc = smoothstep(0.9985, 0.9996, moon_dot) * moon_fade;
         vec3 moon_col = vec3(0.75, 0.80, 0.90);
         col += moon_disc * moon_col * 2.0;
-        col += pow(moon_dot, 12.0) * moon_col * 0.10 * moon_fade;
+        col += pow(moon_dot, 24.0) * moon_col * 0.10 * moon_fade;
     }
 
     // Subtle stars in the night sky, fading in after sunset.
