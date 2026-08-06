@@ -35,11 +35,12 @@ pub mod frame;
 pub mod particles;
 pub mod record;
 pub mod scene;
+pub mod snapshot;
 pub mod texture;
 
-const WORLD_CHUNK_LEN: f32 = 260.0;
-const WORLD_CHUNKS_BEHIND: i32 = 1;
-const WORLD_CHUNKS_AHEAD: i32 = 6;
+pub(crate) const WORLD_CHUNK_LEN: f32 = 260.0;
+pub(crate) const WORLD_CHUNKS_BEHIND: i32 = 1;
+pub(crate) const WORLD_CHUNKS_AHEAD: i32 = 6;
 
 pub struct Renderer {
     device: Arc<Device>,
@@ -112,7 +113,13 @@ impl Renderer {
 
         // Every GPU resource that is independent of the swapchain/framebuffer
         // lives in `SceneResources`, shared with the headless snapshot path.
-        let scene = SceneResources::new(device.clone(), queue.clone(), render_pass.clone(), font_atlas, seed);
+        let scene = SceneResources::new(
+            device.clone(),
+            queue.clone(),
+            render_pass.clone(),
+            font_atlas,
+            seed,
+        );
 
         let extent = swapchain.image_extent();
         let viewport = Viewport {

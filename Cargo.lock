@@ -962,6 +962,7 @@ dependencies = [
  "fontdue",
  "glam",
  "gltf",
+ "half",
  "image",
  "shaderc",
  "vulkano",

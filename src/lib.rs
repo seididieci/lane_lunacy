@@ -77,8 +77,9 @@ pub fn run(gpu_index: usize, weather: Weather, start_hour: Option<f32>, seed: Op
 }
 
 /// Headless `--snapshot` entry point: boots a surface-less Vulkan context,
-/// builds the deterministic `Game` for the scenario, and prints the derived
-/// scene state. The offscreen render + PNG write lands in a later step.
+/// builds the deterministic `Game` for the scenario, renders it offscreen
+/// through the same command-buffer recorder the windowed path uses, and writes
+/// the result as a PNG.
 pub fn run_snapshot(opts: SnapshotOptions) {
     let instance = create_headless_instance();
     let devices = enumerate_devices(&instance);
@@ -105,6 +106,19 @@ pub fn run_snapshot(opts: SnapshotOptions) {
         physical.properties().device_name,
         queue.queue_family_index()
     );
-    let _ = device;
-    let _ = game;
+
+    let font_atlas = crate::font::FontAtlas::load();
+    let image = crate::render::snapshot::render_snapshot(
+        device,
+        queue,
+        &game,
+        &font_atlas,
+        opts.seed,
+        opts.width,
+        opts.height,
+    );
+    image
+        .save_with_format(&opts.path, image::ImageFormat::Png)
+        .unwrap_or_else(|e| panic!("failed to write snapshot to {}: {e}", opts.path.display()));
+    println!("wrote snapshot: {}", opts.path.display());
 }
