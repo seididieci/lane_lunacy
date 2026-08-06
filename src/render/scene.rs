@@ -79,6 +79,8 @@ pub struct SceneResources {
     pub memory_allocator: Arc<StandardMemoryAllocator>,
     pub command_allocator: Arc<StandardCommandBufferAllocator>,
     pub descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
+    /// Queue family the frame command buffers are recorded against.
+    pub queue_family_index: u32,
 
     pub mesh_pipeline: Arc<GraphicsPipeline>,
     pub hud_pipeline: Arc<GraphicsPipeline>,
@@ -768,6 +770,7 @@ impl SceneResources {
             memory_allocator,
             command_allocator,
             descriptor_set_allocator,
+            queue_family_index: queue.queue_family_index(),
             mesh_pipeline,
             hud_pipeline,
             sky_pipeline,

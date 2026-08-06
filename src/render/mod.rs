@@ -1,22 +1,15 @@
 // SPDX-License-Identifier: MIT
 use std::sync::Arc;
 
-use glam::{Mat4, Vec3};
 use winit::window::Window;
 
 use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
-use vulkano::command_buffer::{
-    AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer, RenderPassBeginInfo,
-    SubpassBeginInfo, SubpassContents, SubpassEndInfo,
-};
-use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
 use vulkano::device::{Device, Queue};
 use vulkano::format::Format;
 use vulkano::image::view::ImageView;
 use vulkano::image::{Image, ImageCreateInfo, ImageType};
 use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter};
 use vulkano::pipeline::graphics::viewport::Viewport;
-use vulkano::pipeline::{Pipeline, PipelineBindPoint};
 use vulkano::render_pass::{Framebuffer, RenderPass};
 use vulkano::swapchain::{
     acquire_next_image, Surface, Swapchain, SwapchainCreateInfo, SwapchainPresentInfo,
@@ -28,8 +21,9 @@ use vulkano::{Validated, VulkanError};
 use crate::font::FontAtlas;
 use crate::game::Game;
 use crate::mesh::build_world_chunk;
-use crate::render::frame::{build_frame, traffic_rotation};
+use crate::render::frame::build_frame;
 use crate::render::particles::{DustSystem, RainSystem};
+use crate::render::record::record_frame;
 use crate::render::scene::SceneResources;
 use crate::vertex::{HudVertex, Vertex3d};
 
@@ -39,6 +33,7 @@ pub mod daynight;
 pub mod flare;
 pub mod frame;
 pub mod particles;
+pub mod record;
 pub mod scene;
 pub mod texture;
 
@@ -305,330 +300,16 @@ impl Renderer {
             hud_verts.to_vec(),
         );
 
-        let view = frame.view;
-        let proj = frame.proj;
-        let lights = frame.lights;
-        let fog_color = frame.fog_color;
-        let wet_fac = frame.wet_fac;
-        let headlight_pos = frame.headlight_pos;
-        let headlight_dir = frame.headlight_dir;
-        let traffic_head_pos = frame.traffic_head_pos;
-        let traffic_head_dir = frame.traffic_head_dir;
-        let traffic_head_state = frame.traffic_head_state;
-        let sky_uniform = frame.sky_uniform;
-        let particle_verts = frame.particle_verts;
-        let dust_verts = frame.dust_verts;
-        let flare_verts = frame.flare_verts;
-
-        let mut builder = AutoCommandBufferBuilder::primary(
-            self.scene.command_allocator.clone(),
-            self.queue.queue_family_index(),
-            CommandBufferUsage::MultipleSubmit,
-        )
-        .expect("command buffer builder");
-
-        builder
-            .begin_render_pass(
-                RenderPassBeginInfo {
-                    clear_values: vec![Some([0.9, 0.7, 0.5, 1.0].into()), Some(1.0f32.into())],
-                    ..RenderPassBeginInfo::framebuffer(self.framebuffers[image_i as usize].clone())
-                },
-                SubpassBeginInfo {
-                    contents: SubpassContents::Inline,
-                    ..Default::default()
-                },
-            )
-            .expect("begin render pass")
-            .set_viewport(0, [self.viewport.clone()].into_iter().collect())
-            .expect("set viewport");
-
-        // ---- Sky dome (background) ----
-        // Drawn first with depth disabled so the 3D scene overdraws it.
-        builder
-            .bind_pipeline_graphics(self.scene.sky_pipeline.clone())
-            .expect("bind sky pipeline");
-
-        let sky_buf = Buffer::from_data(
-            self.scene.memory_allocator.clone(),
-            BufferCreateInfo {
-                usage: BufferUsage::UNIFORM_BUFFER,
-                ..Default::default()
-            },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-            sky_uniform,
-        )
-        .expect("sky uniform buffer");
-        let sky_set_layout = self.scene.sky_pipeline.layout().set_layouts()[0].clone();
-        let sky_set = DescriptorSet::new(
-            self.scene.descriptor_set_allocator.clone(),
-            sky_set_layout,
-            [
-                WriteDescriptorSet::buffer(0, sky_buf),
-                WriteDescriptorSet::image_view_sampler(
-                    1,
-                    self.scene.cloud_a_view.clone(),
-                    self.scene.mesh_sampler.clone(),
-                ),
-                WriteDescriptorSet::image_view_sampler(
-                    2,
-                    self.scene.cloud_b_view.clone(),
-                    self.scene.mesh_sampler.clone(),
-                ),
-            ],
-            [],
-        )
-        .expect("sky descriptor set");
-        let sky_index_count = self.scene.sky_dome_indices.len() as u32;
-        builder
-            .bind_descriptor_sets(
-                PipelineBindPoint::Graphics,
-                self.scene.sky_pipeline.layout().clone(),
-                0,
-                sky_set,
-            )
-            .expect("bind sky descriptor sets")
-            .bind_vertex_buffers(0, self.scene.sky_dome_vertices.clone())
-            .expect("bind sky vertex buffers")
-            .bind_index_buffer(self.scene.sky_dome_indices.clone())
-            .expect("bind sky index buffer");
-        unsafe {
-            builder
-                .draw_indexed(sky_index_count, 1, 0, 0, 0)
-                .expect("draw sky");
-        }
-
-        // ---- 3D scene ----
-        builder
-            .bind_pipeline_graphics(self.scene.mesh_pipeline.clone())
-            .expect("bind mesh pipeline");
-
-        let draw = |builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
-                    vertices: Subbuffer<[Vertex3d]>,
-                    indices: Subbuffer<[u32]>,
-                    texture: Arc<ImageView>,
-                    model: Mat4| {
-            let index_count = indices.len() as u32;
-            let mvp = self.scene.mvp_buffer(
-                model,
-                view,
-                proj,
-                &lights,
-                wet_fac,
-                fog_color,
-                headlight_pos,
-                headlight_dir,
-                traffic_head_pos,
-                traffic_head_dir,
-                traffic_head_state,
-            );
-            let set_layout = self.scene.mesh_pipeline.layout().set_layouts()[0].clone();
-            let set = DescriptorSet::new(
-                self.scene.descriptor_set_allocator.clone(),
-                set_layout,
-                [
-                    WriteDescriptorSet::buffer(0, mvp.clone()),
-                    WriteDescriptorSet::image_view_sampler(1, texture, self.scene.mesh_sampler.clone()),
-                ],
-                [],
-            )
-            .expect("descriptor set");
-            builder
-                .bind_descriptor_sets(
-                    PipelineBindPoint::Graphics,
-                    self.scene.mesh_pipeline.layout().clone(),
-                    0,
-                    set,
-                )
-                .expect("bind descriptor sets")
-                .bind_vertex_buffers(0, vertices)
-                .expect("bind vertex buffers")
-                .bind_index_buffer(indices)
-                .expect("bind index buffer");
-            unsafe {
-                builder
-                    .draw_indexed(index_count, 1, 0, 0, 0)
-                    .expect("draw indexed");
-            }
-        };
-
-        for (world_vertices, world_indices) in &self.world_chunks {
-            draw(
-                &mut builder,
-                world_vertices.clone(),
-                world_indices.clone(),
-                self.scene.world_texture_view.clone(),
-                Mat4::IDENTITY,
-            );
-        }
-        // player car
-        draw(
-            &mut builder,
-            self.scene.car_vertices.clone(),
-            self.scene.car_indices.clone(),
-            self.scene.car_texture_view.clone(),
-            Mat4::from_scale_rotation_translation(
-                Vec3::ONE,
-                glam::Quat::from_rotation_y(-game.vehicle.heading),
-                Vec3::new(game.player_world_x(), 0.03, game.player_world_z()),
-            ),
+        // Everything between begin/end render pass is recorded identically for
+        // the swapchain and the headless snapshot target.
+        let command_buffer = record_frame(
+            &self.scene,
+            game,
+            &frame,
+            &self.world_chunks,
+            self.framebuffers[image_i as usize].clone(),
+            &self.viewport,
         );
-        // traffic
-        for (idx, t) in game.traffic.iter().enumerate() {
-            let tvx = crate::road::road_curve(t.distance) + t.lane;
-            let traffic_rot = traffic_rotation(t.lane, t.distance);
-            let (traffic_vertices, traffic_indices, _anchors) =
-                &self.scene.traffic_meshes[idx % self.scene.traffic_meshes.len()];
-            draw(
-                &mut builder,
-                traffic_vertices.clone(),
-                traffic_indices.clone(),
-                self.scene.car_texture_view.clone(),
-                Mat4::from_scale_rotation_translation(
-                    Vec3::ONE,
-                    traffic_rot,
-                    Vec3::new(tvx, 0.35, -t.distance),
-                ),
-            );
-        }
-
-        // ---- Particles (rain + night taillights + drift dust) ----
-        // Additive, depth-tested (no depth write) so particles fall over the
-        // road but behind cars, and fade into the sky fog like everything else.
-        if !dust_verts.is_empty() {
-            self.scene.draw_particles(
-                &mut builder,
-                &self.scene.dust_pipeline,
-                &dust_verts,
-                view,
-                proj,
-                &lights,
-                wet_fac,
-                fog_color,
-                headlight_pos,
-                headlight_dir,
-                traffic_head_pos,
-                traffic_head_dir,
-                traffic_head_state,
-            );
-        }
-        if !particle_verts.is_empty() {
-            self.scene.draw_particles(
-                &mut builder,
-                &self.scene.particle_pipeline,
-                &particle_verts,
-                view,
-                proj,
-                &lights,
-                wet_fac,
-                fog_color,
-                headlight_pos,
-                headlight_dir,
-                traffic_head_pos,
-                traffic_head_dir,
-                traffic_head_state,
-            );
-        }
-
-        // ---- Sun lens flare ----
-        // Quads are baked into the CPU Frame (NDC positions, fan layout,
-        // intensity); we only upload and draw them here.
-        if !flare_verts.is_empty() {
-            let flare_set_layout = self.scene.flare_pipeline.layout().set_layouts()[0].clone();
-            let flare_set = DescriptorSet::new(
-                self.scene.descriptor_set_allocator.clone(),
-                flare_set_layout,
-                [
-                    WriteDescriptorSet::image_view_sampler(
-                        0,
-                        self.scene.flare_core_view.clone(),
-                        self.scene.flare_sampler.clone(),
-                    ),
-                    WriteDescriptorSet::image_view_sampler(
-                        1,
-                        self.scene.flare_streak_view.clone(),
-                        self.scene.flare_sampler.clone(),
-                    ),
-                    WriteDescriptorSet::image_view_sampler(
-                        2,
-                        self.scene.flare_ring_view.clone(),
-                        self.scene.flare_sampler.clone(),
-                    ),
-                ],
-                [],
-            )
-            .expect("flare descriptor set");
-            let flare_buf = Buffer::from_iter(
-                self.scene.memory_allocator.clone(),
-                BufferCreateInfo {
-                    usage: BufferUsage::VERTEX_BUFFER,
-                    ..Default::default()
-                },
-                AllocationCreateInfo {
-                    memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                    ..Default::default()
-                },
-                flare_verts.iter().copied(),
-            )
-            .expect("flare buffer");
-            let flare_vertex_count = flare_buf.len() as u32;
-            builder
-                .bind_pipeline_graphics(self.scene.flare_pipeline.clone())
-                .expect("bind flare pipeline")
-                .bind_descriptor_sets(
-                    PipelineBindPoint::Graphics,
-                    self.scene.flare_pipeline.layout().clone(),
-                    0,
-                    flare_set,
-                )
-                .expect("bind flare descriptor sets")
-                .bind_vertex_buffers(0, flare_buf)
-                .expect("bind flare vertex buffers");
-            unsafe {
-                builder
-                    .draw(flare_vertex_count, 1, 0, 0)
-                    .expect("draw flare");
-            }
-        }
-
-        // ---- HUD ----
-        builder
-            .bind_pipeline_graphics(self.scene.hud_pipeline.clone())
-            .expect("bind hud pipeline")
-            .bind_descriptor_sets(
-                PipelineBindPoint::Graphics,
-                self.scene.hud_pipeline.layout().clone(),
-                0,
-                self.scene.hud_descriptor_set.clone(),
-            )
-            .expect("bind hud descriptor set");
-        let hud_vertex_count = hud_verts.len() as u32;
-        let hud_buf = Buffer::from_iter(
-            self.scene.memory_allocator.clone(),
-            BufferCreateInfo {
-                usage: BufferUsage::VERTEX_BUFFER,
-                ..Default::default()
-            },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-            hud_verts.iter().copied(),
-        )
-        .expect("hud buffer");
-        builder
-            .bind_vertex_buffers(0, hud_buf)
-            .expect("bind hud vertex buffers");
-        unsafe {
-            builder.draw(hud_vertex_count, 1, 0, 0).expect("draw hud");
-        }
-
-        builder
-            .end_render_pass(SubpassEndInfo::default())
-            .expect("end render pass");
-        let command_buffer = builder.build().expect("build command buffer");
 
         let previous_future: Box<dyn GpuFuture> =
             match self.fences[self.previous_fence_i as usize].clone() {
