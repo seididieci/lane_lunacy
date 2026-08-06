@@ -28,14 +28,26 @@ use crate::font::FontAtlas;
 use crate::game::Game;
 use crate::hud::build_hud_tree;
 use crate::mesh::build_world_chunk;
-use crate::render::frame::build_frame;
+use crate::render::frame::{build_frame, Frame};
 use crate::render::record::record_frame;
 use crate::render::scene::SceneResources;
 use crate::render::{WORLD_CHUNKS_AHEAD, WORLD_CHUNKS_BEHIND, WORLD_CHUNK_LEN};
 use crate::ui::Ui;
 
+/// Result of one offscreen render: the sRGB PNG pixels, the raw linear (HDR)
+/// RGBA floats used for GPU probes, and the CPU `Frame` used for CPU probes.
+pub struct SnapshotOutput {
+    pub image: image::RgbaImage,
+    /// Linear RGBA floats (`width * height * 4`), one `f32` per channel.
+    pub linear_rgba: Vec<f32>,
+    pub width: u32,
+    pub height: u32,
+    /// The deterministic CPU frame the render was built from.
+    pub frame: Frame,
+}
+
 /// Renders one deterministic frame of `game` offscreen and returns the pixels
-/// as an RGBA image (PNG-friendly channel order).
+/// (as a PNG-friendly RGBA image) plus the linear values and frame for probes.
 pub fn render_snapshot(
     device: Arc<Device>,
     queue: Arc<Queue>,
@@ -44,7 +56,7 @@ pub fn render_snapshot(
     seed: u64,
     width: u32,
     height: u32,
-) -> image::RgbaImage {
+) -> SnapshotOutput {
     let render_pass = vulkano::single_pass_renderpass!(
         device.clone(),
         attachments: {
@@ -219,18 +231,26 @@ pub fn render_snapshot(
         .unwrap();
 
     let guard = readback.read().expect("read snapshot pixels");
+    let mut linear_rgba = Vec::with_capacity((width as usize) * (height as usize) * 4);
     let mut pixels = Vec::with_capacity((width as usize) * (height as usize) * 4);
     // R16G16B16A16_SFLOAT is two little-endian half-float bytes per channel.
     for chunk in guard.chunks_exact(8) {
         let r = half::f16::from_bits(u16::from_le_bytes([chunk[0], chunk[1]])).to_f32();
         let g = half::f16::from_bits(u16::from_le_bytes([chunk[2], chunk[3]])).to_f32();
         let b = half::f16::from_bits(u16::from_le_bytes([chunk[4], chunk[5]])).to_f32();
+        linear_rgba.extend_from_slice(&[r, g, b, 1.0]);
         pixels.push(linear_to_srgb_u8(r));
         pixels.push(linear_to_srgb_u8(g));
         pixels.push(linear_to_srgb_u8(b));
         pixels.push(255);
     }
-    image::RgbaImage::from_raw(width, height, pixels).expect("snapshot pixel size")
+    SnapshotOutput {
+        image: image::RgbaImage::from_raw(width, height, pixels).expect("snapshot pixel size"),
+        linear_rgba,
+        width,
+        height,
+        frame,
+    }
 }
 
 /// Converts a linear float color channel (0..1, as stored in the HDR

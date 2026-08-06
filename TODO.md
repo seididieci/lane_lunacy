@@ -30,8 +30,8 @@ visual parity.
 - [x] Extract `SceneResources` (pipelines, textures, models, buffers, samplers) shared by windowed + offscreen
 - [x] Extract `record.rs` command-buffer recorder reused by both presenters
 - [x] `snapshot.rs`: offscreen color+depth images, framebuffer, render, readback via `copy_image_to_buffer`, PNG via `image`
-- [ ] Probes: CPU (sun NDC, flare intensity, projector road coverage, wet/night fac) + GPU from pixels (sky-top lum, road-center lum, sun-disc max lum, flare bloom); print/JSON
-- [ ] Capture baseline snapshots + probe JSON (noon clear, midnight rain, dusk) as golden reference
+- [x] Probes: CPU (sun NDC, flare intensity, projector road coverage, wet/night fac) + GPU from pixels (sky-top lum, road-center lum, sun-disc max lum, flare bloom); print/JSON
+- [x] Capture baseline snapshots + probe JSON (noon clear, midnight rain, dusk) as golden reference
 - [ ] Pipeline factory `graphics_pipeline()` (stages, vertex input, blend, depth, cull, samples) killing the 6 duplicated blocks in `render/mod.rs`
 - [ ] Deduplicate math: shared `smoothstep`/`mix`; remove copies in `game/mod.rs`, `daynight.rs`, `flare.rs`
 - [ ] Bundle headlight/projector arrays into structs; shrink `mvp_buffer`/`draw_particles` signatures (ISP)

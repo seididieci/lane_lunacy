@@ -108,7 +108,7 @@ pub fn run_snapshot(opts: SnapshotOptions) {
     );
 
     let font_atlas = crate::font::FontAtlas::load();
-    let image = crate::render::snapshot::render_snapshot(
+    let output = crate::render::snapshot::render_snapshot(
         device,
         queue,
         &game,
@@ -117,7 +117,37 @@ pub fn run_snapshot(opts: SnapshotOptions) {
         opts.width,
         opts.height,
     );
-    image
+
+    // Programmatic eye: derive CPU probes from the frame math and GPU probes
+    // from the rendered linear pixels, then persist both beside the PNG.
+    let cpu = crate::render::probe::compute_cpu(&game, &output.frame);
+    let gpu = crate::render::probe::compute_gpu(
+        &output.linear_rgba,
+        output.width,
+        output.height,
+        output.frame.sun_ndc,
+    );
+    let probe = crate::render::probe::Probe { cpu, gpu };
+    println!(
+        "probes: sun_ndc {:?}, flare {:.3}, road_cov {:.3}, wet {:.3}, night {:.3} | lum sky {:.3} road {:.3} sun_disc {:.3} bloom {:.3}",
+        cpu.sun_ndc,
+        cpu.flare_intensity,
+        cpu.projector_road_coverage,
+        cpu.wet_fac,
+        cpu.night_fac,
+        gpu.sky_top_lum,
+        gpu.road_center_lum,
+        gpu.sun_disc_max_lum,
+        gpu.flare_bloom_lum,
+    );
+
+    let json_path = opts.path.with_extension("json");
+    std::fs::write(&json_path, crate::render::probe::to_json(&probe))
+        .unwrap_or_else(|e| panic!("failed to write probes to {}: {e}", json_path.display()));
+    println!("wrote probes: {}", json_path.display());
+
+    output
+        .image
         .save_with_format(&opts.path, image::ImageFormat::Png)
         .unwrap_or_else(|e| panic!("failed to write snapshot to {}: {e}", opts.path.display()));
     println!("wrote snapshot: {}", opts.path.display());
