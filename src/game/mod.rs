@@ -8,6 +8,7 @@ use crate::game::vehicle::{
     Vehicle, BOOST_DURATION, PERFECT_HI, PERFECT_LO, RED_SHIFT_HEAT_KICK, RED_ZONE_START,
 };
 use crate::input::Input;
+use crate::math::smoothstep;
 use crate::road::road_curve;
 
 pub mod difficulty;
@@ -331,12 +332,6 @@ fn seeded_start_hour(seed: Option<u64>) -> Option<f32> {
         x ^= x >> 31;
         (x >> 33) as f32 / (1u64 << 31) as f32 * 24.0
     })
-}
-
-/// GLSL-style smoothstep over a generic `edge0 > edge1` interval.
-fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
-    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
 }
 
 #[cfg(test)]

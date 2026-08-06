@@ -7,6 +7,7 @@ pub mod game;
 pub mod gpu;
 pub mod hud;
 pub mod input;
+pub mod math;
 pub mod menu;
 pub mod mesh;
 pub mod model;

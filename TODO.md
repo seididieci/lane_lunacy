@@ -33,7 +33,7 @@ visual parity.
 - [x] Probes: CPU (sun NDC, flare intensity, projector road coverage, wet/night fac) + GPU from pixels (sky-top lum, road-center lum, sun-disc max lum, flare bloom); print/JSON
 - [x] Capture baseline snapshots + probe JSON (noon clear, midnight rain, dusk) as golden reference
 - [x] Pipeline factory `graphics_pipeline()` (stages, vertex input, blend, depth, cull, samples) killing the 6 duplicated blocks in `render/mod.rs`
-- [ ] Deduplicate math: shared `smoothstep`/`mix`; remove copies in `game/mod.rs`, `daynight.rs`, `flare.rs`
+^- [x] Deduplicate math: shared `smoothstep`/`mix`; remove copies in `game/mod.rs`, `daynight.rs`, `flare.rs`
 - [ ] Bundle headlight/projector arrays into structs; shrink `mvp_buffer`/`draw_particles` signatures (ISP)
 - [ ] Decouple windowed `Renderer` to only own swapchain/acquire/present; delegate math + recording
 - [ ] Snapshot regression tests: CPU probes always run; GPU probe tests gated behind `LANE_SNAPSHOT_TESTS=1`

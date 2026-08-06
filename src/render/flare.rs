@@ -4,6 +4,7 @@
 //! projects the sun into NDC and fans ghosts + an anamorphic streak along the
 //! line from the sun to the screen center.
 
+use crate::math::smoothstep;
 use crate::vertex::FlareVertex;
 
 /// Quad kind selector for the flare fragment shader.
@@ -153,11 +154,6 @@ pub fn build_flare_verts(sun_ndc: [f32; 2], aspect: f32, intensity: f32) -> Vec<
         0.30 * intensity,
     );
     out
-}
-
-fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
-    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
 }
 
 /// Appends a quad (two triangles, 6 vertices) centered at `(cx, cy)` with

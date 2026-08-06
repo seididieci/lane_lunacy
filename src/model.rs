@@ -2,6 +2,7 @@
 
 use glam::{Mat3, Mat4, Vec3};
 
+use crate::math::mix;
 use crate::vertex::Vertex3d;
 
 const TARGET_CAR_LENGTH: f32 = 4.0;
@@ -249,10 +250,6 @@ fn compute_anchors(vertices: &[Vertex3d]) -> CarLightAnchors {
             fallback
         },
     }
-}
-
-fn mix(a: f32, b: f32, t: f32) -> f32 {
-    a + (b - a) * t
 }
 
 #[cfg(test)]

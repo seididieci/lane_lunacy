@@ -16,6 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use glam::Vec3;
 
+use crate::math::smoothstep;
 use crate::surface::DustProfile;
 use crate::vertex::ParticleVertex;
 
@@ -296,11 +297,6 @@ pub fn drift_intensity(
     };
     let combined = (slip + steer_kick + launch + 0.12).clamp(0.0, 1.0);
     combined * emission
-}
-
-fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
-    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
 }
 
 /// Bakes a soft radial RGBA sprite (gaussian blob, white core fading to clear)

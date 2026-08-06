@@ -6,6 +6,8 @@
 //! weather cover, and the difficulty's night darkness. It feeds the sky
 //! uniforms, the mesh lights, and the lens-flare gating in `render/mod.rs`.
 
+use crate::math::{mix, smoothstep};
+
 // The sun's azimuth at sunrise and sunset (radians, `atan2(x, z)` convention).
 // Across the daylight hours the sun sweeps east -> south -> west between these
 // two bearings, so its position is locked to the time of day.
@@ -133,12 +135,12 @@ pub fn compute(
     )
 }
 
-fn mix(a: f32, b: f32, t: f32) -> f32 {
-    a + (b - a) * t
-}
-
 fn mix3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
-    [mix(a[0], b[0], t), mix(a[1], b[1], t), mix(a[2], b[2], t)]
+    [
+        crate::math::mix(a[0], b[0], t),
+        crate::math::mix(a[1], b[1], t),
+        crate::math::mix(a[2], b[2], t),
+    ]
 }
 
 fn vec3_normalize(v: [f32; 3]) -> [f32; 3] {
@@ -148,11 +150,6 @@ fn vec3_normalize(v: [f32; 3]) -> [f32; 3] {
     } else {
         [v[0] / l, v[1] / l, v[2] / l]
     }
-}
-
-fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
-    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
 }
 
 #[cfg(test)]
