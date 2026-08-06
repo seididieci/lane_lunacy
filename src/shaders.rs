@@ -31,6 +31,9 @@ pub struct MVP {
     pub light_state: [f32; 4],
     pub headlight_pos: [f32; 4],
     pub headlight_dir: [f32; 4],
+    pub traffic_head_pos: [[f32; 4]; 16],
+    pub traffic_head_dir: [[f32; 4]; 16],
+    pub traffic_head_state: [[f32; 4]; 16],
 }
 
 #[derive(BufferContents, Clone, Copy, Debug)]

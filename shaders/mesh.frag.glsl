@@ -17,6 +17,9 @@ layout(set = 0, binding = 0) uniform MVP {
     vec4 light_state;
     vec4 headlight_pos;
     vec4 headlight_dir;
+    vec4 traffic_head_pos[16];
+    vec4 traffic_head_dir[16];
+    vec4 traffic_head_state[16];
 };
 
 layout(set = 0, binding = 1) uniform sampler2D tex;
@@ -26,7 +29,9 @@ void main() {
     float diff = max(dot(n, normalize(light_dir.xyz)), 0.0);
     float ambient = light_state.x;
     float sun_intensity = light_state.y;
+    float wet_fac = light_state.z;
     float night_fac = light_state.w;
+    float wet_cine = smoothstep(0.15, 1.0, wet_fac);
     vec3 tex_col;
     // Cars (material 99) use the car colormap directly.
     if (v_material >= 90.0) {
@@ -53,10 +58,63 @@ void main() {
     vec3 to_light = headlight_pos.xyz - v_world_pos;
     float head_dist = length(to_light);
     vec3 L = to_light / max(head_dist, 1e-4);
-    float spot = dot(L, normalize(headlight_dir.xyz));
-    float head = smoothstep(0.90, 0.97, spot) * exp(-head_dist * 0.06);
+    // L points fragment->light; cone axis points light->forward.
+    float spot = dot(-L, normalize(headlight_dir.xyz));
+    // Dual-layer wet cone: narrow bright core + wider faint skirt ("both"
+    // presets together) so the beam keeps definition while retaining cinematic
+    // peripheral spread in rain.
+    float head_inner_core = mix(0.97, 0.945, wet_cine);
+    float head_outer_core = mix(0.90, 0.845, wet_cine);
+    float head_inner_skirt = mix(0.97, 0.925, wet_cine);
+    float head_outer_skirt = mix(0.90, 0.80, wet_cine);
+    float head_decay = mix(0.06, 0.024, wet_cine);
+    float head_core = smoothstep(head_outer_core, head_inner_core, spot);
+    float head_skirt = smoothstep(head_outer_skirt, head_inner_skirt, spot);
+    float head = (head_core + head_skirt * (0.35 * wet_cine)) * exp(-head_dist * head_decay);
+    head *= mix(1.0, 1.45, wet_cine);
+    // In heavy rain, keep reach cinematic but avoid a blown-out patch right
+    // under the camera by softly suppressing the nearest meters.
+    float near_head_fade = mix(1.0, smoothstep(1.4, 4.2, head_dist), wet_cine);
+    head *= near_head_fade;
+    head = min(head, 1.6);
     head *= night_fac;
     lit += albedo * head * 0.85;
+
+    // Oncoming traffic headlight projectors (uniform road light pools).
+    // state = [strength, max_dist, cos_inner, cos_outer]
+    for (int i = 0; i < 16; ++i) {
+        vec3 lp = traffic_head_pos[i].xyz;
+        vec3 ld = normalize(traffic_head_dir[i].xyz);
+        float strength = traffic_head_state[i].x;
+        if (strength <= 0.001) {
+            continue;
+        }
+        float max_dist = traffic_head_state[i].y;
+        float cos_inner = traffic_head_state[i].z;
+        float cos_outer = traffic_head_state[i].w;
+        float traffic_dist = max_dist * mix(1.0, 1.65, wet_cine);
+        float traffic_inner = mix(cos_inner, cos_inner - 0.05, wet_cine);
+        float traffic_outer = mix(cos_outer, cos_outer - 0.12, wet_cine);
+        float traffic_gain = mix(1.0, 1.55, wet_cine);
+        vec3 to_l = lp - v_world_pos;
+        float dist = length(to_l);
+        if (dist <= 1e-4 || dist >= traffic_dist) {
+            continue;
+        }
+        vec3 Ll = to_l / dist;
+        // Ll points fragment->light; projector axis is light->forward.
+        float cone = dot(-Ll, ld);
+        float beam = smoothstep(traffic_outer, traffic_inner, cone);
+        float fall = (1.0 - dist / traffic_dist);
+        float dist_falloff = fall * fall;
+        float near_traffic_fade = mix(1.0, smoothstep(1.6, 5.4, dist), wet_cine);
+        // Strongest near the road plane, with a soft vertical fade up car bodies.
+        float road_mask = 1.0 - smoothstep(0.24, 2.2, abs(v_world_pos.y - 0.02));
+        float traffic_head =
+            beam * dist_falloff * strength * traffic_gain * near_traffic_fade * night_fac * road_mask;
+        traffic_head = min(traffic_head, 1.4);
+        lit += albedo * traffic_head * 0.80;
+    }
 
     // Long, gentle fog ramp that reaches full opacity exactly at the far clip
     // plane, so distant geometry fades into the same color as the sky horizon

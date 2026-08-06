@@ -22,6 +22,9 @@ layout(set = 0, binding = 0) uniform MVP {
     vec4 light_state;
     vec4 headlight_pos;
     vec4 headlight_dir;
+    vec4 traffic_head_pos[16];
+    vec4 traffic_head_dir[16];
+    vec4 traffic_head_state[16];
 };
 
 void main() {

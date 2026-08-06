@@ -12,10 +12,12 @@
 const SUN_AZ_SUNRISE: f32 = 55.0_f32.to_radians();
 const SUN_AZ_SUNSET: f32 = 305.0_f32.to_radians();
 
-// Horizontal magnitude of the sun direction, kept equal to the old fixed
-// azimuth length so the noon elevation angle (and the whole elevation curve)
-// look exactly as they did before the sun started sweeping.
-const SUN_HORIZONTAL: f32 = 0.4717;
+// Horizontal magnitude of the sun direction. The ratio of the vertical
+// elevation factor to this length sets the sun's angle above the horizon; it
+// is tuned so the sun peaks at ~20° elevation, keeping it inside the chase
+// camera's vertical FOV whenever it is in front of the car (and the moon
+// mirrored at night).
+const SUN_HORIZONTAL: f32 = 2.75;
 
 const DAY_ZENITH: [f32; 3] = [0.18, 0.42, 0.83];
 const DAY_HORIZON: [f32; 3] = [0.55, 0.70, 0.92];
@@ -175,7 +177,15 @@ mod tests {
     #[test]
     fn noon_sun_points_up_and_day_fac_peaks() {
         let (_, lights) = compute(1.0, 12.0, DAY_FRACTION, 0.0, 0.0);
-        assert!(lights.light_dir[1] > 0.7, "sun high at noon");
+        let expected = 1.0_f32.atan2(SUN_HORIZONTAL);
+        let elev = (lights.light_dir[0] * lights.light_dir[0]
+            + lights.light_dir[2] * lights.light_dir[2])
+            .sqrt()
+            .atan2(lights.light_dir[1]);
+        assert!(
+            (elev - (std::f32::consts::FRAC_PI_2 - expected)).abs() < 1e-3,
+            "sun at its ~20° noon angle above the horizon"
+        );
         assert!(lights.day_fac > 0.99);
         assert!(lights.ambient > 0.4, "bright ambient by day");
     }
@@ -183,7 +193,17 @@ mod tests {
     #[test]
     fn midnight_uses_moonlight_and_dark_ambient() {
         let (_, lights) = compute(-1.0, 0.0, DAY_FRACTION, 0.0, 1.0);
-        assert!(lights.light_dir[1] > 0.7, "moon high at midnight");
+        // The moon mirrors the sun's low arc as its antipode, so it sits at the
+        // same ~20° elevation at midnight.
+        let horiz =
+            (lights.light_dir[0] * lights.light_dir[0] + lights.light_dir[2] * lights.light_dir[2])
+                .sqrt();
+        let elev = lights.light_dir[1].atan2(horiz);
+        let expected = 1.0_f32.atan2(SUN_HORIZONTAL);
+        assert!(
+            (elev - expected).abs() < 1e-3,
+            "moon at the sun's noon elevation at midnight"
+        );
         assert!(lights.day_fac < 0.01);
         assert!(lights.sun_intensity < 0.15, "moonlight is faint");
         assert!(lights.ambient < 0.1, "night ambient is dark");
@@ -232,9 +252,14 @@ mod tests {
                 .rem_euclid(std::f32::consts::TAU);
         assert!((dusk_az - expected).abs() < 1e-3, "moon azimuth mirrors the sun");
 
-        // Midnight: moon straight up, antipodal to the extrapolated sun.
+        // Midnight: moon at the top of its (low) arc, antipodal to the
+        // extrapolated sun.
         let (_, midnight) = compute(-1.0, 0.0, DAY_FRACTION, 0.0, 1.0);
-        assert!(midnight.light_dir[1] > 0.7, "moon high at midnight");
+        let elev = (midnight.light_dir[0] * midnight.light_dir[0]
+            + midnight.light_dir[2] * midnight.light_dir[2])
+            .sqrt()
+            .atan2(midnight.light_dir[1]);
+        assert!(elev > 0.0, "moon up at midnight");
         let midnight_az = midnight.light_dir[0]
             .atan2(midnight.light_dir[2])
             .rem_euclid(std::f32::consts::TAU);

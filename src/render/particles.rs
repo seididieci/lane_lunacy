@@ -396,8 +396,9 @@ pub fn build_taillights(
 }
 
 /// Bakes the visible headlights of oncoming traffic: a warm-white disc with a
-/// faint halo per light, plus a soft light pool cast on the asphalt in front of
-/// each light. `lights` is a list of `(center, forward_dir)` pairs: the light
+/// faint halo per light. Road illumination is projected in the mesh shader for
+/// uniformity, so this pass renders only the visible lamp glow. `lights` is a
+/// list of `(center, forward_dir)` pairs: the light
 /// at its real anchor position (lateral offset and height baked in by the
 /// caller), and the direction its beams shine. Everything behind the camera is
 /// skipped. `intensity` (0..1) scales the glow.
@@ -411,8 +412,8 @@ pub fn build_headlights(
         return Vec::new();
     }
     let right = right.normalize_or_zero();
-    let mut out = Vec::with_capacity(lights.len() * 18);
-    for (center, forward) in lights {
+    let mut out = Vec::with_capacity(lights.len() * 12);
+    for (center, _forward) in lights {
         if center.z - eye.z > 5.0 {
             continue; // behind the camera
         }
@@ -434,19 +435,6 @@ pub fn build_headlights(
         let br = *center + halo_side - halo_up;
         let bl = *center - halo_side - halo_up;
         push_quad(&mut out, tl, tr, br, bl, halo, 0.0);
-        // Light pool cast on the road ahead of the light, following the full
-        // horizontal beam direction (so it stays on the asphalt around curves).
-        let pool_center = Vec3::new(center.x, 0.02, center.z);
-        if pool_center.z - eye.z <= 5.0 {
-            let across = forward.cross(Vec3::Y).normalize_or_zero() * 1.7;
-            let along = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero() * 5.0;
-            let pool = [1.0, 0.95, 0.82, intensity * 0.18];
-            let tl = pool_center + along + across;
-            let tr = pool_center + along - across;
-            let br = pool_center - along - across;
-            let bl = pool_center - along + across;
-            push_quad(&mut out, tl, tr, br, bl, pool, 0.0);
-        }
     }
     out
 }
@@ -537,17 +525,13 @@ mod tests {
     }
 
     #[test]
-    fn headlights_emit_discs_halos_and_a_road_pool() {
+    fn headlights_emit_discs_and_halos() {
         let lights = vec![(Vec3::new(2.0, 0.8, -10.0), Vec3::new(0.0, 0.0, 1.0))];
         let verts = build_headlights(&lights, Vec3::ZERO, Vec3::X, 1.0);
-        assert_eq!(verts.len(), 18, "1 disc + 1 halo + 1 pool per light = 3 quads = 18 verts");
+        assert_eq!(verts.len(), 12, "1 disc + 1 halo per light = 2 quads = 12 verts");
         assert!(
             verts.iter().all(|v| v.color[0] > 0.9 && v.color[1] > 0.9),
             "headlights are warm white"
-        );
-        assert!(
-            verts.iter().any(|v| v.position[1] < 0.1),
-            "the road pool lies flat on the asphalt"
         );
     }
 

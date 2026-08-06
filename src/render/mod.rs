@@ -80,6 +80,7 @@ const WORLD_CHUNKS_AHEAD: i32 = 6;
 
 const SKY_RADIUS: f32 = 550.0;
 const CLOUD_TILE: u32 = 256;
+const MAX_TRAFFIC_HEADLIGHTS: usize = 16;
 
 const PLAYER_MODEL_GLB: &[u8] = include_bytes!("../../assets/models/player_race_future.glb");
 const TRAFFIC_SEDAN_GLB: &[u8] = include_bytes!("../../assets/models/traffic_sedan.glb");
@@ -108,6 +109,7 @@ pub struct Renderer {
     flare_pipeline: Arc<GraphicsPipeline>,
     flare_core_view: Arc<ImageView>,
     flare_streak_view: Arc<ImageView>,
+    flare_ring_view: Arc<ImageView>,
     flare_sampler: Arc<Sampler>,
     particle_sprite_view: Arc<ImageView>,
     particle_sampler: Arc<Sampler>,
@@ -613,6 +615,14 @@ impl Renderer {
             32,
             flare::generate_flare_streak(256, 32),
         );
+        let (flare_ring_view, flare_ring_mips) = upload_rgba8_texture_mipmapped(
+            memory_allocator.clone(),
+            command_allocator.clone(),
+            queue.clone(),
+            256,
+            256,
+            flare::generate_flare_ring(256),
+        );
         let flare_sampler = Sampler::new(
             device.clone(),
             SamplerCreateInfo {
@@ -622,6 +632,7 @@ impl Renderer {
                 address_mode: [SamplerAddressMode::ClampToEdge; 3],
                 lod: 0.0..=flare_core_mips
                     .max(flare_streak_mips)
+                    .max(flare_ring_mips)
                     .saturating_sub(1) as f32,
                 ..Default::default()
             },
@@ -859,6 +870,7 @@ impl Renderer {
             flare_pipeline,
             flare_core_view,
             flare_streak_view,
+            flare_ring_view,
             flare_sampler,
             particle_sprite_view,
             particle_sampler,
@@ -991,10 +1003,13 @@ impl Renderer {
         view: Mat4,
         proj: Mat4,
         lights: &Lights,
-        time_of_day: f32,
+        wet_fac: f32,
         fog_color: [f32; 4],
         headlight_pos: [f32; 4],
         headlight_dir: [f32; 4],
+        traffic_head_pos: [[f32; 4]; MAX_TRAFFIC_HEADLIGHTS],
+        traffic_head_dir: [[f32; 4]; MAX_TRAFFIC_HEADLIGHTS],
+        traffic_head_state: [[f32; 4]; MAX_TRAFFIC_HEADLIGHTS],
     ) -> Subbuffer<MVP> {
         let mvp = MVP {
             model: model.to_cols_array_2d(),
@@ -1005,11 +1020,14 @@ impl Renderer {
             light_state: [
                 lights.ambient,
                 lights.sun_intensity,
-                time_of_day,
+                wet_fac,
                 lights.night_fac,
             ],
             headlight_pos,
             headlight_dir,
+            traffic_head_pos,
+            traffic_head_dir,
+            traffic_head_state,
         };
         Buffer::from_data(
             self.memory_allocator.clone(),
@@ -1036,10 +1054,13 @@ impl Renderer {
         view: Mat4,
         proj: Mat4,
         lights: &Lights,
-        time_of_day: f32,
+        wet_fac: f32,
         fog_color: [f32; 4],
         headlight_pos: [f32; 4],
         headlight_dir: [f32; 4],
+        traffic_head_pos: [[f32; 4]; MAX_TRAFFIC_HEADLIGHTS],
+        traffic_head_dir: [[f32; 4]; MAX_TRAFFIC_HEADLIGHTS],
+        traffic_head_state: [[f32; 4]; MAX_TRAFFIC_HEADLIGHTS],
     ) {
         if verts.is_empty() {
             return;
@@ -1050,10 +1071,13 @@ impl Renderer {
             view,
             proj,
             lights,
-            time_of_day,
+            wet_fac,
             fog_color,
             headlight_pos,
             headlight_dir,
+            traffic_head_pos,
+            traffic_head_dir,
+            traffic_head_state,
         );
         let particle_set_layout = pipeline.layout().set_layouts()[0].clone();
         let particle_set = DescriptorSet::new(
@@ -1149,6 +1173,7 @@ impl Renderer {
         );
         let fog_color = palette.fog_color;
         let time_of_day = game.time_of_day();
+        let wet_fac = game.rain_intensity();
 
         self.ensure_world_chunks_for_player(game.vehicle.distance);
         let car_pos = Vec3::new(game.player_world_x(), 0.0, game.player_world_z());
@@ -1158,7 +1183,7 @@ impl Renderer {
         self.camera_heading += diff * (dt_secs * 3.0).min(1.0);
         let cam_forward = Vec3::new(self.camera_heading.sin(), 0.0, -self.camera_heading.cos());
         let eye = car_pos - cam_forward * 8.0 + Vec3::new(0.0, 4.0, 0.0);
-        let look_at = car_pos + cam_forward * 4.0 + Vec3::new(0.0, 0.5, 0.0);
+        let look_at = car_pos + cam_forward * 4.0 + Vec3::new(0.0, 3.6, 0.0);
         let cam = Camera {
             eye,
             forward: (look_at - eye).normalize(),
@@ -1282,6 +1307,47 @@ impl Renderer {
             1.0,
         ];
         let headlight_dir = [head_forward.x, -0.15, head_forward.z, 0.0];
+        let night_fac = lights.night_fac;
+
+        // Traffic headlight anchors are used in two ways:
+        // 1) projected onto asphalt in the mesh shader for uniform road light
+        //    (ALL cars, so same-direction cars light the road ahead too),
+        // 2) as visible lamp sprites in the particle pass (oncoming only; the
+        //    rear of same-direction cars shows red taillights instead).
+        let mut oncoming_head_lights = Vec::with_capacity(game.traffic.len() * 2);
+        let mut traffic_projectors = Vec::with_capacity(game.traffic.len() * 2);
+        if night_fac > 0.02 {
+            for (idx, t) in game.traffic.iter().enumerate() {
+                let tvx = crate::road::road_curve(t.distance) + t.lane;
+                let rot = traffic_rotation(t.lane, t.distance);
+                let anchors = &self.traffic_meshes[idx % self.traffic_meshes.len()].2;
+                let car_pos = Vec3::new(tvx, 0.35, -t.distance);
+                let forward = (rot * Vec3::new(0.0, 0.0, -1.0)).normalize();
+                let left = car_pos
+                    + rot * Vec3::new(-anchors.lateral, anchors.headlight_y, -anchors.long_half);
+                let right = car_pos
+                    + rot * Vec3::new(anchors.lateral, anchors.headlight_y, -anchors.long_half);
+                traffic_projectors.push((left, forward));
+                traffic_projectors.push((right, forward));
+                if t.lane < 0.0 {
+                    oncoming_head_lights.push((left, forward));
+                    oncoming_head_lights.push((right, forward));
+                }
+            }
+        }
+        let mut traffic_head_pos = [[0.0; 4]; MAX_TRAFFIC_HEADLIGHTS];
+        let mut traffic_head_dir = [[0.0; 4]; MAX_TRAFFIC_HEADLIGHTS];
+        let mut traffic_head_state = [[0.0; 4]; MAX_TRAFFIC_HEADLIGHTS];
+        for (i, (center, forward)) in traffic_projectors
+            .iter()
+            .take(MAX_TRAFFIC_HEADLIGHTS)
+            .enumerate()
+        {
+            traffic_head_pos[i] = [center.x, center.y, center.z, 1.0];
+            traffic_head_dir[i] = [forward.x, -0.13, forward.z, 0.0];
+            // [strength, max_dist, cos_inner, cos_outer]
+            traffic_head_state[i] = [0.95, 20.0, 0.965, 0.90];
+        }
 
         let draw = |builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
                     vertices: Subbuffer<[Vertex3d]>,
@@ -1294,10 +1360,13 @@ impl Renderer {
                 view,
                 proj,
                 &lights,
-                time_of_day,
+                wet_fac,
                 fog_color,
                 headlight_pos,
                 headlight_dir,
+                traffic_head_pos,
+                traffic_head_dir,
+                traffic_head_state,
             );
             let set_layout = self.mesh_pipeline.layout().set_layouts()[0].clone();
             let set = DescriptorSet::new(
@@ -1374,7 +1443,7 @@ impl Renderer {
         // road but behind cars, and fade into the sky fog like everything else.
         let mut particle_verts = Vec::new();
         let mut dust_verts = Vec::new();
-        let rain_intensity = game.rain_intensity();
+        let rain_intensity = wet_fac;
         if rain_intensity > 0.0 {
             let cam_right = cam_forward.cross(Vec3::Y);
             self.rain.update(dt_secs, eye, game.vehicle.speed);
@@ -1403,11 +1472,9 @@ impl Renderer {
             dust_verts.append(&mut self.dust.build_vertices(eye, cam_right));
         }
 
-        let night_fac = game.night_fac();
         if night_fac > 0.02 {
             let cam_right = cam_forward.cross(Vec3::Y);
             let mut tail_centers = Vec::with_capacity(game.traffic.len() * 2 + 2);
-            let mut head_lights = Vec::with_capacity(game.traffic.len() * 2);
 
             // The player car's own rear taillights, from its model anchors.
             let player_rot = glam::Quat::from_rotation_y(-game.vehicle.heading);
@@ -1425,11 +1492,6 @@ impl Renderer {
                     // Same direction: red taillights at the rear (facing away).
                     tail_centers.push(car_pos + rot * Vec3::new(-anchors.lateral, anchors.taillight_y, anchors.long_half));
                     tail_centers.push(car_pos + rot * Vec3::new(anchors.lateral, anchors.taillight_y, anchors.long_half));
-                } else {
-                    // Oncoming: warm headlights at the front, shining at us.
-                    let forward = (rot * Vec3::new(0.0, 0.0, -1.0)).normalize();
-                    head_lights.push((car_pos + rot * Vec3::new(-anchors.lateral, anchors.headlight_y, -anchors.long_half), forward));
-                    head_lights.push((car_pos + rot * Vec3::new(anchors.lateral, anchors.headlight_y, -anchors.long_half), forward));
                 }
             }
             particle_verts.append(&mut particles::build_taillights(
@@ -1439,7 +1501,7 @@ impl Renderer {
                 night_fac,
             ));
             particle_verts.append(&mut particles::build_headlights(
-                &head_lights,
+                &oncoming_head_lights,
                 eye,
                 cam_right,
                 night_fac,
@@ -1453,10 +1515,13 @@ impl Renderer {
                 view,
                 proj,
                 &lights,
-                time_of_day,
+                wet_fac,
                 fog_color,
                 headlight_pos,
                 headlight_dir,
+                traffic_head_pos,
+                traffic_head_dir,
+                traffic_head_state,
             );
         }
         if !particle_verts.is_empty() {
@@ -1467,10 +1532,13 @@ impl Renderer {
                 view,
                 proj,
                 &lights,
-                time_of_day,
+                wet_fac,
                 fog_color,
                 headlight_pos,
                 headlight_dir,
+                traffic_head_pos,
+                traffic_head_dir,
+                traffic_head_state,
             );
         }
 
@@ -1508,6 +1576,11 @@ impl Renderer {
                             WriteDescriptorSet::image_view_sampler(
                                 1,
                                 self.flare_streak_view.clone(),
+                                self.flare_sampler.clone(),
+                            ),
+                            WriteDescriptorSet::image_view_sampler(
+                                2,
+                                self.flare_ring_view.clone(),
                                 self.flare_sampler.clone(),
                             ),
                         ],
