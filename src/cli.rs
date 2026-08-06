@@ -29,6 +29,8 @@ pub enum RunMode {
         gpu: usize,
         weather: Weather,
         start_hour: Option<f32>,
+        /// `--seed`, or `None` for a clock-random scene seed.
+        seed: Option<u64>,
     },
     Snapshot(SnapshotOptions),
 }
@@ -40,11 +42,11 @@ pub fn parse(args: &[String]) -> RunMode {
     let mut gpu = 0usize;
     let mut weather = Weather::Auto;
     let mut start_hour: Option<f32> = None;
+    let mut seed: Option<u64> = None;
 
     let mut snapshot: Option<PathBuf> = None;
     let mut width = 1280u32;
     let mut height = 720u32;
-    let mut seed = 0u64;
 
     let mut i = 0;
     while i < args.len() {
@@ -104,7 +106,7 @@ pub fn parse(args: &[String]) -> RunMode {
             }
             "--seed" => {
                 if let Some(v) = args.get(i + 1).and_then(|v| v.parse::<u64>().ok()) {
-                    seed = v;
+                    seed = Some(v);
                     i += 2;
                 } else {
                     eprintln!("invalid value for --seed (a u64), using 0");
@@ -125,13 +127,14 @@ pub fn parse(args: &[String]) -> RunMode {
             weather,
             width,
             height,
-            seed,
+            seed: seed.unwrap_or(0),
             gpu,
         }),
         None => RunMode::Interactive {
             gpu,
             weather,
             start_hour,
+            seed,
         },
     }
 }
@@ -163,10 +166,12 @@ mod tests {
                 gpu,
                 weather,
                 start_hour,
+                seed,
             } => {
                 assert_eq!(gpu, 0);
                 assert_eq!(weather, Weather::Auto);
                 assert_eq!(start_hour, None);
+                assert_eq!(seed, None);
             }
             _ => panic!("expected interactive mode"),
         }
@@ -179,10 +184,12 @@ mod tests {
                 gpu,
                 weather,
                 start_hour,
+                seed,
             } => {
                 assert_eq!(gpu, 1);
                 assert_eq!(weather, Weather::Rain);
                 assert_eq!(start_hour, Some(18.5));
+                assert_eq!(seed, None);
             }
             _ => panic!("expected interactive mode"),
         }
@@ -242,6 +249,14 @@ mod tests {
     fn out_of_range_time_is_rejected() {
         match parse_args(&["--time", "30"]) {
             RunMode::Interactive { start_hour, .. } => assert_eq!(start_hour, None),
+            _ => panic!("expected interactive mode"),
+        }
+    }
+
+    #[test]
+    fn interactive_accepts_seed() {
+        match parse_args(&["--seed", "7"]) {
+            RunMode::Interactive { seed, .. } => assert_eq!(seed, Some(7)),
             _ => panic!("expected interactive mode"),
         }
     }

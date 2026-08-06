@@ -3,9 +3,9 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::game::difficulty::DifficultyTuning;
-use crate::game::traffic::{rebuild_traffic, update_traffic, Traffic, check_collision};
+use crate::game::traffic::{check_collision, rebuild_traffic, update_traffic, Traffic};
 use crate::game::vehicle::{
-    Vehicle, RED_ZONE_START, PERFECT_LO, PERFECT_HI, BOOST_DURATION, RED_SHIFT_HEAT_KICK,
+    Vehicle, BOOST_DURATION, PERFECT_HI, PERFECT_LO, RED_SHIFT_HEAT_KICK, RED_ZONE_START,
 };
 use crate::input::Input;
 use crate::road::road_curve;
@@ -41,6 +41,9 @@ pub struct Game {
     /// When set (via `--time`), the day/night cycle always restarts at this
     /// hour instead of a randomized one, so runs are reproducible for testing.
     start_hour: Option<f32>,
+    /// Optional scene seed that makes the weather cycle phase and (absent a
+    /// `start_hour`) the start hour deterministic across runs.
+    seed: Option<u64>,
     pub score: u32,
     pub bonus_score: u32,
     pub best_score: u32,
@@ -65,6 +68,7 @@ impl Game {
             weather_phase: random_weather_phase(),
             time_of_day_phase: random_start_hour(),
             start_hour: None,
+            seed: None,
             score: 0,
             bonus_score: 0,
             best_score: 0,
@@ -88,9 +92,22 @@ impl Game {
         self.bonus_score = 0;
         self.avg_speed = 0.0;
         self.time = 0.0;
-        self.weather_phase = random_weather_phase();
-        self.time_of_day_phase = self.start_hour.unwrap_or_else(random_start_hour);
+        self.weather_phase = seeded_phase(self.seed).unwrap_or_else(random_weather_phase);
+        self.time_of_day_phase = self
+            .start_hour
+            .unwrap_or_else(|| seeded_start_hour(self.seed).unwrap_or_else(random_start_hour));
         self.rebuild_traffic();
+    }
+
+    /// Pins the scene seed so the weather-cycle phase and the day/night start
+    /// hour (when no `--time` is given) are reproducible across runs. Call
+    /// before `restart()` for it to take effect on the first frame too.
+    pub fn set_seed(&mut self, seed: u64) {
+        self.seed = Some(seed);
+        self.weather_phase = seeded_phase(self.seed).unwrap_or_else(random_weather_phase);
+        self.time_of_day_phase = self
+            .start_hour
+            .unwrap_or_else(|| seeded_start_hour(self.seed).unwrap_or_else(random_start_hour));
     }
 
     pub fn set_weather(&mut self, weather: Weather) {
@@ -293,6 +310,29 @@ fn random_start_hour() -> f32 {
     random_weather_phase() * (24.0 / std::f32::consts::TAU)
 }
 
+/// Deterministic phase in [0, 2π) for the Auto weather cycle, derived from an
+/// optional scene seed (SplitMix64 mix of the seed), or None -> clock-random.
+fn seeded_phase(seed: Option<u64>) -> Option<f32> {
+    seed.map(|seed| {
+        let mut x = seed ^ 0x9E37_79B9_7F4A_7C15;
+        x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        x ^= x >> 31;
+        (x >> 33) as f32 / (1u64 << 31) as f32 * std::f32::consts::TAU
+    })
+}
+
+/// Deterministic starting hour (0..24) derived from the scene seed.
+fn seeded_start_hour(seed: Option<u64>) -> Option<f32> {
+    seed.map(|seed| {
+        let mut x = seed ^ 0x94D0_49BB_1331_11EB;
+        x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        x ^= x >> 31;
+        (x >> 33) as f32 / (1u64 << 31) as f32 * 24.0
+    })
+}
+
 /// GLSL-style smoothstep over a generic `edge0 > edge1` interval.
 fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
@@ -331,7 +371,10 @@ mod tests {
                 break;
             }
         }
-        assert!(game.engine_blown, "engine must blow from sustained red zone");
+        assert!(
+            game.engine_blown,
+            "engine must blow from sustained red zone"
+        );
         assert!(!game.game_over, "car still coasts after the blow");
 
         // Coasting: the world keeps updating until the car stops.
@@ -341,7 +384,10 @@ mod tests {
             ticks += 1;
             assert!(ticks < 1200, "car never came to a stop");
         }
-        assert!(game.vehicle.speed <= COAST_STOP_SPEED, "car rolled to a stop");
+        assert!(
+            game.vehicle.speed <= COAST_STOP_SPEED,
+            "car rolled to a stop"
+        );
         assert!(game.best_score >= game.score);
     }
 
@@ -442,5 +488,54 @@ mod tests {
         let mut game = Game::new();
         game.set_start_hour(26.0);
         assert_eq!(game.time_of_day(), 2.0, "wraps into [0, 24)");
+    }
+
+    #[test]
+    fn seed_makes_weather_and_start_hour_deterministic() {
+        let mut a = Game::new();
+        a.set_seed(1234);
+        let mut b = Game::new();
+        b.set_seed(1234);
+        assert_eq!(
+            a.cloud_amount(),
+            b.cloud_amount(),
+            "same seed -> same clouds"
+        );
+        assert_eq!(a.time_of_day(), b.time_of_day(), "same seed -> same clock");
+        assert!(a.time_of_day() > 0.0, "unpinned start derived from seed");
+    }
+
+    #[test]
+    fn different_seed_changes_the_scene() {
+        let mut a = Game::new();
+        a.set_seed(1);
+        let mut b = Game::new();
+        b.set_seed(2);
+        assert!(
+            (a.time_of_day() - b.time_of_day()).abs() > 0.01
+                || (a.cloud_amount() - b.cloud_amount()).abs() > 0.01,
+            "different seeds should diverge"
+        );
+    }
+
+    #[test]
+    fn seeded_start_hour_is_overridden_by_a_pin() {
+        let mut game = Game::new();
+        game.set_start_hour(9.0);
+        game.set_seed(999);
+        assert_eq!(game.time_of_day(), 9.0, "pinned hour wins over the seed");
+    }
+
+    #[test]
+    fn restart_reapplies_the_seed() {
+        let mut game = Game::new();
+        game.set_seed(42);
+        let clouds = game.cloud_amount();
+        game.restart();
+        assert_eq!(
+            game.cloud_amount(),
+            clouds,
+            "restart keeps the seeded phase"
+        );
     }
 }

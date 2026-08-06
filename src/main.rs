@@ -9,7 +9,8 @@ fn main() {
             gpu,
             weather,
             start_hour,
-        } => lane_lunacy::run(gpu, weather, start_hour),
+            seed,
+        } => lane_lunacy::run(gpu, weather, start_hour, seed),
         RunMode::Snapshot(opts) => lane_lunacy::run_snapshot(opts),
     }
 }

@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: MIT
-
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use glam::{Mat4, Vec3};
 use image::load_from_memory;
@@ -144,6 +142,7 @@ impl Renderer {
         window: Arc<Window>,
         physical: &Arc<vulkano::device::physical::PhysicalDevice>,
         font_atlas: &FontAtlas,
+        seed: u64,
     ) -> Self {
         let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
         let command_allocator = Arc::new(StandardCommandBufferAllocator::new(
@@ -772,11 +771,8 @@ impl Renderer {
 
         // ---- Sky cloud layer ----
         // Two decorrelated seamless tiles cross-faded in the sky shader so the
-        // clouds drift and evolve. Per-run seed -> a different sky each launch.
-        let seed = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock before epoch")
-            .as_nanos() as u64;
+        // clouds drift and evolve. A fixed scene seed -> the same sky every
+        // run; an unpredictable seed (default) -> a different sky each launch.
         let cloud_a = generate_cloud_tile(CLOUD_TILE, seed);
         let cloud_b = generate_cloud_tile(
             CLOUD_TILE,
