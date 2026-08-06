@@ -27,23 +27,9 @@ use vulkano::image::sampler::{Sampler, SamplerAddressMode, SamplerCreateInfo, Sa
 use vulkano::image::view::ImageView;
 use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
 use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
-use vulkano::pipeline::graphics::color_blend::{
-    AttachmentBlend, BlendFactor, BlendOp, ColorBlendAttachmentState, ColorBlendState,
-};
-use vulkano::pipeline::graphics::depth_stencil::{CompareOp, DepthState, DepthStencilState};
-use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
-use vulkano::pipeline::graphics::multisample::MultisampleState;
-use vulkano::pipeline::graphics::rasterization::{CullMode, RasterizationState};
-use vulkano::pipeline::graphics::vertex_input::{Vertex as VertexTrait, VertexDefinition};
-use vulkano::pipeline::graphics::viewport::ViewportState;
-use vulkano::pipeline::graphics::GraphicsPipelineCreateInfo;
-use vulkano::pipeline::layout::PipelineDescriptorSetLayoutCreateInfo;
-use vulkano::pipeline::{
-    DynamicState, GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout,
-    PipelineShaderStageCreateInfo,
-};
+use vulkano::pipeline::graphics::rasterization::CullMode;
+use vulkano::pipeline::{GraphicsPipeline, Pipeline, PipelineBindPoint};
 use vulkano::render_pass::{RenderPass, Subpass};
-use vulkano::shader::{ShaderModule, ShaderModuleCreateInfo};
 use vulkano::sync::{self, GpuFuture};
 
 use crate::font::FontAtlas;
@@ -54,6 +40,7 @@ use crate::render::daynight::Lights;
 use crate::render::flare;
 use crate::render::frame::MAX_TRAFFIC_HEADLIGHTS;
 use crate::render::particles::{generate_cloud_sprite, generate_soft_sprite};
+use crate::render::pipeline::{graphics_pipeline, load_shaders, Blend, Depth, PipelineSpec};
 use crate::render::texture::{
     make_mesh_buffers, upload_rgba8_texture, upload_rgba8_texture_mipmapped,
 };
@@ -134,294 +121,89 @@ impl SceneResources {
             StandardDescriptorSetAllocatorCreateInfo::default(),
         ));
 
-        let vs = unsafe {
-            ShaderModule::new(
-                device.clone(),
-                ShaderModuleCreateInfo::new(&shaders::spv_words(shaders::MESH_VERT_SPV)),
-            )
-        }
-        .expect("mesh vertex shader");
-        let fs = unsafe {
-            ShaderModule::new(
-                device.clone(),
-                ShaderModuleCreateInfo::new(&shaders::spv_words(shaders::MESH_FRAG_SPV)),
-            )
-        }
-        .expect("mesh fragment shader");
-        let vs_ep = vs.entry_point("main").unwrap();
-        let fs_ep = fs.entry_point("main").unwrap();
-        let mesh_vertex_input = Vertex3d::per_vertex().definition(&vs_ep).unwrap();
-        let mesh_stages = [
-            PipelineShaderStageCreateInfo::new(vs_ep),
-            PipelineShaderStageCreateInfo::new(fs_ep),
-        ];
-        let mesh_layout = PipelineLayout::new(
-            device.clone(),
-            PipelineDescriptorSetLayoutCreateInfo::from_stages(&mesh_stages)
-                .into_pipeline_layout_create_info(device.clone())
-                .unwrap(),
-        )
-        .unwrap();
         let subpass = Subpass::from(render_pass.clone(), 0).unwrap();
-        let mesh_pipeline = GraphicsPipeline::new(
-            device.clone(),
-            None,
-            GraphicsPipelineCreateInfo {
-                stages: mesh_stages.into_iter().collect(),
-                vertex_input_state: Some(mesh_vertex_input),
-                input_assembly_state: Some(InputAssemblyState::default()),
-                viewport_state: Some(ViewportState::default()),
-                rasterization_state: Some(RasterizationState {
-                    cull_mode: CullMode::Back,
-                    ..Default::default()
-                }),
-                multisample_state: Some(MultisampleState::default()),
-                depth_stencil_state: Some(DepthStencilState {
-                    depth: Some(DepthState {
-                        write_enable: true,
-                        compare_op: CompareOp::Less,
-                    }),
-                    ..Default::default()
-                }),
-                color_blend_state: Some(ColorBlendState::with_attachment_states(
-                    subpass.num_color_attachments(),
-                    ColorBlendAttachmentState::default(),
-                )),
-                dynamic_state: [DynamicState::Viewport].into_iter().collect(),
-                subpass: Some(subpass.into()),
-                ..GraphicsPipelineCreateInfo::layout(mesh_layout)
+        let mesh =
+            load_shaders::<Vertex3d>(&device, shaders::MESH_VERT_SPV, shaders::MESH_FRAG_SPV);
+        let mesh_pipeline = graphics_pipeline(
+            &device,
+            &subpass,
+            PipelineSpec {
+                label: "mesh pipeline",
+                cull_mode: CullMode::Back,
+                depth: Depth::Test { write: true },
+                blend: Blend::Opaque,
             },
-        )
-        .expect("mesh pipeline");
+            mesh.stages,
+            mesh.vertex_input,
+            mesh.layout,
+        );
 
-        let hvs = unsafe {
-            ShaderModule::new(
-                device.clone(),
-                ShaderModuleCreateInfo::new(&shaders::spv_words(shaders::HUD_VERT_SPV)),
-            )
-        }
-        .expect("hud vertex shader");
-        let hfs = unsafe {
-            ShaderModule::new(
-                device.clone(),
-                ShaderModuleCreateInfo::new(&shaders::spv_words(shaders::HUD_FRAG_SPV)),
-            )
-        }
-        .expect("hud fragment shader");
-        let hvs_ep = hvs.entry_point("main").unwrap();
-        let hfs_ep = hfs.entry_point("main").unwrap();
-        let hud_vertex_input = HudVertex::per_vertex().definition(&hvs_ep).unwrap();
-        let hud_stages = [
-            PipelineShaderStageCreateInfo::new(hvs_ep),
-            PipelineShaderStageCreateInfo::new(hfs_ep),
-        ];
-        let hud_layout = PipelineLayout::new(
-            device.clone(),
-            PipelineDescriptorSetLayoutCreateInfo::from_stages(&hud_stages)
-                .into_pipeline_layout_create_info(device.clone())
-                .unwrap(),
-        )
-        .unwrap();
-        let hud_subpass = Subpass::from(render_pass.clone(), 0).unwrap();
-        let hud_pipeline = GraphicsPipeline::new(
-            device.clone(),
-            None,
-            GraphicsPipelineCreateInfo {
-                stages: hud_stages.into_iter().collect(),
-                vertex_input_state: Some(hud_vertex_input),
-                input_assembly_state: Some(InputAssemblyState::default()),
-                viewport_state: Some(ViewportState::default()),
-                rasterization_state: Some(RasterizationState::default()),
-                multisample_state: Some(MultisampleState::default()),
-                depth_stencil_state: Some(DepthStencilState {
-                    depth: None,
-                    ..Default::default()
-                }),
-                color_blend_state: Some(ColorBlendState::with_attachment_states(
-                    hud_subpass.num_color_attachments(),
-                    ColorBlendAttachmentState {
-                        blend: Some(AttachmentBlend::alpha()),
-                        ..Default::default()
-                    },
-                )),
-                dynamic_state: [DynamicState::Viewport].into_iter().collect(),
-                subpass: Some(hud_subpass.into()),
-                ..GraphicsPipelineCreateInfo::layout(hud_layout)
+        let hud = load_shaders::<HudVertex>(&device, shaders::HUD_VERT_SPV, shaders::HUD_FRAG_SPV);
+        let hud_pipeline = graphics_pipeline(
+            &device,
+            &subpass,
+            PipelineSpec {
+                label: "hud pipeline",
+                cull_mode: CullMode::None,
+                depth: Depth::None,
+                blend: Blend::Alpha,
             },
-        )
-        .expect("hud pipeline");
+            hud.stages,
+            hud.vertex_input,
+            hud.layout,
+        );
 
-        let svs = unsafe {
-            ShaderModule::new(
-                device.clone(),
-                ShaderModuleCreateInfo::new(&shaders::spv_words(shaders::SKY_VERT_SPV)),
-            )
-        }
-        .expect("sky vertex shader");
-        let sfs = unsafe {
-            ShaderModule::new(
-                device.clone(),
-                ShaderModuleCreateInfo::new(&shaders::spv_words(shaders::SKY_FRAG_SPV)),
-            )
-        }
-        .expect("sky fragment shader");
-        let svs_ep = svs.entry_point("main").unwrap();
-        let sfs_ep = sfs.entry_point("main").unwrap();
-        let sky_vertex_input = Vertex3d::per_vertex().definition(&svs_ep).unwrap();
-        let sky_stages = [
-            PipelineShaderStageCreateInfo::new(svs_ep),
-            PipelineShaderStageCreateInfo::new(sfs_ep),
-        ];
-        let sky_layout = PipelineLayout::new(
-            device.clone(),
-            PipelineDescriptorSetLayoutCreateInfo::from_stages(&sky_stages)
-                .into_pipeline_layout_create_info(device.clone())
-                .unwrap(),
-        )
-        .unwrap();
-        let sky_subpass = Subpass::from(render_pass.clone(), 0).unwrap();
-        let sky_pipeline = GraphicsPipeline::new(
-            device.clone(),
-            None,
-            GraphicsPipelineCreateInfo {
-                stages: sky_stages.into_iter().collect(),
-                vertex_input_state: Some(sky_vertex_input),
-                input_assembly_state: Some(InputAssemblyState::default()),
-                viewport_state: Some(ViewportState::default()),
-                rasterization_state: Some(RasterizationState {
-                    cull_mode: CullMode::None,
-                    ..Default::default()
-                }),
-                multisample_state: Some(MultisampleState::default()),
-                depth_stencil_state: Some(DepthStencilState {
-                    depth: None,
-                    ..Default::default()
-                }),
-                color_blend_state: Some(ColorBlendState::with_attachment_states(
-                    sky_subpass.num_color_attachments(),
-                    ColorBlendAttachmentState::default(),
-                )),
-                dynamic_state: [DynamicState::Viewport].into_iter().collect(),
-                subpass: Some(sky_subpass.into()),
-                ..GraphicsPipelineCreateInfo::layout(sky_layout)
+        let sky = load_shaders::<Vertex3d>(&device, shaders::SKY_VERT_SPV, shaders::SKY_FRAG_SPV);
+        let sky_pipeline = graphics_pipeline(
+            &device,
+            &subpass,
+            PipelineSpec {
+                label: "sky pipeline",
+                cull_mode: CullMode::None,
+                depth: Depth::None,
+                blend: Blend::Opaque,
             },
-        )
-        .expect("sky pipeline");
+            sky.stages,
+            sky.vertex_input,
+            sky.layout,
+        );
 
         // ---- Rain particles ----
-        let pvs = unsafe {
-            ShaderModule::new(
-                device.clone(),
-                ShaderModuleCreateInfo::new(&shaders::spv_words(shaders::PARTICLE_VERT_SPV)),
-            )
-        }
-        .expect("particle vertex shader");
-        let pfs = unsafe {
-            ShaderModule::new(
-                device.clone(),
-                ShaderModuleCreateInfo::new(&shaders::spv_words(shaders::PARTICLE_FRAG_SPV)),
-            )
-        }
-        .expect("particle fragment shader");
-        let pvs_ep = pvs.entry_point("main").unwrap();
-        let pfs_ep = pfs.entry_point("main").unwrap();
-        let particle_vertex_input = ParticleVertex::per_vertex().definition(&pvs_ep).unwrap();
-        let particle_stages = [
-            PipelineShaderStageCreateInfo::new(pvs_ep),
-            PipelineShaderStageCreateInfo::new(pfs_ep),
-        ];
-        let particle_layout = PipelineLayout::new(
-            device.clone(),
-            PipelineDescriptorSetLayoutCreateInfo::from_stages(&particle_stages)
-                .into_pipeline_layout_create_info(device.clone())
-                .unwrap(),
-        )
-        .unwrap();
-        let particle_subpass = Subpass::from(render_pass.clone(), 0).unwrap();
-        let particle_pipeline = GraphicsPipeline::new(
-            device.clone(),
-            None,
-            GraphicsPipelineCreateInfo {
-                stages: particle_stages.clone().into_iter().collect(),
-                vertex_input_state: Some(particle_vertex_input.clone()),
-                input_assembly_state: Some(InputAssemblyState::default()),
-                viewport_state: Some(ViewportState::default()),
-                rasterization_state: Some(RasterizationState {
-                    cull_mode: CullMode::None,
-                    ..Default::default()
-                }),
-                multisample_state: Some(MultisampleState::default()),
-                depth_stencil_state: Some(DepthStencilState {
-                    depth: Some(DepthState {
-                        write_enable: false,
-                        compare_op: CompareOp::Less,
-                    }),
-                    ..Default::default()
-                }),
-                color_blend_state: Some(ColorBlendState::with_attachment_states(
-                    particle_subpass.num_color_attachments(),
-                    ColorBlendAttachmentState {
-                        blend: Some(AttachmentBlend {
-                            src_color_blend_factor: BlendFactor::SrcAlpha,
-                            dst_color_blend_factor: BlendFactor::One,
-                            color_blend_op: BlendOp::Add,
-                            src_alpha_blend_factor: BlendFactor::SrcAlpha,
-                            dst_alpha_blend_factor: BlendFactor::One,
-                            alpha_blend_op: BlendOp::Add,
-                        }),
-                        ..Default::default()
-                    },
-                )),
-                dynamic_state: [DynamicState::Viewport].into_iter().collect(),
-                subpass: Some(particle_subpass.clone().into()),
-                ..GraphicsPipelineCreateInfo::layout(particle_layout.clone())
+        let particle = load_shaders::<ParticleVertex>(
+            &device,
+            shaders::PARTICLE_VERT_SPV,
+            shaders::PARTICLE_FRAG_SPV,
+        );
+        let particle_pipeline = graphics_pipeline(
+            &device,
+            &subpass,
+            PipelineSpec {
+                label: "particle pipeline",
+                cull_mode: CullMode::None,
+                depth: Depth::Test { write: false },
+                blend: Blend::Additive,
             },
-        )
-        .expect("particle pipeline");
+            particle.stages.clone(),
+            particle.vertex_input.clone(),
+            particle.layout.clone(),
+        );
 
         // Dust uses normal alpha blending instead of additive: the cloud must
         // accumulate opacity smoothly where puffs overlap, rather than adding
         // RGB and producing bright bokeh/interference rings at the seams.
-        let dust_pipeline = GraphicsPipeline::new(
-            device.clone(),
-            None,
-            GraphicsPipelineCreateInfo {
-                stages: particle_stages.into_iter().collect(),
-                vertex_input_state: Some(particle_vertex_input),
-                input_assembly_state: Some(InputAssemblyState::default()),
-                viewport_state: Some(ViewportState::default()),
-                rasterization_state: Some(RasterizationState {
-                    cull_mode: CullMode::None,
-                    ..Default::default()
-                }),
-                multisample_state: Some(MultisampleState::default()),
-                depth_stencil_state: Some(DepthStencilState {
-                    depth: Some(DepthState {
-                        write_enable: false,
-                        compare_op: CompareOp::Less,
-                    }),
-                    ..Default::default()
-                }),
-                color_blend_state: Some(ColorBlendState::with_attachment_states(
-                    particle_subpass.num_color_attachments(),
-                    ColorBlendAttachmentState {
-                        blend: Some(AttachmentBlend {
-                            src_color_blend_factor: BlendFactor::SrcAlpha,
-                            dst_color_blend_factor: BlendFactor::OneMinusSrcAlpha,
-                            color_blend_op: BlendOp::Add,
-                            src_alpha_blend_factor: BlendFactor::SrcAlpha,
-                            dst_alpha_blend_factor: BlendFactor::OneMinusSrcAlpha,
-                            alpha_blend_op: BlendOp::Add,
-                        }),
-                        ..Default::default()
-                    },
-                )),
-                dynamic_state: [DynamicState::Viewport].into_iter().collect(),
-                subpass: Some(particle_subpass.into()),
-                ..GraphicsPipelineCreateInfo::layout(particle_layout)
+        let dust_pipeline = graphics_pipeline(
+            &device,
+            &subpass,
+            PipelineSpec {
+                label: "dust pipeline",
+                cull_mode: CullMode::None,
+                depth: Depth::Test { write: false },
+                blend: Blend::Alpha,
             },
-        )
-        .expect("dust pipeline");
+            particle.stages,
+            particle.vertex_input,
+            particle.layout,
+        );
 
         // Sprite atlas for the particle pipeline: a horizontal strip of four
         // 128x128 cells. Cell 0 = rain gaussian (also used by taillights and
@@ -459,74 +241,23 @@ impl SceneResources {
         .expect("particle sampler");
 
         // ---- Sun lens flare ----
-        let fvs = unsafe {
-            ShaderModule::new(
-                device.clone(),
-                ShaderModuleCreateInfo::new(&shaders::spv_words(shaders::FLARE_VERT_SPV)),
-            )
-        }
-        .expect("flare vertex shader");
-        let ffs = unsafe {
-            ShaderModule::new(
-                device.clone(),
-                ShaderModuleCreateInfo::new(&shaders::spv_words(shaders::FLARE_FRAG_SPV)),
-            )
-        }
-        .expect("flare fragment shader");
-        let fvs_ep = fvs.entry_point("main").unwrap();
-        let ffs_ep = ffs.entry_point("main").unwrap();
-        let flare_vertex_input = FlareVertex::per_vertex().definition(&fvs_ep).unwrap();
-        let flare_stages = [
-            PipelineShaderStageCreateInfo::new(fvs_ep),
-            PipelineShaderStageCreateInfo::new(ffs_ep),
-        ];
-        let flare_layout = PipelineLayout::new(
-            device.clone(),
-            PipelineDescriptorSetLayoutCreateInfo::from_stages(&flare_stages)
-                .into_pipeline_layout_create_info(device.clone())
-                .unwrap(),
-        )
-        .unwrap();
-        let flare_subpass = Subpass::from(render_pass.clone(), 0).unwrap();
-        let flare_pipeline = GraphicsPipeline::new(
-            device.clone(),
-            None,
-            GraphicsPipelineCreateInfo {
-                stages: flare_stages.into_iter().collect(),
-                vertex_input_state: Some(flare_vertex_input),
-                input_assembly_state: Some(InputAssemblyState::default()),
-                viewport_state: Some(ViewportState::default()),
-                rasterization_state: Some(RasterizationState {
-                    // Screen-space quads use the same winding as the HUD, so no
-                    // back-face culling (all triangles would be culled).
-                    cull_mode: CullMode::None,
-                    ..Default::default()
-                }),
-                multisample_state: Some(MultisampleState::default()),
-                depth_stencil_state: Some(DepthStencilState {
-                    depth: None,
-                    ..Default::default()
-                }),
-                color_blend_state: Some(ColorBlendState::with_attachment_states(
-                    flare_subpass.num_color_attachments(),
-                    ColorBlendAttachmentState {
-                        blend: Some(AttachmentBlend {
-                            src_color_blend_factor: BlendFactor::SrcAlpha,
-                            dst_color_blend_factor: BlendFactor::One,
-                            color_blend_op: BlendOp::Add,
-                            src_alpha_blend_factor: BlendFactor::SrcAlpha,
-                            dst_alpha_blend_factor: BlendFactor::One,
-                            alpha_blend_op: BlendOp::Add,
-                        }),
-                        ..Default::default()
-                    },
-                )),
-                dynamic_state: [DynamicState::Viewport].into_iter().collect(),
-                subpass: Some(flare_subpass.into()),
-                ..GraphicsPipelineCreateInfo::layout(flare_layout)
+        let flare =
+            load_shaders::<FlareVertex>(&device, shaders::FLARE_VERT_SPV, shaders::FLARE_FRAG_SPV);
+        let flare_pipeline = graphics_pipeline(
+            &device,
+            &subpass,
+            PipelineSpec {
+                label: "flare pipeline",
+                // Screen-space quads use the same winding as the HUD, so no
+                // back-face culling (all triangles would be culled).
+                cull_mode: CullMode::None,
+                depth: Depth::None,
+                blend: Blend::Additive,
             },
-        )
-        .expect("flare pipeline");
+            flare.stages,
+            flare.vertex_input,
+            flare.layout,
+        );
 
         let (flare_core_view, flare_core_mips) = upload_rgba8_texture_mipmapped(
             memory_allocator.clone(),

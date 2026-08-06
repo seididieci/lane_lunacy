@@ -33,6 +33,7 @@ pub mod daynight;
 pub mod flare;
 pub mod frame;
 pub mod particles;
+pub mod pipeline;
 pub mod probe;
 pub mod record;
 pub mod scene;

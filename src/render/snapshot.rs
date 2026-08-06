@@ -168,12 +168,13 @@ pub fn render_snapshot(
     }
 
     // Deterministic CPU frame: zero dt (no sky drift, no camera smoothing),
-    // freshly-constructed particle systems, and the playing HUD.
+    // particle systems seeded from the scenario seed (not the clock), and the
+    // playing HUD.
     let aspect = width as f32 / height as f32;
     let mut sky_time = 0.0;
     let mut camera_heading = 0.0;
-    let mut rain = crate::render::particles::RainSystem::new();
-    let mut dust = crate::render::particles::DustSystem::new();
+    let mut rain = crate::render::particles::RainSystem::with_seed(seed);
+    let mut dust = crate::render::particles::DustSystem::with_seed(seed);
     let mut hud_root = build_hud_tree(game);
     let hud_verts = Ui::new().build(&mut hud_root, font_atlas, aspect, 0.0);
 

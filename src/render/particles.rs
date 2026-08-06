@@ -51,6 +51,16 @@ impl RainSystem {
         RainSystem { drops, rng }
     }
 
+    /// Deterministic variant for the headless snapshot path: the drop field is
+    /// spawned from the scenario seed instead of the clock.
+    pub fn with_seed(seed: u64) -> Self {
+        let mut rng = Rng::from_seed(seed);
+        let drops = (0..MAX_DROPS)
+            .map(|_| spawn_drop(&mut rng, Vec3::ZERO))
+            .collect();
+        RainSystem { drops, rng }
+    }
+
     /// Advances all drops. `eye` anchors the respawn volume; `car_speed` (m/s)
     /// drives the apparent streak lean (the car drives toward -z).
     pub fn update(&mut self, dt: f32, eye: Vec3, car_speed: f32) {
@@ -63,10 +73,8 @@ impl RainSystem {
             drop.pos += rel * dt;
             drop.axis = axis;
             let o = drop.pos - eye;
-            let outside = o.y < BOX_Y_MIN
-                || o.x.abs() > BOX_X
-                || o.z < BOX_Z_NEAR
-                || o.z > BOX_Z_FAR;
+            let outside =
+                o.y < BOX_Y_MIN || o.x.abs() > BOX_X || o.z < BOX_Z_NEAR || o.z > BOX_Z_FAR;
             if outside {
                 *drop = spawn_drop(&mut self.rng, eye);
             }
@@ -93,7 +101,15 @@ impl RainSystem {
             let bottom = d.pos - d.axis * half_len;
             let l = -right * half_w;
             let r = right * half_w;
-            push_quad(&mut out, top + l, top + r, bottom + r, bottom + l, color, 0.0);
+            push_quad(
+                &mut out,
+                top + l,
+                top + r,
+                bottom + r,
+                bottom + l,
+                color,
+                0.0,
+            );
         }
         out
     }
@@ -142,6 +158,15 @@ impl DustSystem {
         DustSystem {
             puffs: Vec::with_capacity(MAX_PUFFS),
             rng: Rng::new(),
+            spawn_accum: 0.0,
+        }
+    }
+
+    /// Deterministic variant for the headless snapshot path.
+    pub fn with_seed(seed: u64) -> Self {
+        DustSystem {
+            puffs: Vec::with_capacity(MAX_PUFFS),
+            rng: Rng::from_seed(seed),
             spawn_accum: 0.0,
         }
     }
@@ -323,8 +348,16 @@ pub fn generate_cloud_sprite(size: u32, seed: u64) -> Vec<u8> {
     let blobs: Vec<(f32, f32, f32)> = (0..8)
         .map(|i| match i {
             0 => (0.0, 0.0, 0.30 + next() * 0.08),
-            1 => ((next() - 0.5) * 0.36, (next() - 0.5) * 0.36, 0.18 + next() * 0.10),
-            _ => ((next() - 0.5) * 0.8, (next() - 0.5) * 0.8, 0.15 + next() * 0.20),
+            1 => (
+                (next() - 0.5) * 0.36,
+                (next() - 0.5) * 0.36,
+                0.18 + next() * 0.10,
+            ),
+            _ => (
+                (next() - 0.5) * 0.8,
+                (next() - 0.5) * 0.8,
+                0.15 + next() * 0.20,
+            ),
         })
         .collect();
     let center = (n as f32 - 1.0) * 0.5;
@@ -440,11 +473,12 @@ pub fn build_headlights(
 }
 
 fn spawn_drop(rng: &mut Rng, eye: Vec3) -> Drop {
-    let pos = eye + Vec3::new(
-        rng.range(-BOX_X, BOX_X),
-        rng.range(BOX_Y_MIN, BOX_Y_MAX),
-        rng.range(BOX_Z_NEAR, BOX_Z_FAR),
-    );
+    let pos = eye
+        + Vec3::new(
+            rng.range(-BOX_X, BOX_X),
+            rng.range(BOX_Y_MIN, BOX_Y_MAX),
+            rng.range(BOX_Z_NEAR, BOX_Z_FAR),
+        );
     Drop {
         pos,
         axis: Vec3::NEG_Y,
@@ -464,12 +498,42 @@ fn push_quad(
     color: [f32; 4],
     sprite_variant: f32,
 ) {
-    out.push(ParticleVertex { position: tl.to_array(), uv: [0.0, 0.0], color, sprite_variant });
-    out.push(ParticleVertex { position: tr.to_array(), uv: [1.0, 0.0], color, sprite_variant });
-    out.push(ParticleVertex { position: br.to_array(), uv: [1.0, 1.0], color, sprite_variant });
-    out.push(ParticleVertex { position: tl.to_array(), uv: [0.0, 0.0], color, sprite_variant });
-    out.push(ParticleVertex { position: br.to_array(), uv: [1.0, 1.0], color, sprite_variant });
-    out.push(ParticleVertex { position: bl.to_array(), uv: [0.0, 1.0], color, sprite_variant });
+    out.push(ParticleVertex {
+        position: tl.to_array(),
+        uv: [0.0, 0.0],
+        color,
+        sprite_variant,
+    });
+    out.push(ParticleVertex {
+        position: tr.to_array(),
+        uv: [1.0, 0.0],
+        color,
+        sprite_variant,
+    });
+    out.push(ParticleVertex {
+        position: br.to_array(),
+        uv: [1.0, 1.0],
+        color,
+        sprite_variant,
+    });
+    out.push(ParticleVertex {
+        position: tl.to_array(),
+        uv: [0.0, 0.0],
+        color,
+        sprite_variant,
+    });
+    out.push(ParticleVertex {
+        position: br.to_array(),
+        uv: [1.0, 1.0],
+        color,
+        sprite_variant,
+    });
+    out.push(ParticleVertex {
+        position: bl.to_array(),
+        uv: [0.0, 1.0],
+        color,
+        sprite_variant,
+    });
 }
 
 /// Small xorshift PRNG (no external rand dependency).
@@ -478,6 +542,25 @@ struct Rng(u64);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rain_with_seed_is_deterministic() {
+        let fingerprint = |system: &RainSystem| {
+            system
+                .build_vertices(Vec3::ZERO, Vec3::X, 1.0)
+                .iter()
+                .map(|v| v.position[0] * 1e3 + v.position[1] * 1e1 + v.position[2])
+                .fold(0.0, |acc, f| acc + f)
+        };
+        assert_eq!(
+            fingerprint(&RainSystem::with_seed(42)),
+            fingerprint(&RainSystem::with_seed(42))
+        );
+        assert_ne!(
+            fingerprint(&RainSystem::with_seed(42)),
+            fingerprint(&RainSystem::with_seed(7))
+        );
+    }
 
     #[test]
     fn taillights_emit_quads_and_skip_behind_the_camera() {
@@ -510,12 +593,7 @@ mod tests {
     fn cloud_sprites_are_opaque_in_the_middle_and_transparent_at_the_rim() {
         let sprite = generate_cloud_sprite(128, 42);
         let n = 128usize;
-        let max_alpha = sprite
-            .chunks_exact(4)
-            .map(|px| px[3])
-            .max()
-            .unwrap_or(0) as f32
-            / 255.0;
+        let max_alpha = sprite.chunks_exact(4).map(|px| px[3]).max().unwrap_or(0) as f32 / 255.0;
         assert!(max_alpha > 0.9, "the cloud core is dense: {max_alpha}");
         // Rim texels must be fully transparent so atlas cells don't bleed.
         for (px, py) in [(0usize, 0usize), (n - 1, 0), (0, n - 1), (n - 1, n - 1)] {
@@ -528,7 +606,11 @@ mod tests {
     fn headlights_emit_discs_and_halos() {
         let lights = vec![(Vec3::new(2.0, 0.8, -10.0), Vec3::new(0.0, 0.0, 1.0))];
         let verts = build_headlights(&lights, Vec3::ZERO, Vec3::X, 1.0);
-        assert_eq!(verts.len(), 12, "1 disc + 1 halo per light = 2 quads = 12 verts");
+        assert_eq!(
+            verts.len(),
+            12,
+            "1 disc + 1 halo per light = 2 quads = 12 verts"
+        );
         assert!(
             verts.iter().all(|v| v.color[0] > 0.9 && v.color[1] > 0.9),
             "headlights are warm white"
@@ -549,7 +631,10 @@ mod tests {
 
         // Straight cruise on a dusty surface: only the minimal ambient trail.
         let ambient = drift_intensity(40.0, 0.0, 0.0, false, 1.0);
-        assert!((0.0..0.3).contains(&ambient), "minimal ambient baseline: {ambient}");
+        assert!(
+            (0.0..0.3).contains(&ambient),
+            "minimal ambient baseline: {ambient}"
+        );
 
         // Each cue adds dust over the baseline.
         let slip = drift_intensity(40.0, 6.0, 0.0, false, 1.0);
@@ -574,10 +659,7 @@ mod tests {
             puff_scale: 1.0,
             alpha: 0.6,
         };
-        let rear = [
-            Vec3::new(-0.9, 0.0, -2.0),
-            Vec3::new(0.9, 0.0, -2.0),
-        ];
+        let rear = [Vec3::new(-0.9, 0.0, -2.0), Vec3::new(0.9, 0.0, -2.0)];
         dust.update(0.5, 1.0, &profile, rear, Vec3::NEG_Z);
         assert!(!dust.puffs.is_empty(), "drift spawns puffs");
         let verts = dust.build_vertices(Vec3::ZERO, Vec3::X);
@@ -604,12 +686,12 @@ mod tests {
             alpha: 0.6,
         };
         // Rear points behind the eye (z > 5); driving toward +Z keeps them there.
-        let rear = [
-            Vec3::new(-0.9, 0.0, 10.0),
-            Vec3::new(0.9, 0.0, 10.0),
-        ];
+        let rear = [Vec3::new(-0.9, 0.0, 10.0), Vec3::new(0.9, 0.0, 10.0)];
         dust.update(0.5, 1.0, &profile, rear, Vec3::Z);
-        assert!(!dust.puffs.is_empty(), "a full second of drift must spawn puffs");
+        assert!(
+            !dust.puffs.is_empty(),
+            "a full second of drift must spawn puffs"
+        );
         assert!(dust.build_vertices(Vec3::ZERO, Vec3::X).is_empty());
     }
 
@@ -622,10 +704,7 @@ mod tests {
             puff_scale: 1.0,
             alpha: 0.6,
         };
-        let rear = [
-            Vec3::new(-0.9, 0.0, -2.0),
-            Vec3::new(0.9, 0.0, -2.0),
-        ];
+        let rear = [Vec3::new(-0.9, 0.0, -2.0), Vec3::new(0.9, 0.0, -2.0)];
         dust.update(1.0, 1.0, &profile, rear, Vec3::NEG_Z);
         assert!(!dust.puffs.is_empty());
         // All puffs die within 2.5s of life; no drift spawns replacements.
@@ -642,6 +721,12 @@ impl Rng {
             .expect("system clock before epoch")
             .as_nanos() as u64;
         Rng(nanos | 1)
+    }
+
+    /// Deterministic RNG for the headless snapshot path, derived from the
+    /// scenario seed so identical seeds produce identical rain/dust.
+    fn from_seed(seed: u64) -> Self {
+        Rng(seed | 1)
     }
 
     fn next(&mut self) -> u64 {
