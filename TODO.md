@@ -27,7 +27,7 @@ visual parity.
 - [x] Headless GPU context: Instance/Device/queue without a surface (no present queue); reuse `gpu.rs`
 - [x] Extract pure CPU `Frame` + builder from `render()` (no vulkano types)
 - [x] Deterministic scene seeding: injectable seed for cloud tiles, weather phase, start hour (traffic already deterministic)
-- [ ] Extract `SceneResources` (pipelines, textures, models, buffers, samplers) shared by windowed + offscreen
+- [x] Extract `SceneResources` (pipelines, textures, models, buffers, samplers) shared by windowed + offscreen
 - [ ] Extract `record.rs` command-buffer recorder reused by both presenters
 - [ ] `snapshot.rs`: offscreen color+depth images, framebuffer, render, readback via `copy_image_to_buffer`, PNG via `image`
 - [ ] Probes: CPU (sun NDC, flare intensity, projector road coverage, wet/night fac) + GPU from pixels (sky-top lum, road-center lum, sun-disc max lum, flare bloom); print/JSON
