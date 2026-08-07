@@ -31,6 +31,9 @@ pub enum RunMode {
         start_hour: Option<f32>,
         /// `--seed`, or `None` for a clock-random scene seed.
         seed: Option<u64>,
+        /// `--windowed`: start in a floating 90%-FHD window instead of
+        /// borderless fullscreen (the default). F11 toggles at runtime.
+        windowed: bool,
     },
     Snapshot(SnapshotOptions),
 }
@@ -43,6 +46,7 @@ pub fn parse(args: &[String]) -> RunMode {
     let mut weather = Weather::Auto;
     let mut start_hour: Option<f32> = None;
     let mut seed: Option<u64> = None;
+    let mut windowed = false;
 
     let mut snapshot: Option<PathBuf> = None;
     let mut width = 1280u32;
@@ -113,6 +117,10 @@ pub fn parse(args: &[String]) -> RunMode {
                     i += 1;
                 }
             }
+            "--windowed" => {
+                windowed = true;
+                i += 1;
+            }
             _ => {
                 eprintln!("ignoring unrecognized argument: {arg}");
                 i += 1;
@@ -135,6 +143,7 @@ pub fn parse(args: &[String]) -> RunMode {
             weather,
             start_hour,
             seed,
+            windowed,
         },
     }
 }
@@ -167,11 +176,13 @@ mod tests {
                 weather,
                 start_hour,
                 seed,
+                windowed,
             } => {
                 assert_eq!(gpu, 0);
                 assert_eq!(weather, Weather::Auto);
                 assert_eq!(start_hour, None);
                 assert_eq!(seed, None);
+                assert!(!windowed);
             }
             _ => panic!("expected interactive mode"),
         }
@@ -185,11 +196,24 @@ mod tests {
                 weather,
                 start_hour,
                 seed,
+                windowed,
             } => {
                 assert_eq!(gpu, 1);
                 assert_eq!(weather, Weather::Rain);
                 assert_eq!(start_hour, Some(18.5));
                 assert_eq!(seed, None);
+                assert!(!windowed);
+            }
+            _ => panic!("expected interactive mode"),
+        }
+    }
+
+    #[test]
+    fn interactive_windowed_flag_is_parsed() {
+        match parse_args(&["--windowed", "--seed", "7"]) {
+            RunMode::Interactive { seed, windowed, .. } => {
+                assert_eq!(seed, Some(7));
+                assert!(windowed);
             }
             _ => panic!("expected interactive mode"),
         }

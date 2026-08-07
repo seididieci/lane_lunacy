@@ -60,7 +60,13 @@ pub fn create_headless_instance() -> Arc<Instance> {
     .expect("failed to create instance")
 }
 
-pub fn run(gpu_index: usize, weather: Weather, start_hour: Option<f32>, seed: Option<u64>) {
+pub fn run(
+    gpu_index: usize,
+    weather: Weather,
+    start_hour: Option<f32>,
+    seed: Option<u64>,
+    windowed: bool,
+) {
     let event_loop = EventLoop::new().expect("failed to create event loop");
     let instance = create_surface_instance(&event_loop);
 
@@ -73,7 +79,7 @@ pub fn run(gpu_index: usize, weather: Weather, start_hour: Option<f32>, seed: Op
             .as_nanos() as u64
     });
 
-    let mut app = app::App::new(instance, gpu_index, weather, start_hour, seed);
+    let mut app = app::App::new(instance, gpu_index, weather, start_hour, seed, windowed);
     event_loop.run_app(&mut app).expect("event loop failed");
 }
 

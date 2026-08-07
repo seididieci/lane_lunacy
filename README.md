@@ -89,7 +89,22 @@ chosen GPU supports.
 | `E`            | Gear up                             |
 | `Q`            | Gear down                           |
 | `R`            | Restart run                         |
+| `F11`          | Toggle windowed / fullscreen        |
 | `Esc`          | Pause menu                          |
+
+### Window mode
+
+The game starts **borderless fullscreen** on the current monitor. Start it in a
+floating 90%-FHD window (1728×972) with `--windowed`, and toggle between the two
+at any time with `F11`.
+
+On **sway** a normal Wayland window can't float itself, so windowed mode asks
+sway to float it via IPC (`swaymsg`); for the most reliable behavior add this to
+`~/.config/sway/config`:
+
+```
+for_window [app_id="lane_lunacy"] floating enable
+```
 
 ---
 
@@ -138,6 +153,9 @@ cargo run --release -- --gpu 1
 
 # start with a fixed sky state (auto | clear | cloudy | rain)
 cargo run --release -- --weather rain
+
+# start in a floating 90%-FHD window instead of fullscreen
+cargo run --release -- --windowed
 ```
 
 Rain renders in the **RAIN** sky state (full downpour) and periodically in

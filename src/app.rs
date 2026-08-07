@@ -8,7 +8,10 @@ use winit::dpi::LogicalSize;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::window::{Window, WindowAttributes};
+use winit::window::{Fullscreen, Window, WindowAttributes};
+
+#[cfg(target_os = "linux")]
+use winit::platform::wayland::WindowAttributesExtWayland;
 
 use vulkano::device::physical::PhysicalDevice;
 use vulkano::image::{SampleCount, SampleCounts};
@@ -32,6 +35,15 @@ enum AppMode {
     Playing,
 }
 
+/// Windowed size: 90% of 1920×1080. The window starts at this size (restored
+/// after leaving fullscreen); the default launch is borderless fullscreen.
+const WINDOWED_SIZE: LogicalSize<f64> = LogicalSize::new(1728.0, 972.0);
+
+/// Sway `app_id` used by the `for_window`/criteria float rules. A normal
+/// xdg-shell toplevel has no native "float me" hint, so on sway the windowed
+/// mode is floated via IPC (see [`sway_float_register`]/[`sway_float_window`]).
+const SWAY_APP_ID: &str = "lane_lunacy";
+
 pub struct App {
     instance: Arc<Instance>,
     window: Option<Arc<Window>>,
@@ -53,6 +65,8 @@ pub struct App {
     font_atlas: FontAtlas,
     ui_clock: f32,
     previous: Instant,
+    /// `false` (default) starts borderless fullscreen; `--windowed` sets this.
+    windowed: bool,
 }
 
 impl App {
@@ -62,6 +76,7 @@ impl App {
         weather: Weather,
         start_hour: Option<f32>,
         seed: u64,
+        windowed: bool,
     ) -> Self {
         let mut game = Game::new();
         game.set_weather(weather);
@@ -102,6 +117,7 @@ impl App {
             font_atlas: FontAtlas::load(),
             ui_clock: 0.0,
             previous: Instant::now(),
+            windowed,
         }
     }
 
@@ -110,13 +126,26 @@ impl App {
             return;
         }
 
+        // `--windowed`: register the sway float rule before the window appears
+        // so the fixed 90%-FHD size is honored (a normal toplevel can't float
+        // itself on sway). No-op when sway/swaymsg are absent.
+        if self.windowed {
+            sway_float_register();
+        }
+
+        let mut attrs = WindowAttributes::default()
+            .with_title("Lane Lunacy")
+            .with_inner_size(WINDOWED_SIZE);
+        #[cfg(target_os = "linux")]
+        {
+            attrs = attrs.with_name(SWAY_APP_ID, "Lane Lunacy");
+        }
+        if !self.windowed {
+            attrs = attrs.with_fullscreen(Some(Fullscreen::Borderless(None)));
+        }
         let window = Arc::new(
             event_loop
-                .create_window(
-                    WindowAttributes::default()
-                        .with_title("Lane Lunacy")
-                        .with_inner_size(LogicalSize::new(1280, 720)),
-                )
+                .create_window(attrs)
                 .expect("failed to create window"),
         );
 
@@ -169,7 +198,7 @@ impl App {
         self.previous = Instant::now();
 
         println!(
-            "Controls: W / Up = throttle | S / Down = brake | A / Left & D / Right = steer | E = gear up | Q = gear down | R = restart | ESC = pause menu"
+            "Controls: W / Up = throttle | S / Down = brake | A / Left & D / Right = steer | E = gear up | Q = gear down | R = restart | F11 = fullscreen | ESC = pause menu"
         );
     }
 
@@ -180,6 +209,24 @@ impl App {
                 self.menu.open_for_pause();
                 self.mode = AppMode::Menu;
             }
+        }
+    }
+
+    /// F11: toggles borderless fullscreen <-> the fixed 90%-FHD windowed size.
+    /// The swapchain is rebuilt automatically by the `Resized -> recreate`
+    /// path when the window changes size.
+    fn toggle_fullscreen(&mut self) {
+        let Some(window) = &self.window else {
+            return;
+        };
+        if window.fullscreen().is_some() {
+            window.set_fullscreen(None);
+            let _ = window.request_inner_size(WINDOWED_SIZE);
+            // The window exists now, so a direct criteria float applies. No-op
+            // on non-sway compositors.
+            sway_float_window();
+        } else {
+            window.set_fullscreen(Some(Fullscreen::Borderless(None)));
         }
     }
 
@@ -400,6 +447,7 @@ impl ApplicationHandler for App {
                             self.toggle_menu();
                         }
                     }
+                    PhysicalKey::Code(KeyCode::F11) if press => self.toggle_fullscreen(),
                     _ if matches!(self.mode, AppMode::Menu) => {
                         self.handle_menu_key(event_loop, &kb, press);
                     }
@@ -513,4 +561,33 @@ fn aa_samples(mode: AaMode) -> SampleCount {
         AaMode::X2 => SampleCount::Sample2,
         AaMode::X4 => SampleCount::Sample4,
     }
+}
+
+/// Registers a sway `for_window` rule before the window is created, so a
+/// `--windowed` launch is floated from the moment it appears. Best-effort:
+/// silently no-ops when swaymsg isn't present or there's no sway session.
+fn sway_float_register() {
+    let _ = std::process::Command::new("swaymsg")
+        .args([
+            "-t",
+            "command",
+            &format!("for_window [app_id=\"{SWAY_APP_ID}\"] floating enable"),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
+/// Floats an already-existing window (F11 back to windowed) via sway criteria.
+/// Best-effort: no-ops on non-sway compositors.
+fn sway_float_window() {
+    let _ = std::process::Command::new("swaymsg")
+        .args([
+            "-t",
+            "command",
+            &format!("[app_id=\"{SWAY_APP_ID}\"] floating enable"),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }
