@@ -29,10 +29,14 @@ pub enum MenuScreen {
     Settings,
 }
 
-/// Rows of the main menu (title screen and pause menu).
+/// Rows of the main menu (title screen and pause menu). `Mode`/`Weather` are
+/// value rows cycled with Left/Right and committed immediately; the others are
+/// activated with Enter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuRow {
     Start,
+    Mode,
+    Weather,
     Settings,
     Exit,
 }
@@ -42,7 +46,9 @@ impl MenuRow {
     pub fn previous(self) -> Self {
         match self {
             MenuRow::Start => MenuRow::Start,
-            MenuRow::Settings => MenuRow::Start,
+            MenuRow::Mode => MenuRow::Start,
+            MenuRow::Weather => MenuRow::Mode,
+            MenuRow::Settings => MenuRow::Weather,
             MenuRow::Exit => MenuRow::Settings,
         }
     }
@@ -50,7 +56,9 @@ impl MenuRow {
     /// The row below this one (clamped at the bottom).
     pub fn next(self) -> Self {
         match self {
-            MenuRow::Start => MenuRow::Settings,
+            MenuRow::Start => MenuRow::Mode,
+            MenuRow::Mode => MenuRow::Weather,
+            MenuRow::Weather => MenuRow::Settings,
             MenuRow::Settings => MenuRow::Exit,
             MenuRow::Exit => MenuRow::Exit,
         }
@@ -61,8 +69,6 @@ impl MenuRow {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsRow {
     Gpu,
-    Mode,
-    Weather,
     Antialias,
     Fxaa,
     Bloom,
@@ -79,9 +85,7 @@ impl SettingsRow {
     pub fn previous(self) -> Self {
         match self {
             SettingsRow::Gpu => SettingsRow::Gpu,
-            SettingsRow::Mode => SettingsRow::Gpu,
-            SettingsRow::Weather => SettingsRow::Mode,
-            SettingsRow::Antialias => SettingsRow::Weather,
+            SettingsRow::Antialias => SettingsRow::Gpu,
             SettingsRow::Fxaa => SettingsRow::Antialias,
             SettingsRow::Bloom => SettingsRow::Fxaa,
             SettingsRow::Vignette => SettingsRow::Bloom,
@@ -96,9 +100,7 @@ impl SettingsRow {
     /// The row below this one (clamped at the bottom).
     pub fn next(self) -> Self {
         match self {
-            SettingsRow::Gpu => SettingsRow::Mode,
-            SettingsRow::Mode => SettingsRow::Weather,
-            SettingsRow::Weather => SettingsRow::Antialias,
+            SettingsRow::Gpu => SettingsRow::Antialias,
             SettingsRow::Antialias => SettingsRow::Fxaa,
             SettingsRow::Fxaa => SettingsRow::Bloom,
             SettingsRow::Bloom => SettingsRow::Vignette,
@@ -319,7 +321,7 @@ pub(crate) fn build_menu_tree(
 
 fn build_main_tree(menu: &MenuState) -> Node {
     let title = format!("{}  LANE LUNACY", ICON_STEERING);
-    let foot = "UP/DOWN MOVE, ENTER CONFIRM";
+    let foot = "UP/DOWN MOVE, LEFT/RIGHT CHANGE, ENTER CONFIRM";
 
     let rows = Column::new(
         vec![
@@ -328,11 +330,37 @@ fn build_main_tree(menu: &MenuState) -> Node {
                     .focused(menu.main_cursor == MenuRow::Start),
             ),
             Node::new(
-                Button::new("SETTINGS", ROW_EM, ROW_COLOR, 1)
+                Button::new(
+                    format!(
+                        "{}  MODE  {}",
+                        ICON_SPEEDOMETER,
+                        menu.settings.difficulty.label()
+                    ),
+                    ROW_EM,
+                    ROW_COLOR,
+                    1,
+                )
+                .focused(menu.main_cursor == MenuRow::Mode),
+            ),
+            Node::new(
+                Button::new(
+                    format!(
+                        "{}  WEATHER  {}",
+                        ICON_WEATHER,
+                        menu.settings.weather.label()
+                    ),
+                    ROW_EM,
+                    ROW_COLOR,
+                    2,
+                )
+                .focused(menu.main_cursor == MenuRow::Weather),
+            ),
+            Node::new(
+                Button::new("SETTINGS", ROW_EM, ROW_COLOR, 3)
                     .focused(menu.main_cursor == MenuRow::Settings),
             ),
             Node::new(
-                Button::new(format!("{}  EXIT", ICON_LOGOUT), ROW_EM, EXIT_COLOR, 2)
+                Button::new(format!("{}  EXIT", ICON_LOGOUT), ROW_EM, EXIT_COLOR, 4)
                     .focused(menu.main_cursor == MenuRow::Exit),
             ),
         ],
@@ -367,8 +395,6 @@ fn build_settings_tree(
     let s = &menu.settings;
     let title = format!("{}  SETTINGS", ICON_SPEEDOMETER);
     let gpu_t = gpu_label(s.gpu_index, gpu_names);
-    let mode_t = format!("{}  MODE  {}", ICON_SPEEDOMETER, s.difficulty.label());
-    let weather_t = format!("{}  WEATHER  {}", ICON_WEATHER, s.weather.label());
     let aa_label = supported_aa
         .get(s.antialias)
         .map(|m| m.label())
@@ -382,21 +408,14 @@ fn build_settings_tree(
         vec![
             Node::new(Button::new(gpu_t, ROW_EM, ROW_COLOR, 10).focused(focused(SettingsRow::Gpu))),
             Node::new(
-                Button::new(mode_t, ROW_EM, ROW_COLOR, 11).focused(focused(SettingsRow::Mode)),
+                Button::new(aa_t, ROW_EM, ROW_COLOR, 11).focused(focused(SettingsRow::Antialias)),
             ),
             Node::new(
-                Button::new(weather_t, ROW_EM, ROW_COLOR, 12)
-                    .focused(focused(SettingsRow::Weather)),
-            ),
-            Node::new(
-                Button::new(aa_t, ROW_EM, ROW_COLOR, 13).focused(focused(SettingsRow::Antialias)),
-            ),
-            Node::new(
-                Button::new(format!("FXAA  {}", on_off(s.fxaa)), ROW_EM, ROW_COLOR, 14)
+                Button::new(format!("FXAA  {}", on_off(s.fxaa)), ROW_EM, ROW_COLOR, 12)
                     .focused(focused(SettingsRow::Fxaa)),
             ),
             Node::new(
-                Button::new(format!("BLOOM  {}", on_off(s.bloom)), ROW_EM, ROW_COLOR, 15)
+                Button::new(format!("BLOOM  {}", on_off(s.bloom)), ROW_EM, ROW_COLOR, 13)
                     .focused(focused(SettingsRow::Bloom)),
             ),
             Node::new(
@@ -404,12 +423,12 @@ fn build_settings_tree(
                     format!("VIGNETTE  {}", on_off(s.vignette)),
                     ROW_EM,
                     ROW_COLOR,
-                    16,
+                    14,
                 )
                 .focused(focused(SettingsRow::Vignette)),
             ),
             Node::new(
-                Button::new(format!("GRAIN  {}", on_off(s.grain)), ROW_EM, ROW_COLOR, 17)
+                Button::new(format!("GRAIN  {}", on_off(s.grain)), ROW_EM, ROW_COLOR, 15)
                     .focused(focused(SettingsRow::Grain)),
             ),
             Node::new(
@@ -417,7 +436,7 @@ fn build_settings_tree(
                     format!("SATURATION  {}", on_off(s.saturation)),
                     ROW_EM,
                     ROW_COLOR,
-                    18,
+                    16,
                 )
                 .focused(focused(SettingsRow::Saturation)),
             ),
@@ -426,15 +445,15 @@ fn build_settings_tree(
                     format!("CHROMATIC  {}", on_off(s.chroma)),
                     ROW_EM,
                     ROW_COLOR,
-                    19,
+                    17,
                 )
                 .focused(focused(SettingsRow::ChromaticAberration)),
             ),
             Node::new(
-                Button::new("APPLY", ROW_EM, apply_color, 20).focused(focused(SettingsRow::Apply)),
+                Button::new("APPLY", ROW_EM, apply_color, 18).focused(focused(SettingsRow::Apply)),
             ),
             Node::new(
-                Button::new("BACK", ROW_EM, ROW_COLOR, 21).focused(focused(SettingsRow::Back)),
+                Button::new("BACK", ROW_EM, ROW_COLOR, 19).focused(focused(SettingsRow::Back)),
             ),
         ],
         ROW_GAP,
@@ -516,7 +535,7 @@ mod tests {
         assert!(!verts.is_empty());
 
         // Every settings row must be present and hit-testable on the center line.
-        for id in 10..=21 {
+        for id in 10..=19 {
             assert!(
                 hit_test_id(&root, &ui, id),
                 "settings row id {id} must be hit-testable"
@@ -525,11 +544,60 @@ mod tests {
     }
 
     #[test]
+    fn main_menu_shows_mode_and_weather_rows() {
+        let menu = MenuState::new(0, Weather::Auto);
+        let supported = [AaMode::Off];
+        let atlas = FontAtlas::load();
+        let ui = Ui::new();
+
+        let mut root = build_menu_tree(&menu, &names(), &supported, false);
+        let verts = ui.build(&mut root, &atlas, 16.0 / 9.0, 0.0);
+        assert!(!verts.is_empty());
+
+        // START, MODE, WEATHER, SETTINGS and EXIT all present on the center line.
+        for id in 0..=4 {
+            assert!(
+                hit_test_id(&root, &ui, id),
+                "main menu row id {id} must be hit-testable"
+            );
+        }
+    }
+
+    #[test]
+    fn difficulty_and_weather_cycle_through_all_states() {
+        let mut menu = MenuState::new(0, Weather::Auto);
+        let all = [
+            DifficultyLevel::EasyArcade,
+            DifficultyLevel::Normal,
+            DifficultyLevel::Hard,
+            DifficultyLevel::EasyArcade,
+        ];
+        for level in all {
+            assert_eq!(menu.settings.difficulty, level);
+            menu.cycle_difficulty(1);
+        }
+        let weathers = [
+            Weather::Auto,
+            Weather::Clear,
+            Weather::Cloudy,
+            Weather::Rain,
+            Weather::Auto,
+        ];
+        for weather in weathers {
+            assert_eq!(menu.settings.weather, weather);
+            menu.cycle_weather(1);
+        }
+    }
+
+    #[test]
     fn main_cursor_clamps_at_ends() {
         assert_eq!(MenuRow::Start.previous(), MenuRow::Start);
         assert_eq!(MenuRow::Exit.next(), MenuRow::Exit);
-        assert_eq!(MenuRow::Start.next(), MenuRow::Settings);
-        assert_eq!(MenuRow::Settings.previous(), MenuRow::Start);
+        assert_eq!(MenuRow::Start.next(), MenuRow::Mode);
+        assert_eq!(MenuRow::Mode.next(), MenuRow::Weather);
+        assert_eq!(MenuRow::Weather.next(), MenuRow::Settings);
+        assert_eq!(MenuRow::Settings.next(), MenuRow::Exit);
+        assert_eq!(MenuRow::Settings.previous(), MenuRow::Weather);
     }
 
     #[test]
@@ -537,7 +605,7 @@ mod tests {
         assert_eq!(SettingsRow::Gpu.previous(), SettingsRow::Gpu);
         assert_eq!(SettingsRow::Back.next(), SettingsRow::Back);
         assert_eq!(SettingsRow::Back.previous(), SettingsRow::Apply);
-        assert_eq!(SettingsRow::Gpu.next(), SettingsRow::Mode);
+        assert_eq!(SettingsRow::Gpu.next(), SettingsRow::Antialias);
     }
 
     #[test]

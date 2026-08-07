@@ -134,8 +134,22 @@ impl App {
         }
         let physical = select_physical_device(&devices, self.menu.settings.gpu_index);
         self.supported_aa = supported_aa_modes(&physical);
+        // Default every effect on at launch, gated by what the GPU supports:
+        // the best MSAA mode (list is built ascending Off/2x/4x) and all post
+        // effects, which every Vulkan device can run. The user can dial any of
+        // them down in SETTINGS -> APPLY.
+        self.menu.settings = SettingsState {
+            antialias: self.supported_aa.len().saturating_sub(1),
+            fxaa: true,
+            bloom: true,
+            vignette: true,
+            grain: true,
+            saturation: true,
+            chroma: true,
+            ..self.menu.settings
+        };
         self.menu.clamp_antialias(&self.supported_aa);
-        self.applied.antialias = self.menu.settings.antialias;
+        self.applied = self.menu.settings;
         let (device, queue) = create_graphics_context(surface.clone(), &physical);
         let renderer = Renderer::new(
             device,
@@ -174,24 +188,20 @@ impl App {
     }
 
     fn resume_game(&mut self) {
-        // Settings are committed exclusively by the APPLY row; START just
-        // resumes the run with whatever is currently in effect.
+        // START resumes with what's in effect. MODE/WEATHER on this screen are
+        // committed as you change them; the SETTINGS screen keeps the staged
+        // APPLY model for GPU/AA/post effects.
         self.mode = AppMode::Playing;
     }
 
-    /// Commits the staged settings in one shot. Difficulty/weather apply to the
-    /// live game (difficulty restarts the run), and GPU switches the backend;
-    /// an AA-only change rebuilds the current backend in place.
+    /// Commits the staged settings in one shot. GPU switches the backend; an
+    /// AA/FX-only change rebuilds the current backend in place. Difficulty and
+    /// weather are set on the main menu and are already in effect by the time
+    /// APPLY can be reached.
     fn apply_settings(&mut self) {
         if self.menu.settings == self.applied {
             return;
         }
-        if self.menu.settings.difficulty != self.applied.difficulty {
-            self.game.set_difficulty(self.menu.settings.difficulty);
-            self.game.restart();
-            println!("Run restarted (difficulty changed)");
-        }
-        self.game.set_weather(self.menu.settings.weather);
         let gpu_changed = self
             .menu
             .settings
@@ -271,13 +281,41 @@ impl App {
             PhysicalKey::Code(KeyCode::ArrowDown) | PhysicalKey::Code(KeyCode::KeyS) => {
                 self.menu.main_cursor = self.menu.main_cursor.next();
             }
+            PhysicalKey::Code(KeyCode::ArrowLeft) | PhysicalKey::Code(KeyCode::KeyA) => {
+                self.cycle_main_row(-1);
+            }
+            PhysicalKey::Code(KeyCode::ArrowRight) | PhysicalKey::Code(KeyCode::KeyD) => {
+                self.cycle_main_row(1);
+            }
             PhysicalKey::Code(KeyCode::Enter) => match self.menu.main_cursor {
                 MenuRow::Start => self.close_menu(),
                 MenuRow::Settings => self.menu.open_settings(),
                 MenuRow::Exit => event_loop.exit(),
+                MenuRow::Mode | MenuRow::Weather => {}
             },
             _ => {}
         }
+    }
+
+    /// Left/Right on the main menu: cycles the MODE/WEATHER value rows and
+    /// commits them to the live game right away (difficulty restarts the run,
+    /// weather applies live), keeping the staged/effective states in sync.
+    fn cycle_main_row(&mut self, delta: i32) {
+        match self.menu.main_cursor {
+            MenuRow::Mode => {
+                self.menu.cycle_difficulty(delta);
+                self.game.set_difficulty(self.menu.settings.difficulty);
+                self.game.restart();
+                println!("Run restarted (difficulty changed)");
+            }
+            MenuRow::Weather => {
+                self.menu.cycle_weather(delta);
+                self.game.set_weather(self.menu.settings.weather);
+            }
+            MenuRow::Start | MenuRow::Settings | MenuRow::Exit => {}
+        }
+        self.applied.difficulty = self.menu.settings.difficulty;
+        self.applied.weather = self.menu.settings.weather;
     }
 
     fn handle_settings_key(&mut self, kb: &KeyEvent) {
@@ -304,13 +342,11 @@ impl App {
         }
     }
 
-    /// Left/Right handler for the settings rows: cycles GPU/mode/weather/AA and
-    /// toggles the FX rows. APPLY/BACK have no value to cycle.
+    /// Left/Right handler for the settings rows: cycles GPU/AA and toggles the
+    /// FX rows. APPLY/BACK have no value to cycle.
     fn cycle_settings_row(&mut self, delta: i32, device_count: usize) {
         match self.menu.settings_cursor {
             SettingsRow::Gpu => self.menu.cycle_gpu(delta, device_count),
-            SettingsRow::Mode => self.menu.cycle_difficulty(delta),
-            SettingsRow::Weather => self.menu.cycle_weather(delta),
             SettingsRow::Antialias => self.menu.cycle_antialias(delta, &self.supported_aa),
             SettingsRow::Fxaa
             | SettingsRow::Bloom

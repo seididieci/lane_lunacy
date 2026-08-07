@@ -78,18 +78,20 @@ visual parity.
 > Detailed implementation plan: `PLAN.md` (section 6).
 
 Goals:
-- Main menu selects START first; Settings is a submenu off the main menu.
-- Settings exposes GPU, mode, weather, AA (MSAA + FXAA) and a post-FX stack,
-  gated to what the selected GPU supports, all applied live.
+- Main menu selects START first; difficulty + weather are value rows on it;
+  Settings is a submenu off the main menu.
+- Settings exposes GPU, AA (MSAA) and a post-FX stack, gated to what the
+  selected GPU supports, all applied live; every effect defaults to ON.
 - Post-processing is built on a dedicated offscreen target + fullscreen pass,
   leaving the headless snapshot/probe path untouched.
 
-- [ ] Main menu opens with START as the first selected value (title + pause menu)
-- [ ] Settings submenu: two-screen menu model (Main: START/SETTINGS/EXIT; Settings: options + BACK); per-screen keyboard routing
-- [ ] Post-processing foundation: offscreen color target + fullscreen post pass + `PostSettings` UBO + passthrough shader (windowed only)
-- [ ] MSAA 2x/4x: `samples` in the pipeline factory + render pass, resolve to offscreen target, backend rebuild on toggle, gated by device sample-count support
-- [ ] FXAA post effect + toggle
-- [ ] Bloom (downsample → blur → composite) + toggle
-- [ ] Cheap FX set: vignette + film grain + saturation + chromatic aberration + toggles
-- [ ] Live apply wiring: renderer rebuild on AA change, `PostSettings` UBO update on filter toggles, generalized `recreate_renderer()`
-- [ ] Settings layout polish (11 rows fit 720p), menu tests, README controls, final test/build/clippy/fmt, snapshot parity re-check
+- [x] Main menu opens with START as the first selected value (title + pause menu)
+- [x] Two-screen menu model (Main: START/MODE/WEATHER/SETTINGS/EXIT with MODE/WEATHER cycled inline; Settings: GPU/AA/post-FX + BACK); per-screen keyboard routing
+- [x] Post-processing foundation: offscreen color target + fullscreen post pass + `PostSettings` UBO + passthrough shader (windowed only)
+- [x] MSAA 2x/4x: `samples` in the pipeline factory + render pass, resolve to offscreen target, backend rebuild on toggle, gated by device sample-count support
+- [x] FXAA post effect + toggle
+- [x] Bloom: ½→¼→⅛ downsample chain with per-level viewport + soft-knee luminance threshold (only bright sources glow) + toggle
+- [x] Cheap FX set: vignette + film grain + saturation + chromatic aberration + toggles
+- [x] Live apply wiring: renderer rebuild on AA change, `PostSettings` UBO update on filter toggles, staged APPLY model
+- [x] Settings layout polish (10 rows fit 720p), menu tests, README controls, final test/build/clippy/fmt, snapshot parity re-check
+- [x] Difficulty + weather moved to the main menu (committed as you cycle); all effects (best supported MSAA + post stack) default to ON at launch, capability-gated

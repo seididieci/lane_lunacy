@@ -50,8 +50,10 @@ Buckle up. It gets spicy.
 | `Enter`        | Select (START / SETTINGS / EXIT)   |
 | `Esc`          | Open pause menu during a run / back |
 
-The main menu offers **START**, **SETTINGS** and **EXIT**. Start on **SETTINGS**
-to tune the run before driving; `Esc` during a run reopens the same menu.
+The main menu offers **START**, **MODE**, **WEATHER**, **SETTINGS** and **EXIT**.
+**MODE** and **WEATHER** are value rows: use `←`/`→` to cycle them and they take
+effect immediately (changing MODE restarts the run). **START** begins the run
+with everything in effect; **SETTINGS** opens the staging screen.
 
 #### Settings
 
@@ -62,21 +64,20 @@ main menu without committing.
 | Row               | Values                                                |
 |-------------------|-------------------------------------------------------|
 | GPU               | Every Vulkan device (device 0 is the default)         |
-| MODE              | ARCADE / NORMAL / HARD (change restarts the run)      |
-| WEATHER           | AUTO / CLEAR / CLOUDY / RAIN                          |
 | ANTIALIASING      | OFF / MSAA 2x / MSAA 4x (only modes the GPU supports) |
 | FXAA              | ON / OFF — edge-aware smoothing on the post pass      |
 | BLOOM             | ON / OFF — multi-level glow on bright lights          |
 | VIGNETTE          | ON / OFF — darkened corners                           |
-| GRAIN              | ON / OFF — animated film grain                        |
+| GRAIN             | ON / OFF — animated film grain                        |
 | SATURATION        | ON / OFF — boosted color saturation                   |
 | CHROMATIC         | ON / OFF — radial red/blue shift                      |
 | APPLY / BACK      | Commit everything / return to menu                    |
 
-Switching GPU re-uses the window and keeps your run going. Changing **MODE**
-restarts the run; weather, antialiasing and post-processing apply live. AA and
-the post effects default to OFF, and every MSAA mode is gated by what the chosen
-GPU supports.
+Switching GPU re-uses the window and keeps your run going. Antialiasing and
+post-processing apply live. Every effect defaults to ON at launch (the best
+MSAA mode the GPU supports, plus all post effects, which every Vulkan device
+can run) — dial any of them down in SETTINGS. MSAA modes are gated by what the
+chosen GPU supports.
 
 ### Driving
 
