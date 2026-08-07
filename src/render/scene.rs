@@ -579,6 +579,12 @@ impl SceneResources {
             traffic_head_pos,
             traffic_head_dir,
             traffic_head_state,
+            terrain_state: [
+                lights.terrain_tint[0],
+                lights.terrain_tint[1],
+                lights.terrain_tint[2],
+                0.0,
+            ],
         };
         Buffer::from_data(
             self.memory_allocator.clone(),

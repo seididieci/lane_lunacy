@@ -95,3 +95,24 @@ Goals:
 - [x] Live apply wiring: renderer rebuild on AA change, `PostSettings` UBO update on filter toggles, staged APPLY model
 - [x] Settings layout polish (10 rows fit 720p), menu tests, README controls, final test/build/clippy/fmt, snapshot parity re-check
 - [x] Difficulty + weather moved to the main menu (committed as you cycle); all effects (best supported MSAA + post stack) default to ON at launch, capability-gated
+
+## 7. World building
+
+- [x] Remove the brown stepped banks on the road sides so the camera has a more
+      open view (the bank boxes in `src/mesh.rs` box the road in; the car stays
+      on the tarmac — the lateral `offset` clamp in `src/game/vehicle.rs` stays;
+      the ground ribbon was widened to ±200m so the open field reads clean)
+- [ ] Add a gravel road material: new `SurfaceMaterial` variant + atlas slot +
+      texture under `assets/textures/` + a `DustProfile` (higher emission, gray
+      puffs) and a `material_at` rule (e.g. shoulders/verges become gravel) so
+      it reads and behaves differently from asphalt
+- [x] Make the terrain respond to night/day: currently the grass/verge stays one
+      color — tie the terrain palette to `night_fac` (and dusk tint) like the sky
+      (grass/verge albedo tint in `mesh.frag.glsl`, driven by a new
+      `terrain_tint` in `daynight::compute`; asphalt stays pure)
+- [ ] Add trees around the street (procedural, like the cloud/flare sprites —
+      no art assets), culled by the road-mesh chunks
+- [ ] Add street lamps that switch on at night, reusing the projector/headlight
+      path in `src/render/frame.rs`
+- [ ] Add road cliffs that affect the car's speed (local terrain gradient feeds
+      into `vehicle.update`, e.g. uphill drag / downhill assist)

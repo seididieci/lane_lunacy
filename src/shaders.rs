@@ -39,6 +39,8 @@ pub struct MVP {
     pub traffic_head_pos: [[f32; 4]; 16],
     pub traffic_head_dir: [[f32; 4]; 16],
     pub traffic_head_state: [[f32; 4]; 16],
+    /// Terrain (grass/verge) day/night tint: [tint.rgb, unused].
+    pub terrain_state: [f32; 4],
 }
 
 #[derive(BufferContents, Clone, Copy, Debug)]

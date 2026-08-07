@@ -30,6 +30,14 @@ const NIGHT_CLOUD_TINT: [f32; 3] = [0.22, 0.24, 0.32];
 const OVERCAST_HORIZON: [f32; 3] = [0.60, 0.60, 0.63];
 const DUSK_WARM: [f32; 3] = [0.85, 0.45, 0.22];
 
+// Terrain (grass/verge) day/night tint, mirroring the sky palettes: identity
+// in full daylight, a cool desaturated moonlit tint at night, and the warm
+// dusk wash at dawn/dusk. Asphalt stays pure (lit by headlights instead).
+const DAY_TERRAIN: [f32; 3] = [1.0, 1.0, 1.0];
+const NIGHT_TERRAIN: [f32; 3] = [0.62, 0.68, 0.84];
+/// How much of the `DUSK_WARM` wash the terrain picks up near the horizon.
+const TERRAIN_DUSK_AMOUNT: f32 = 0.4;
+
 /// Sky colors passed to the sky dome shader (alpha is unused there).
 pub struct SkyPalette {
     pub zenith: [f32; 4],
@@ -52,6 +60,9 @@ pub struct Lights {
     pub day_fac: f32,
     /// Effective night darkness 0..1 (already scaled by difficulty).
     pub night_fac: f32,
+    /// Terrain (grass/verge) albedo tint for the mesh shader: identity by day,
+    /// cool under moonlight, warm at dawn/dusk.
+    pub terrain_tint: [f32; 3],
 }
 
 /// Sun azimuth in radians for any hour of the day, sweeping east -> west over
@@ -127,6 +138,12 @@ pub fn compute(
 
     let ambient = mix(0.48, 0.06, night_fac);
 
+    let terrain_tint = mix3(
+        mix3(DAY_TERRAIN, NIGHT_TERRAIN, night_fac),
+        DUSK_WARM,
+        dusk * TERRAIN_DUSK_AMOUNT,
+    );
+
     (
         SkyPalette {
             zenith: [zenith[0], zenith[1], zenith[2], 1.0],
@@ -140,6 +157,7 @@ pub fn compute(
             sun_intensity,
             day_fac,
             night_fac,
+            terrain_tint,
         },
     )
 }
@@ -228,6 +246,48 @@ mod tests {
         let (clear, _) = compute(0.6, 12.0, DAY_FRACTION, 0.0, 0.0);
         let (rainy, _) = compute(0.6, 12.0, DAY_FRACTION, 1.0, 0.0);
         assert!(rainy.fog_color[0] < clear.fog_color[0]);
+    }
+
+    #[test]
+    fn terrain_tint_is_identity_at_noon_and_cool_at_night() {
+        let (_, noon) = compute(1.0, 12.0, DAY_FRACTION, 0.0, 0.0);
+        for c in noon.terrain_tint {
+            assert!((c - 1.0).abs() < 1e-4, "noon terrain is untinted: {c}");
+        }
+
+        let (_, night) = compute(-1.0, 0.0, DAY_FRACTION, 0.0, 1.0);
+        assert!(
+            night.terrain_tint[2] > night.terrain_tint[0],
+            "night terrain turns cool/bluer: {:?}",
+            night.terrain_tint
+        );
+        assert!(
+            night.terrain_tint.iter().any(|c| (c - 1.0).abs() > 1e-3),
+            "night terrain must not stay identity"
+        );
+    }
+
+    #[test]
+    fn terrain_tint_scales_with_night_darkness() {
+        let (_, half) = compute(-1.0, 0.0, DAY_FRACTION, 0.0, 0.5);
+        let (_, full) = compute(-1.0, 0.0, DAY_FRACTION, 0.0, 1.0);
+        let shift = |t: [f32; 3]| t[0] + t[1] + t[2];
+        assert!(
+            shift(full.terrain_tint) < shift(half.terrain_tint) && shift(half.terrain_tint) < 3.0,
+            "darker nights tint the terrain more strongly"
+        );
+    }
+
+    #[test]
+    fn terrain_tint_is_warm_near_the_dusk_edge() {
+        // Sun just above the horizon (golden hour): the terrain picks up the
+        // warm DUSK_WARM wash, so it reads redder than blue.
+        let (_, dusk) = compute(0.02, sunset() - 0.5, DAY_FRACTION, 0.0, 0.2);
+        assert!(
+            dusk.terrain_tint[0] > dusk.terrain_tint[2],
+            "dusk terrain turns warm/redder: {:?}",
+            dusk.terrain_tint
+        );
     }
 
     #[test]

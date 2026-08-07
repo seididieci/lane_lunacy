@@ -20,6 +20,7 @@ layout(set = 0, binding = 0) uniform MVP {
     vec4 traffic_head_pos[16];
     vec4 traffic_head_dir[16];
     vec4 traffic_head_state[16];
+    vec4 terrain_state;
 };
 
 layout(set = 0, binding = 1) uniform sampler2D tex;
@@ -51,6 +52,12 @@ void main() {
         }
     }
     vec3 albedo = v_color * tex_col;
+    // Terrain (grass/verge, material 3) reacts to the day/night cycle like the
+    // sky: identity by day, cool under moonlight, warm at dawn/dusk. Asphalt
+    // stays pure.
+    if (v_material >= 3.0 && v_material < 90.0) {
+        albedo *= terrain_state.xyz;
+    }
     vec3 lit = albedo * (ambient + diff * sun_intensity * 0.85);
 
     // Headlight cone cast from the player car, scaled with night darkness so
