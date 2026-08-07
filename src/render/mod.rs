@@ -84,6 +84,9 @@ pub struct Renderer {
     scene_framebuffer: Arc<Framebuffer>,
     /// One composite framebuffer per swapchain image.
     post_framebuffers: Vec<Arc<Framebuffer>>,
+    /// One HUD/text framebuffer per swapchain image, bound to `post.hud_pass`
+    /// (`load_op: Load`) so text composites flat over the post output.
+    hud_framebuffers: Vec<Arc<Framebuffer>>,
     /// Everything shared with the headless snapshot path: pipelines, textures,
     /// samplers, models, buffers, allocators.
     scene: SceneResources,
@@ -176,6 +179,7 @@ impl Renderer {
             extent,
         );
         let post_framebuffers = create_post_framebuffers(&post.pass, &images);
+        let hud_framebuffers = create_post_framebuffers(&post.hud_pass, &images);
         let frame_count = post_framebuffers.len();
 
         Renderer {
@@ -189,6 +193,7 @@ impl Renderer {
             depth_view,
             scene_framebuffer,
             post_framebuffers,
+            hud_framebuffers,
             scene,
             post,
             frame_builder: FrameBuilder::new(),
@@ -254,6 +259,7 @@ impl Renderer {
             self.msaa_color_view.as_ref(),
         );
         self.post_framebuffers = create_post_framebuffers(&self.post.pass, &new_images);
+        self.hud_framebuffers = create_post_framebuffers(&self.post.hud_pass, &new_images);
         self.post
             .create_bloom_images(&self.scene.memory_allocator, extent);
         self.viewport.extent = [dims.width as f32, dims.height as f32];
@@ -349,6 +355,7 @@ impl Renderer {
             self.frame_builder.world_chunks(),
             self.scene_framebuffer.clone(),
             self.post_framebuffers[image_i as usize].clone(),
+            self.hud_framebuffers[image_i as usize].clone(),
             &self.post.bloom_fbs,
             &self.viewport,
             self.offscreen_view.clone(),

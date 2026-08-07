@@ -5,9 +5,11 @@
 //! [`record_frame`] renders straight into a framebuffer (used by both the
 //! headless snapshot presenter and the old-style direct path), while
 //! [`record_frame_posted`] first renders the scene into an offscreen color
-//! target and then runs the bloom chain + post-processing composite into the
-//! swapchain. Both paths share [`record_scene_contents`], so sky, scene,
-//! particles, flare and HUD can never drift apart.
+//! target, then runs the bloom chain + post-processing composite into the
+//! swapchain, and finally draws the HUD/text on top of the swapchain so it
+//! stays flat and unaffected by the post effects. Both paths share
+//! [`record_scene_contents`], so sky, scene, particles and flare can never
+//! drift apart.
 
 use std::sync::Arc;
 
@@ -22,7 +24,7 @@ use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
 use vulkano::image::view::ImageView;
 use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter};
 use vulkano::pipeline::graphics::viewport::Viewport;
-use vulkano::pipeline::{Pipeline, PipelineBindPoint};
+use vulkano::pipeline::{GraphicsPipeline, Pipeline, PipelineBindPoint};
 use vulkano::render_pass::Framebuffer;
 
 use crate::game::Game;
@@ -32,7 +34,7 @@ use crate::render::post::PostResources;
 use crate::render::scene::SceneResources;
 use crate::road::road_curve;
 use crate::shaders::{BloomParams, PostSettings};
-use crate::vertex::Vertex3d;
+use crate::vertex::{HudVertex, Vertex3d};
 
 /// Linear-HDR luminance above which a source pixel contributes to the bloom
 /// glow, and the width of the smooth knee around it (see `BloomParams`).
@@ -72,6 +74,12 @@ pub fn record_frame(
         .set_viewport(0, [viewport.clone()].into_iter().collect())
         .expect("set viewport");
     record_scene_contents(&mut builder, scene, game, frame, world_chunks);
+    record_hud(
+        &mut builder,
+        scene,
+        scene.hud_pipeline.clone(),
+        &frame.hud_verts,
+    );
     builder
         .end_render_pass(SubpassEndInfo::default())
         .expect("end render pass");
@@ -79,12 +87,16 @@ pub fn record_frame(
 }
 
 /// Records the windowed path: scene into the offscreen framebuffer, the bloom
-/// downsample chain (when `settings.flags` has `POST_BLOOM`), then the post
-/// composite into the swapchain framebuffer.
+/// downsample chain (when `settings.flags` has `POST_BLOOM`), the post
+/// composite into the swapchain framebuffer, then the HUD/text pass on top of
+/// the swapchain so text stays flat and readable (no bloom glow, no chromatic
+/// aberration fringes, no FXAA/grain/vignette softening).
 ///
 /// `offscreen_view` is the scene color target sampled by the composite (and
 /// the first bloom downsample); `bloom_views` is `post.bloom_views`; bloom
 /// level *n* downsamples level *n-1* (level 0 downsamples the offscreen).
+/// `hud_framebuffer` is the swapchain image bound to `post.hud_pass`; its
+/// `load_op: Load` composites the text over the post output.
 #[allow(clippy::too_many_arguments)]
 pub fn record_frame_posted(
     scene: &SceneResources,
@@ -94,6 +106,7 @@ pub fn record_frame_posted(
     world_chunks: &[WorldChunk],
     scene_framebuffer: Arc<Framebuffer>,
     post_framebuffer: Arc<Framebuffer>,
+    hud_framebuffer: Arc<Framebuffer>,
     bloom_fbs: &[Arc<Framebuffer>],
     viewport: &Viewport,
     offscreen_view: Arc<ImageView>,
@@ -272,11 +285,43 @@ pub fn record_frame_posted(
     builder
         .end_render_pass(SubpassEndInfo::default())
         .expect("end post render pass");
+
+    // ---- HUD/text flat pass on top of the post output ----
+    // `load_op: Load` keeps the post composite already written to the
+    // swapchain image; nothing is cleared. Drawn at 1x against the swapchain
+    // format so bloom/chroma/FXAA/grain/vignette never touch the text.
+    builder
+        .begin_render_pass(
+            RenderPassBeginInfo {
+                // The attachment is `Load` (composites over the post output),
+                // so the entry is `None`: nothing is cleared.
+                clear_values: vec![None],
+                ..RenderPassBeginInfo::framebuffer(hud_framebuffer)
+            },
+            SubpassBeginInfo {
+                contents: SubpassContents::Inline,
+                ..Default::default()
+            },
+        )
+        .expect("begin hud render pass")
+        .set_viewport(0, [viewport.clone()].into_iter().collect())
+        .expect("set viewport");
+    record_hud(
+        &mut builder,
+        scene,
+        post.hud_pipeline.clone(),
+        &frame.hud_verts,
+    );
+    builder
+        .end_render_pass(SubpassEndInfo::default())
+        .expect("end hud render pass");
     builder.build().expect("build command buffer")
 }
 
-/// Records sky, 3D scene, particles, flare and HUD draws between the render
-/// pass begin and end. The caller owns begin/end and the viewport.
+/// Records sky, 3D scene, particles and flare draws between the render pass
+/// begin and end. The caller owns begin/end and the viewport; the HUD/text
+/// pass is recorded separately by [`record_hud`] so it can be drawn on top of
+/// the post composite in the windowed path.
 fn record_scene_contents(
     builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
     scene: &SceneResources,
@@ -292,7 +337,6 @@ fn record_scene_contents(
         dust_verts,
         mist_verts,
         flare_verts,
-        hud_verts,
         ..
     } = frame;
 
@@ -529,14 +573,24 @@ fn record_scene_contents(
                 .expect("draw flare");
         }
     }
+}
 
-    // ---- HUD ----
+/// Records the HUD/text draw: binds `hud_pipeline` (either the scene pass's
+/// pipeline or `post.hud_pipeline` for the flat post-post pass), uploads the
+/// CPU-built `HudVertex` quads and draws them. The descriptor set is shared
+/// (same shaders, same layout) and lives on `SceneResources`.
+fn record_hud(
+    builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+    scene: &SceneResources,
+    hud_pipeline: Arc<GraphicsPipeline>,
+    hud_verts: &[HudVertex],
+) {
     builder
-        .bind_pipeline_graphics(scene.hud_pipeline.clone())
+        .bind_pipeline_graphics(hud_pipeline.clone())
         .expect("bind hud pipeline")
         .bind_descriptor_sets(
             PipelineBindPoint::Graphics,
-            scene.hud_pipeline.layout().clone(),
+            hud_pipeline.layout().clone(),
             0,
             scene.hud_descriptor_set.clone(),
         )

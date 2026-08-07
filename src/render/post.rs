@@ -21,8 +21,11 @@ use vulkano::pipeline::graphics::vertex_input::VertexInputState;
 use vulkano::pipeline::GraphicsPipeline;
 use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass};
 
-use crate::render::pipeline::{graphics_pipeline, load_stages, Blend, Depth, PipelineSpec};
+use crate::render::pipeline::{
+    graphics_pipeline, load_shaders, load_stages, Blend, Depth, PipelineSpec,
+};
 use crate::shaders;
+use crate::vertex::HudVertex;
 
 /// Bloom downsample levels: 1/2, 1/4, 1/8.
 const BLOOM_LEVELS: usize = 3;
@@ -40,6 +43,12 @@ pub struct PostResources {
     pub bloom_pass: Arc<RenderPass>,
     /// Fullscreen-triangle downsample pipeline (`bloom.frag`).
     pub bloom_pipeline: Arc<GraphicsPipeline>,
+    /// HUD composite pass drawn after the post composite so text stays flat and
+    /// readable: one color attachment in the swapchain format, `load_op: Load`
+    /// (composites over the just-presented post output, not cleared).
+    pub hud_pass: Arc<RenderPass>,
+    /// HUD/menu text pipeline bound to `hud_pass` (`hud.vert/frag`).
+    pub hud_pipeline: Arc<GraphicsPipeline>,
     /// Linear/clamped sampler shared by the post and bloom passes.
     pub sampler: Arc<Sampler>,
     /// Bloom chain images, level 0 = half res down to level 2 = eighth res.
@@ -121,6 +130,43 @@ impl PostResources {
             SampleCount::Sample1,
         );
 
+        // HUD pass: composites over the post output already in the swapchain
+        // image (`load_op: Load`), so text is drawn flat and unaffected by the
+        // bloom/chroma/FXAA/grain/vignette chain. Drawn at 1x — the swapchain
+        // can't be multisampled — font-atlas coverage alpha keeps glyphs smooth.
+        let hud_pass = vulkano::single_pass_renderpass!(
+            device.clone(),
+            attachments: {
+                color: {
+                    format: swapchain_format,
+                    samples: 1,
+                    load_op: Load,
+                    store_op: Store,
+                },
+            },
+            pass: {
+                color: [color],
+                depth_stencil: {},
+            }
+        )
+        .expect("hud render pass");
+        let hud_subpass = Subpass::from(hud_pass.clone(), 0).unwrap();
+        let hud = load_shaders::<HudVertex>(device, shaders::HUD_VERT_SPV, shaders::HUD_FRAG_SPV);
+        let hud_pipeline = graphics_pipeline(
+            device,
+            &hud_subpass,
+            PipelineSpec {
+                label: "hud post pipeline",
+                cull_mode: CullMode::None,
+                depth: Depth::None,
+                blend: Blend::Alpha,
+            },
+            hud.stages,
+            hud.vertex_input,
+            hud.layout,
+            SampleCount::Sample1,
+        );
+
         let sampler = Sampler::new(
             device.clone(),
             SamplerCreateInfo {
@@ -138,6 +184,8 @@ impl PostResources {
             pipeline,
             bloom_pass,
             bloom_pipeline,
+            hud_pass,
+            hud_pipeline,
             sampler,
             bloom_views: Vec::new(),
             bloom_fbs: Vec::new(),
