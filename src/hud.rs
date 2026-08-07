@@ -196,6 +196,14 @@ fn alert(game: &Game) -> Option<Node> {
             Insets::uniform(28.0),
             Node::new(col),
         )))
+    } else if game.engine_blown {
+        // Engine just blew: announce immediately while the car coasts to a
+        // stop; the full game-over panel appears once it has stopped.
+        Some(Node::new(Panel::wrap(
+            PANEL_BG,
+            Insets::uniform(28.0),
+            Node::new(Text::new("ENGINE BLOWN", EM_ALERT, RED)),
+        )))
     } else if game.wreck_timer > 0.0 {
         Some(Node::new(Panel::wrap(
             PANEL_BG,
@@ -226,6 +234,21 @@ mod tests {
         over.game_over = true;
         let mut over_root = build_hud_tree(&over);
         assert!(!ui.build(&mut over_root, &atlas, 16.0 / 9.0, 0.0).is_empty());
+    }
+
+    #[test]
+    fn engine_blown_alert_appears_before_the_car_stops() {
+        let ui = Ui::new();
+        let atlas = FontAtlas::load();
+
+        let mut blown = Game::new();
+        blown.engine_blown = true;
+        let mut blown_root = build_hud_tree(&blown);
+        assert!(
+            !ui.build(&mut blown_root, &atlas, 16.0 / 9.0, 0.0)
+                .is_empty(),
+            "alert visible while the car is still coasting"
+        );
     }
 
     #[test]
