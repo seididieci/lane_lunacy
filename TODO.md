@@ -110,8 +110,10 @@ Goals:
       color — tie the terrain palette to `night_fac` (and dusk tint) like the sky
       (grass/verge albedo tint in `mesh.frag.glsl`, driven by a new
       `terrain_tint` in `daynight::compute`; asphalt stays pure)
-- [ ] Add trees around the street (procedural, like the cloud/flare sprites —
-      no art assets), culled by the road-mesh chunks
+- [x] Add trees around the street (procedural, like the cloud/flare sprites —
+      no art assets, culled by the road-mesh chunks; cone/pine + broadleaf
+      built in `src/mesh.rs` with a deterministic per-world-s placement and a
+      generated foliage tile as atlas slot 4 in `src/render/cloud.rs`)
 - [ ] Add street lamps that switch on at night, reusing the projector/headlight
       path in `src/render/frame.rs`
 - [ ] Add road cliffs that affect the car's speed (local terrain gradient feeds

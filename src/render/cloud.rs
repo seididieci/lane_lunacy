@@ -58,6 +58,49 @@ pub fn generate_cloud_tile(size: u32, seed: u64) -> Vec<u8> {
     out
 }
 
+/// Bakes a `size`×`size` opaque RGBA foliage tile for the world atlas (slot 4).
+///
+/// A soft low-contrast green noise gives tree surfaces organic variation while
+/// keeping per-tree `v_color` in control of the hue (the mesh shader mixes the
+/// tile with mid-grey for material 4). The lattice is periodic, so the tile
+/// tiles seamlessly over tree faces.
+pub fn generate_foliage_tile(size: u32, seed: u64) -> Vec<u8> {
+    let n = size as usize;
+    let mut out = Vec::with_capacity(n * n * 4);
+    for py in 0..n {
+        let y = py as f32;
+        for px in 0..n {
+            let x = px as f32;
+            let n1 = fbm(seed, size, x + 11.0, y + 5.0, 6, 4);
+            let n2 = fbm(
+                seed ^ 0x5DEECE66D,
+                size,
+                x * 1.7 + 3.0,
+                y * 1.7 + 9.0,
+                10,
+                3,
+            );
+            let n3 = fbm(
+                seed ^ 0xDEADBEEF,
+                size,
+                x * 3.1 + 31.0,
+                y * 3.1 + 17.0,
+                18,
+                2,
+            );
+            // Base leaf green with subtle hue/luma jitter (light patchy canopy).
+            let r = (0.30 + 0.18 * (n1 - 0.5) + 0.06 * (n3 - 0.5)) * 255.0;
+            let g = (0.55 + 0.22 * (n1 - 0.5) + 0.10 * (n2 - 0.5) + 0.05 * (n3 - 0.5)) * 255.0;
+            let b = (0.22 + 0.14 * (n1 - 0.5) + 0.05 * (n3 - 0.5)) * 255.0;
+            out.push(r.clamp(0.0, 255.0) as u8);
+            out.push(g.clamp(0.0, 255.0) as u8);
+            out.push(b.clamp(0.0, 255.0) as u8);
+            out.push(255);
+        }
+    }
+    out
+}
+
 /// Fractal value noise, periodic across the tile.
 fn fbm(seed: u64, size: u32, x: f32, y: f32, base_cells: i32, octaves: usize) -> f32 {
     let mut sum = 0.0;
@@ -122,4 +165,31 @@ fn smoothstep5(t: f32) -> f32 {
 fn smoothstep(t: f32) -> f32 {
     let x = t.clamp(0.0, 1.0);
     x * x * (3.0 - 2.0 * x)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn foliage_tile_is_opaque_green_noise() {
+        let size = 64u32;
+        let tile = generate_foliage_tile(size, 7);
+        assert_eq!(tile.len(), (size * size * 4) as usize);
+        let mut green_biased = true;
+        for px in tile.chunks_exact(4).step_by(64) {
+            assert_eq!(px[3], 255, "foliage is opaque");
+            green_biased &= px[1] >= px[0] && px[1] >= px[2];
+        }
+        assert!(green_biased, "foliage tile reads green");
+    }
+
+    #[test]
+    fn foliage_tile_is_deterministic_per_seed() {
+        let a = generate_foliage_tile(32, 9);
+        let b = generate_foliage_tile(32, 9);
+        let c = generate_foliage_tile(32, 10);
+        assert_eq!(a, b, "same seed -> same tile");
+        assert_ne!(a, c, "different seed -> different tile");
+    }
 }

@@ -35,7 +35,7 @@ use vulkano::sync::{self, GpuFuture};
 use crate::font::FontAtlas;
 use crate::mesh::build_sky_dome;
 use crate::model::{load_gltf_mesh_from_bytes, CarLightAnchors};
-use crate::render::cloud::generate_cloud_tile;
+use crate::render::cloud::{generate_cloud_tile, generate_foliage_tile};
 use crate::render::flare;
 use crate::render::frame::{FrameUniforms, Headlights};
 use crate::render::particles::{generate_cloud_sprite, generate_soft_sprite};
@@ -47,6 +47,8 @@ use crate::shaders::{self, MVP};
 use crate::vertex::{FlareVertex, HudVertex, ParticleVertex, Vertex3d};
 
 const CLOUD_TILE: u32 = 256;
+/// Foliage tile must match the other world-atlas slot dimensions (512×512).
+const FOLIAGE_TILE: u32 = 512;
 
 const PLAYER_MODEL_GLB: &[u8] = include_bytes!("../../assets/models/player_race_future.glb");
 const TRAFFIC_SEDAN_GLB: &[u8] = include_bytes!("../../assets/models/traffic_sedan.glb");
@@ -398,8 +400,10 @@ impl SceneResources {
         .expect("hud descriptor set");
 
         // World texture atlas, one row of slots left-to-right:
-        //   slot 0 = asphalt base, slot 1 = asphalt worn, slot 2 = asphalt cracked, slot 3 = grass.
+        //   slot 0 = asphalt base, slot 1 = asphalt worn, slot 2 = asphalt cracked,
+        //   slot 3 = grass, slot 4 = foliage.
         // See mesh.frag.glsl for the material-based atlas offset.
+        let foliage_tile = generate_foliage_tile(FOLIAGE_TILE, seed);
         let slot_textures = [
             image::load_from_memory(ASPHALT_BASE_PNG)
                 .expect("failed to decode embedded asphalt_base texture")
@@ -413,6 +417,8 @@ impl SceneResources {
             image::load_from_memory(GRASS_PNG)
                 .expect("failed to decode embedded grass texture")
                 .to_rgba8(),
+            image::RgbaImage::from_raw(FOLIAGE_TILE, FOLIAGE_TILE, foliage_tile)
+                .expect("foliage tile has the right size"),
         ];
         let slot_w = slot_textures[0].dimensions().0;
         let atlas_h = slot_textures

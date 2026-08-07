@@ -38,17 +38,22 @@ void main() {
     if (v_material >= 90.0) {
         tex_col = texture(tex, v_uv).rgb;
     } else {
-        // World texture atlas, one row of 4 slots:
-        // 0=asphalt base, 1=asphalt worn, 2=asphalt cracked, 3=grass.
-        float atlas_u = v_material * 0.25;
-        vec2 uv = vec2(fract(v_uv.x) * 0.25 + atlas_u, fract(v_uv.y));
+        // World texture atlas, one row of 5 slots:
+        // 0=asphalt base, 1=asphalt worn, 2=asphalt cracked, 3=grass, 4=foliage.
+        float atlas_u = v_material * 0.2;
+        vec2 uv = vec2(fract(v_uv.x) * 0.2 + atlas_u, fract(v_uv.y));
         tex_col = texture(tex, uv).rgb;
         // Reduce noisy contrast around local luma (keeps overall brightness).
         float luma = dot(tex_col, vec3(0.299, 0.587, 0.114));
         tex_col = mix(tex_col, vec3(luma), 0.35);
         // Grass gets flattened toward mid-grey so it reads soft and clean.
-        if (v_material >= 3.0) {
+        if (v_material >= 3.0 && v_material < 4.0) {
             tex_col = mix(vec3(0.5), tex_col, 0.35);
+        }
+        // Foliage keeps its own green tint in v_color, using the tile only for
+        // low-contrast canopy texture (mixed toward mid-grey).
+        if (v_material >= 4.0 && v_material < 90.0) {
+            tex_col = mix(vec3(0.85), tex_col, 0.25);
         }
     }
     vec3 albedo = v_color * tex_col;
