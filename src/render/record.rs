@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: MIT
 
-//! Single command-buffer recorder for any present target.
+//! Single command-buffer recorders for any present target.
 //!
-//! `record_frame` turns a CPU `Frame` + `SceneResources` + world chunks into a
-//! ready-to-submit primary command buffer for a given framebuffer. Both the
-//! windowed `Renderer` and the headless snapshot presenter call it, so the
-//! two targets can never drift apart: same sky, scene, particles, flare, HUD.
+//! [`record_frame`] renders straight into a framebuffer (used by both the
+//! headless snapshot presenter and the old-style direct path), while
+//! [`record_frame_posted`] first renders the scene into an offscreen color
+//! target and then runs the bloom chain + post-processing composite into the
+//! swapchain. Both paths share [`record_scene_contents`], so sky, scene,
+//! particles, flare and HUD can never drift apart.
 
 use std::sync::Arc;
 
@@ -26,9 +28,16 @@ use vulkano::render_pass::Framebuffer;
 use crate::game::Game;
 use crate::render::frame::{traffic_rotation, Frame};
 use crate::render::frame_builder::WorldChunk;
+use crate::render::post::PostResources;
 use crate::render::scene::SceneResources;
 use crate::road::road_curve;
+use crate::shaders::{BloomParams, PostSettings};
 use crate::vertex::Vertex3d;
+
+/// Linear-HDR luminance above which a source pixel contributes to the bloom
+/// glow, and the width of the smooth knee around it (see `BloomParams`).
+const BLOOM_THRESHOLD: f32 = 0.8;
+const BLOOM_KNEE: f32 = 0.12;
 
 /// Records every draw in the scene into a primary command buffer for the given
 /// framebuffer. The caller owns the render pass begin/end, the framebuffer,
@@ -41,18 +50,6 @@ pub fn record_frame(
     framebuffer: Arc<Framebuffer>,
     viewport: &Viewport,
 ) -> Arc<PrimaryAutoCommandBuffer> {
-    let Frame {
-        uniforms,
-        headlights,
-        sky_uniform,
-        particle_verts,
-        dust_verts,
-        mist_verts,
-        flare_verts,
-        hud_verts,
-        ..
-    } = frame;
-
     let mut builder = AutoCommandBufferBuilder::primary(
         scene.command_allocator.clone(),
         scene.queue_family_index,
@@ -74,6 +71,230 @@ pub fn record_frame(
         .expect("begin render pass")
         .set_viewport(0, [viewport.clone()].into_iter().collect())
         .expect("set viewport");
+    record_scene_contents(&mut builder, scene, game, frame, world_chunks);
+    builder
+        .end_render_pass(SubpassEndInfo::default())
+        .expect("end render pass");
+    builder.build().expect("build command buffer")
+}
+
+/// Records the windowed path: scene into the offscreen framebuffer, the bloom
+/// downsample chain (when `settings.flags` has `POST_BLOOM`), then the post
+/// composite into the swapchain framebuffer.
+///
+/// `offscreen_view` is the scene color target sampled by the composite (and
+/// the first bloom downsample); `bloom_views` is `post.bloom_views`; bloom
+/// level *n* downsamples level *n-1* (level 0 downsamples the offscreen).
+#[allow(clippy::too_many_arguments)]
+pub fn record_frame_posted(
+    scene: &SceneResources,
+    post: &PostResources,
+    game: &Game,
+    frame: &Frame,
+    world_chunks: &[WorldChunk],
+    scene_framebuffer: Arc<Framebuffer>,
+    post_framebuffer: Arc<Framebuffer>,
+    bloom_fbs: &[Arc<Framebuffer>],
+    viewport: &Viewport,
+    offscreen_view: Arc<ImageView>,
+    bloom_views: &[Arc<ImageView>],
+    settings: &PostSettings,
+) -> Arc<PrimaryAutoCommandBuffer> {
+    let mut builder = AutoCommandBufferBuilder::primary(
+        scene.command_allocator.clone(),
+        scene.queue_family_index,
+        CommandBufferUsage::MultipleSubmit,
+    )
+    .expect("command buffer builder");
+
+    // ---- Scene into offscreen ----
+    // One clear value per attachment: color (and depth) are `Clear`, the MSAA
+    // resolve attachment (present only under 2x/4x) is `DontCare`.
+    let scene_clears = if scene_framebuffer.attachments().len() == 3 {
+        vec![Some([0.9, 0.7, 0.5, 1.0].into()), None, Some(1.0f32.into())]
+    } else {
+        vec![Some([0.9, 0.7, 0.5, 1.0].into()), Some(1.0f32.into())]
+    };
+    builder
+        .begin_render_pass(
+            RenderPassBeginInfo {
+                clear_values: scene_clears,
+                ..RenderPassBeginInfo::framebuffer(scene_framebuffer)
+            },
+            SubpassBeginInfo {
+                contents: SubpassContents::Inline,
+                ..Default::default()
+            },
+        )
+        .expect("begin scene render pass")
+        .set_viewport(0, [viewport.clone()].into_iter().collect())
+        .expect("set viewport");
+    record_scene_contents(&mut builder, scene, game, frame, world_chunks);
+    builder
+        .end_render_pass(SubpassEndInfo::default())
+        .expect("end scene render pass");
+
+    // ---- Bloom downsample chain ----
+    if settings.flags & crate::shaders::POST_BLOOM != 0 {
+        for (level, fb) in bloom_fbs.iter().enumerate() {
+            let src = if level == 0 {
+                offscreen_view.clone()
+            } else {
+                bloom_views[level - 1].clone()
+            };
+            // Each bloom framebuffer is half the resolution of the one above;
+            // the viewport must match the framebuffer, not the full window, or
+            // the fullscreen triangle only covers its top-left quadrant.
+            let [bw, bh] = fb.extent();
+            let bloom_viewport = Viewport {
+                offset: [0.0, 0.0],
+                extent: [bw as f32, bh as f32],
+                depth_range: 0.0..=1.0,
+            };
+            let bloom_params = BloomParams {
+                threshold: BLOOM_THRESHOLD,
+                knee: BLOOM_KNEE,
+                first_pass: u32::from(level == 0),
+                _pad: 0.0,
+            };
+            let bloom_buf = Buffer::from_data(
+                scene.memory_allocator.clone(),
+                BufferCreateInfo {
+                    usage: BufferUsage::UNIFORM_BUFFER,
+                    ..Default::default()
+                },
+                AllocationCreateInfo {
+                    memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                    ..Default::default()
+                },
+                bloom_params,
+            )
+            .expect("bloom params buffer");
+            let set_layout = post.bloom_pipeline.layout().set_layouts()[0].clone();
+            let set = DescriptorSet::new(
+                scene.descriptor_set_allocator.clone(),
+                set_layout,
+                [
+                    WriteDescriptorSet::image_view_sampler(0, src, post.sampler.clone()),
+                    WriteDescriptorSet::buffer(1, bloom_buf),
+                ],
+                [],
+            )
+            .expect("bloom descriptor set");
+            builder
+                .begin_render_pass(
+                    RenderPassBeginInfo {
+                        clear_values: vec![None],
+                        ..RenderPassBeginInfo::framebuffer(fb.clone())
+                    },
+                    SubpassBeginInfo {
+                        contents: SubpassContents::Inline,
+                        ..Default::default()
+                    },
+                )
+                .expect("begin bloom render pass")
+                .set_viewport(0, [bloom_viewport].into_iter().collect())
+                .expect("set viewport")
+                .bind_pipeline_graphics(post.bloom_pipeline.clone())
+                .expect("bind bloom pipeline")
+                .bind_descriptor_sets(
+                    PipelineBindPoint::Graphics,
+                    post.bloom_pipeline.layout().clone(),
+                    0,
+                    set,
+                )
+                .expect("bind bloom descriptor sets");
+            unsafe {
+                builder.draw(3, 1, 0, 0).expect("draw bloom");
+            }
+            builder
+                .end_render_pass(SubpassEndInfo::default())
+                .expect("end bloom render pass");
+        }
+    }
+
+    // ---- Post composite into the swapchain ----
+    let post_buf = Buffer::from_data(
+        scene.memory_allocator.clone(),
+        BufferCreateInfo {
+            usage: BufferUsage::UNIFORM_BUFFER,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+            ..Default::default()
+        },
+        *settings,
+    )
+    .expect("post settings buffer");
+    let post_set_layout = post.pipeline.layout().set_layouts()[0].clone();
+    let post_set = DescriptorSet::new(
+        scene.descriptor_set_allocator.clone(),
+        post_set_layout,
+        [
+            WriteDescriptorSet::buffer(0, post_buf),
+            WriteDescriptorSet::image_view_sampler(1, offscreen_view, post.sampler.clone()),
+            WriteDescriptorSet::image_view_sampler(
+                2,
+                bloom_views.last().cloned().expect("bloom views"),
+                post.sampler.clone(),
+            ),
+        ],
+        [],
+    )
+    .expect("post descriptor set");
+    builder
+        .begin_render_pass(
+            RenderPassBeginInfo {
+                clear_values: vec![None],
+                ..RenderPassBeginInfo::framebuffer(post_framebuffer)
+            },
+            SubpassBeginInfo {
+                contents: SubpassContents::Inline,
+                ..Default::default()
+            },
+        )
+        .expect("begin post render pass")
+        .set_viewport(0, [viewport.clone()].into_iter().collect())
+        .expect("set viewport")
+        .bind_pipeline_graphics(post.pipeline.clone())
+        .expect("bind post pipeline")
+        .bind_descriptor_sets(
+            PipelineBindPoint::Graphics,
+            post.pipeline.layout().clone(),
+            0,
+            post_set,
+        )
+        .expect("bind post descriptor sets");
+    unsafe {
+        builder.draw(3, 1, 0, 0).expect("draw post");
+    }
+    builder
+        .end_render_pass(SubpassEndInfo::default())
+        .expect("end post render pass");
+    builder.build().expect("build command buffer")
+}
+
+/// Records sky, 3D scene, particles, flare and HUD draws between the render
+/// pass begin and end. The caller owns begin/end and the viewport.
+fn record_scene_contents(
+    builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+    scene: &SceneResources,
+    game: &Game,
+    frame: &Frame,
+    world_chunks: &[WorldChunk],
+) {
+    let Frame {
+        uniforms,
+        headlights,
+        sky_uniform,
+        particle_verts,
+        dust_verts,
+        mist_verts,
+        flare_verts,
+        hud_verts,
+        ..
+    } = frame;
 
     // ---- Sky dome (background) ----
     // Drawn first with depth disabled so the 3D scene overdraws it.
@@ -177,7 +398,7 @@ pub fn record_frame(
 
     for (world_vertices, world_indices) in world_chunks {
         draw(
-            &mut builder,
+            builder,
             world_vertices.clone(),
             world_indices.clone(),
             scene.world_texture_view.clone(),
@@ -186,7 +407,7 @@ pub fn record_frame(
     }
     // player car
     draw(
-        &mut builder,
+        builder,
         scene.car_vertices.clone(),
         scene.car_indices.clone(),
         scene.car_texture_view.clone(),
@@ -203,7 +424,7 @@ pub fn record_frame(
         let (traffic_vertices, traffic_indices, _anchors) =
             &scene.traffic_meshes[idx % scene.traffic_meshes.len()];
         draw(
-            &mut builder,
+            builder,
             traffic_vertices.clone(),
             traffic_indices.clone(),
             scene.car_texture_view.clone(),
@@ -222,7 +443,7 @@ pub fn record_frame(
     // dust and rain composite on top.
     if !mist_verts.is_empty() {
         scene.draw_particles(
-            &mut builder,
+            builder,
             &scene.dust_pipeline,
             mist_verts,
             uniforms,
@@ -231,7 +452,7 @@ pub fn record_frame(
     }
     if !dust_verts.is_empty() {
         scene.draw_particles(
-            &mut builder,
+            builder,
             &scene.dust_pipeline,
             dust_verts,
             uniforms,
@@ -240,7 +461,7 @@ pub fn record_frame(
     }
     if !particle_verts.is_empty() {
         scene.draw_particles(
-            &mut builder,
+            builder,
             &scene.particle_pipeline,
             particle_verts,
             uniforms,
@@ -340,9 +561,4 @@ pub fn record_frame(
     unsafe {
         builder.draw(hud_vertex_count, 1, 0, 0).expect("draw hud");
     }
-
-    builder
-        .end_render_pass(SubpassEndInfo::default())
-        .expect("end render pass");
-    builder.build().expect("build command buffer")
 }

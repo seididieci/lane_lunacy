@@ -25,7 +25,7 @@ use vulkano::device::{Device, Queue};
 use vulkano::format::Format;
 use vulkano::image::sampler::{Sampler, SamplerAddressMode, SamplerCreateInfo, SamplerMipmapMode};
 use vulkano::image::view::ImageView;
-use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
+use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage, SampleCount};
 use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
 use vulkano::pipeline::graphics::rasterization::CullMode;
 use vulkano::pipeline::{GraphicsPipeline, Pipeline, PipelineBindPoint};
@@ -105,13 +105,15 @@ pub struct SceneResources {
 impl SceneResources {
     /// Builds every pipeline, texture, sampler and model. The `render_pass`
     /// must have one color + one depth attachment (swapchain or offscreen);
-    /// the pipelines are recorded against its subpass.
+    /// the pipelines are recorded against its subpass. `samples` is the
+    /// multisampling of the render pass color/depth attachments.
     pub fn new(
         device: Arc<Device>,
         queue: Arc<Queue>,
         render_pass: Arc<RenderPass>,
         font_atlas: &FontAtlas,
         seed: u64,
+        samples: SampleCount,
     ) -> Self {
         let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
         let command_allocator = Arc::new(StandardCommandBufferAllocator::new(
@@ -138,6 +140,7 @@ impl SceneResources {
             mesh.stages,
             mesh.vertex_input,
             mesh.layout,
+            samples,
         );
 
         let hud = load_shaders::<HudVertex>(&device, shaders::HUD_VERT_SPV, shaders::HUD_FRAG_SPV);
@@ -153,6 +156,7 @@ impl SceneResources {
             hud.stages,
             hud.vertex_input,
             hud.layout,
+            samples,
         );
 
         let sky = load_shaders::<Vertex3d>(&device, shaders::SKY_VERT_SPV, shaders::SKY_FRAG_SPV);
@@ -168,6 +172,7 @@ impl SceneResources {
             sky.stages,
             sky.vertex_input,
             sky.layout,
+            samples,
         );
 
         // ---- Rain particles ----
@@ -188,6 +193,7 @@ impl SceneResources {
             particle.stages.clone(),
             particle.vertex_input.clone(),
             particle.layout.clone(),
+            samples,
         );
 
         // Dust uses normal alpha blending instead of additive: the cloud must
@@ -205,6 +211,7 @@ impl SceneResources {
             particle.stages,
             particle.vertex_input,
             particle.layout,
+            samples,
         );
 
         // Sprite atlas for the particle pipeline: a horizontal strip of four
@@ -259,6 +266,7 @@ impl SceneResources {
             flare.stages,
             flare.vertex_input,
             flare.layout,
+            samples,
         );
 
         let (flare_core_view, flare_core_mips) = upload_rgba8_texture_mipmapped(

@@ -14,6 +14,9 @@ pub const PARTICLE_FRAG_SPV: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/spv/particle.frag.spv"));
 pub const FLARE_VERT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spv/flare.vert.spv"));
 pub const FLARE_FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spv/flare.frag.spv"));
+pub const POST_VERT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spv/post.vert.spv"));
+pub const POST_FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spv/post.frag.spv"));
+pub const BLOOM_FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spv/bloom.frag.spv"));
 
 pub fn spv_words(bytes: &[u8]) -> Vec<u32> {
     bytes
@@ -52,4 +55,44 @@ pub struct SkyUniform {
     pub light_dir: [f32; 4],
     pub cloud_amount: f32,
     pub sun_state: [f32; 4],
+}
+
+/// Per-FX bits for [`PostSettings::flags`]. Mirrors the `FLAG_*` consts in
+/// `post.frag.glsl`.
+pub const POST_FXAA: u32 = 1 << 0;
+pub const POST_BLOOM: u32 = 1 << 1;
+pub const POST_VIGNETTE: u32 = 1 << 2;
+pub const POST_GRAIN: u32 = 1 << 3;
+pub const POST_SATURATION: u32 = 1 << 4;
+pub const POST_CHROMA: u32 = 1 << 5;
+
+/// UBO for the post-processing pass. `flags` gates each effect; the float
+/// factors are the fixed per-effect intensities; `texel_x/y` are the inverse
+/// framebuffer size (for FXAA/chroma); `time` drives the animated grain.
+#[derive(BufferContents, Clone, Copy, Debug)]
+#[repr(C)]
+pub struct PostSettings {
+    pub flags: u32,
+    pub time: f32,
+    pub vignette_strength: f32,
+    pub grain_amount: f32,
+    pub saturation_boost: f32,
+    pub bloom_strength: f32,
+    pub chroma_strength: f32,
+    pub texel_x: f32,
+    pub texel_y: f32,
+    pub _pad: [f32; 3],
+}
+
+/// Linear-HDR luminance gate for the bloom downsample pass. `threshold`/`knee`
+/// define a soft knee applied only on the first downsample (`first_pass != 0`),
+/// so only bright sources (sun, headlights, taillights) feed the glow while the
+/// sky and road stay out of it. Mirrors `BloomParams` in `bloom.frag.glsl`.
+#[derive(BufferContents, Clone, Copy, Debug)]
+#[repr(C)]
+pub struct BloomParams {
+    pub threshold: f32,
+    pub knee: f32,
+    pub first_pass: u32,
+    pub _pad: f32,
 }

@@ -32,6 +32,7 @@ pub struct Glyph {
     pub advance: f32,
 }
 
+#[derive(Clone)]
 pub struct FontAtlas {
     pub pixels: Vec<u8>,
     pub width: u32,

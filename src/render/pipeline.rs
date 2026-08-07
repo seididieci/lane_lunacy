@@ -25,9 +25,56 @@ use vulkano::pipeline::{
     DynamicState, GraphicsPipeline, PipelineLayout, PipelineShaderStageCreateInfo,
 };
 use vulkano::render_pass::Subpass;
-use vulkano::shader::{ShaderModule, ShaderModuleCreateInfo};
+use vulkano::shader::{EntryPoint, ShaderModule, ShaderModuleCreateInfo};
 
 use crate::shaders;
+
+/// A shader pair with its pipeline layout, ready to be turned into a
+/// `GraphicsPipeline`. Carries the vertex entry point so vertex-input state can
+/// be derived from it.
+pub struct StageSet {
+    pub stages: Vec<PipelineShaderStageCreateInfo>,
+    pub layout: Arc<PipelineLayout>,
+    pub vs_entry: EntryPoint,
+}
+
+/// Loads `vs`/`fs` (SPIR-V byte arrays) into a shader pair and its pipeline
+/// layout. Used directly for vertex-less pipelines (fullscreen passes); the
+/// typed [`load_shaders`] derives the vertex-input state from it.
+pub fn load_stages(device: &Arc<Device>, vs: &'static [u8], fs: &'static [u8]) -> StageSet {
+    let vs = unsafe {
+        ShaderModule::new(
+            device.clone(),
+            ShaderModuleCreateInfo::new(&shaders::spv_words(vs)),
+        )
+    }
+    .expect("vertex shader module");
+    let fs = unsafe {
+        ShaderModule::new(
+            device.clone(),
+            ShaderModuleCreateInfo::new(&shaders::spv_words(fs)),
+        )
+    }
+    .expect("fragment shader module");
+    let vs_ep = vs.entry_point("main").unwrap();
+    let fs_ep = fs.entry_point("main").unwrap();
+    let stages = vec![
+        PipelineShaderStageCreateInfo::new(vs_ep.clone()),
+        PipelineShaderStageCreateInfo::new(fs_ep),
+    ];
+    let layout = PipelineLayout::new(
+        device.clone(),
+        PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
+            .into_pipeline_layout_create_info(device.clone())
+            .unwrap(),
+    )
+    .unwrap();
+    StageSet {
+        stages,
+        layout,
+        vs_entry: vs_ep,
+    }
+}
 
 /// Loads a vertex+fragment shader pair and derives the vertex-input state and
 /// descriptor-set layout for `V`, so the caller can drop straight into
@@ -46,38 +93,12 @@ pub fn load_shaders<V: VertexTrait>(
     vs: &'static [u8],
     fs: &'static [u8],
 ) -> ShaderStages<V> {
-    let vs = unsafe {
-        ShaderModule::new(
-            device.clone(),
-            ShaderModuleCreateInfo::new(&shaders::spv_words(vs)),
-        )
-    }
-    .expect("vertex shader module");
-    let fs = unsafe {
-        ShaderModule::new(
-            device.clone(),
-            ShaderModuleCreateInfo::new(&shaders::spv_words(fs)),
-        )
-    }
-    .expect("fragment shader module");
-    let vs_ep = vs.entry_point("main").unwrap();
-    let fs_ep = fs.entry_point("main").unwrap();
-    let vertex_input = V::per_vertex().definition(&vs_ep).unwrap();
-    let stages = vec![
-        PipelineShaderStageCreateInfo::new(vs_ep),
-        PipelineShaderStageCreateInfo::new(fs_ep),
-    ];
-    let layout = PipelineLayout::new(
-        device.clone(),
-        PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
-            .into_pipeline_layout_create_info(device.clone())
-            .unwrap(),
-    )
-    .unwrap();
+    let stages = load_stages(device, vs, fs);
+    let vertex_input = V::per_vertex().definition(&stages.vs_entry).unwrap();
     ShaderStages {
-        stages,
+        stages: stages.stages,
         vertex_input,
-        layout,
+        layout: stages.layout,
         _vertex: PhantomData,
     }
 }
@@ -117,7 +138,7 @@ pub struct PipelineSpec {
 
 /// Builds a `GraphicsPipeline` from a spec plus the shader stages, vertex input
 /// and layout produced by [`load_shaders`]. Every pipeline shares the same
-/// viewport dynamic state, single-sample multisampling and triangle lists.
+/// viewport dynamic state, the given multisampling and triangle lists.
 pub fn graphics_pipeline(
     device: &Arc<Device>,
     subpass: &Subpass,
@@ -125,19 +146,29 @@ pub fn graphics_pipeline(
     stages: Vec<PipelineShaderStageCreateInfo>,
     vertex_input: VertexInputState,
     layout: Arc<PipelineLayout>,
+    samples: vulkano::image::SampleCount,
 ) -> Arc<GraphicsPipeline> {
     let depth_stencil = match spec.depth {
-        Depth::None => DepthStencilState {
-            depth: None,
-            ..Default::default()
-        },
-        Depth::Test { write } => DepthStencilState {
+        // Vulkan requires the state to be `Some` exactly when the subpass has a
+        // depth/stencil attachment: `Some` without one (post/composite passes)
+        // and `None` with one both fail validation.
+        Depth::None => {
+            if subpass.subpass_desc().depth_stencil_attachment.is_some() {
+                Some(DepthStencilState {
+                    depth: None,
+                    ..Default::default()
+                })
+            } else {
+                None
+            }
+        }
+        Depth::Test { write } => Some(DepthStencilState {
             depth: Some(DepthState {
                 write_enable: write,
                 compare_op: CompareOp::Less,
             }),
             ..Default::default()
-        },
+        }),
     };
     let blend_attachment = match spec.blend {
         Blend::Opaque => ColorBlendAttachmentState::default(),
@@ -170,8 +201,11 @@ pub fn graphics_pipeline(
                 cull_mode: spec.cull_mode,
                 ..Default::default()
             }),
-            multisample_state: Some(MultisampleState::default()),
-            depth_stencil_state: Some(depth_stencil),
+            multisample_state: Some(MultisampleState {
+                rasterization_samples: samples,
+                ..Default::default()
+            }),
+            depth_stencil_state: depth_stencil,
             color_blend_state: Some(ColorBlendState::with_attachment_states(
                 subpass.num_color_attachments(),
                 blend_attachment,

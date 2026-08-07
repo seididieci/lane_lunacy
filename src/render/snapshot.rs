@@ -80,6 +80,7 @@ pub fn render_snapshot(
         render_pass.clone(),
         font_atlas,
         seed,
+        vulkano::image::SampleCount::Sample1,
     );
 
     // Offscreen color attachment that can also serve as the copy source for

@@ -46,14 +46,37 @@ Buckle up. It gets spicy.
 | Input          | Action                              |
 |----------------|-------------------------------------|
 | `↑` / `↓` (`W`/`S`) | Move between rows              |
-| `←` / `→` (`A`/`D`) | Cycle GPU or difficulty        |
-| `Enter`        | Select (START / EXIT / GPU switch) |
+| `←` / `→` (`A`/`D`) | Cycle the selected row's value |
+| `Enter`        | Select (START / SETTINGS / EXIT)   |
 | `Esc`          | Open pause menu during a run / back |
 
-Select a **GPU** (device 0 is the default, overridable with `--gpu <N>`), choose a
-**difficulty**, then hit **START**. Switching GPU re-uses the window and keeps your
-run going. Pause anytime with `Esc` — the road freezes behind the menu. Changing the
-**difficulty** in the pause menu restarts the current run; changing the GPU does not.
+The main menu offers **START**, **SETTINGS** and **EXIT**. Start on **SETTINGS**
+to tune the run before driving; `Esc` during a run reopens the same menu.
+
+#### Settings
+
+Settings are *staged*: tweak as much as you like, then press **APPLY** to commit
+them in one shot (it is dimmed until something changes). **BACK** returns to the
+main menu without committing.
+
+| Row               | Values                                                |
+|-------------------|-------------------------------------------------------|
+| GPU               | Every Vulkan device (device 0 is the default)         |
+| MODE              | ARCADE / NORMAL / HARD (change restarts the run)      |
+| WEATHER           | AUTO / CLEAR / CLOUDY / RAIN                          |
+| ANTIALIASING      | OFF / MSAA 2x / MSAA 4x (only modes the GPU supports) |
+| FXAA              | ON / OFF — edge-aware smoothing on the post pass      |
+| BLOOM             | ON / OFF — multi-level glow on bright lights          |
+| VIGNETTE          | ON / OFF — darkened corners                           |
+| GRAIN              | ON / OFF — animated film grain                        |
+| SATURATION        | ON / OFF — boosted color saturation                   |
+| CHROMATIC         | ON / OFF — radial red/blue shift                      |
+| APPLY / BACK      | Commit everything / return to menu                    |
+
+Switching GPU re-uses the window and keeps your run going. Changing **MODE**
+restarts the run; weather, antialiasing and post-processing apply live. AA and
+the post effects default to OFF, and every MSAA mode is gated by what the chosen
+GPU supports.
 
 ### Driving
 
@@ -181,11 +204,16 @@ src/
   render/            Renderer: Vulkan pipelines, camera, texture uploads
   mesh.rs            Procedural road/world geometry
   hud.rs, font.rs    HUD + font atlas
-  menu.rs            Start/pause menu state and vertex builder
+  menu.rs            Two-screen menu (main + settings) with staged values
   model.rs           GLB mesh loading
   gpu.rs             Device/surface/queue selection
   build.rs*          Shader compilation pipeline
 ```
+
+Post-processing runs only in the windowed renderer: the scene is rendered into an
+offscreen HDR target, then the FX composite (and the optional bloom downsample
+chain) produces the final swapchain image. The headless snapshot path bypasses it
+so the golden baselines stay deterministic.
 
 ---
 
