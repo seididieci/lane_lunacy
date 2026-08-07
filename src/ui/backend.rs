@@ -98,6 +98,7 @@ pub(crate) fn push_glyph_quad(
 }
 
 /// Draws text with the top-left of the em box at (x, y) in NDC.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_text(
     out: &mut Vec<HudVertex>,
     atlas: &FontAtlas,
@@ -143,6 +144,7 @@ pub(crate) fn ring_point(
 
 /// Tessellated ring band from `a0_deg` to `a1_deg` (counter-clockwise) between
 /// radii `r0` and `r1`. Emitted as solid-colored triangles (SOLID_UV).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn push_ring_segment(
     out: &mut Vec<HudVertex>,
     cx: f32,
@@ -158,7 +160,7 @@ pub(crate) fn push_ring_segment(
         return;
     }
     // One quad every ~5 degrees, bounded for tiny sweeps.
-    let steps = (((a1_deg - a0_deg).abs() / 5.0).ceil() as usize).max(1).min(96);
+    let steps = (((a1_deg - a0_deg).abs() / 5.0).ceil() as usize).clamp(1, 96);
     let c = color;
     for i in 0..steps {
         let t0 = i as f32 / steps as f32;
@@ -180,6 +182,7 @@ pub(crate) fn push_ring_segment(
 
 /// A thin needle from radius `r0` to `r1` at `angle_deg`, `thick` wide,
 /// centered on `(cx, cy)`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn push_needle(
     out: &mut Vec<HudVertex>,
     cx: f32,

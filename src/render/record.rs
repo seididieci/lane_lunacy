@@ -25,6 +25,7 @@ use vulkano::render_pass::Framebuffer;
 
 use crate::game::Game;
 use crate::render::frame::{traffic_rotation, Frame};
+use crate::render::frame_builder::WorldChunk;
 use crate::render::scene::SceneResources;
 use crate::road::road_curve;
 use crate::vertex::Vertex3d;
@@ -36,7 +37,7 @@ pub fn record_frame(
     scene: &SceneResources,
     game: &Game,
     frame: &Frame,
-    world_chunks: &[(Subbuffer<[Vertex3d]>, Subbuffer<[u32]>)],
+    world_chunks: &[WorldChunk],
     framebuffer: Arc<Framebuffer>,
     viewport: &Viewport,
 ) -> Arc<PrimaryAutoCommandBuffer> {

@@ -16,6 +16,12 @@ pub struct Vehicle {
     pub throttle: bool,
 }
 
+impl Default for Vehicle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Vehicle {
     pub fn new() -> Self {
         Vehicle {

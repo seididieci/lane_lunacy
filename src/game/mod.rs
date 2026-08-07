@@ -52,6 +52,12 @@ pub struct Game {
     pub time: f32,
 }
 
+impl Default for Game {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Game {
     pub fn new() -> Self {
         let mut game = Game {
@@ -229,7 +235,7 @@ impl Game {
         // Judge a gear change at the pre-shift ratio.
         if self.vehicle.gear > gear_before {
             let frac = self.vehicle.rpm_frac_for(gear_before);
-            if frac >= PERFECT_LO && frac <= PERFECT_HI {
+            if (PERFECT_LO..=PERFECT_HI).contains(&frac) {
                 let bonus =
                     (PERFECT_SHIFT_BONUS as f32 * self.difficulty.score_multiplier()) as u32;
                 self.bonus_score += bonus;

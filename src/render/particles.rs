@@ -43,6 +43,12 @@ pub struct RainSystem {
     rng: Rng,
 }
 
+impl Default for RainSystem {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RainSystem {
     pub fn new() -> Self {
         let mut rng = Rng::new();
@@ -152,6 +158,12 @@ pub struct DustSystem {
     puffs: Vec<Puff>,
     rng: Rng,
     spawn_accum: f32,
+}
+
+impl Default for DustSystem {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DustSystem {
@@ -535,6 +547,36 @@ fn push_quad(
 /// Small xorshift PRNG (no external rand dependency).
 struct Rng(u64);
 
+impl Rng {
+    fn new() -> Self {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before epoch")
+            .as_nanos() as u64;
+        Rng(nanos | 1)
+    }
+
+    /// Deterministic RNG for the headless snapshot path, derived from the
+    /// scenario seed so identical seeds produce identical rain/dust.
+    fn from_seed(seed: u64) -> Self {
+        Rng(seed | 1)
+    }
+
+    fn next(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.0 = x;
+        x
+    }
+
+    fn range(&mut self, lo: f32, hi: f32) -> f32 {
+        let r = (self.next() >> 11) as f32 / (1u64 << 53) as f32;
+        lo + r * (hi - lo)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -707,35 +749,5 @@ mod tests {
         dust.update(2.5, 0.0, &profile, rear, Vec3::NEG_Z);
         assert!(dust.puffs.is_empty());
         assert!(dust.build_vertices(Vec3::ZERO, Vec3::X).is_empty());
-    }
-}
-
-impl Rng {
-    fn new() -> Self {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock before epoch")
-            .as_nanos() as u64;
-        Rng(nanos | 1)
-    }
-
-    /// Deterministic RNG for the headless snapshot path, derived from the
-    /// scenario seed so identical seeds produce identical rain/dust.
-    fn from_seed(seed: u64) -> Self {
-        Rng(seed | 1)
-    }
-
-    fn next(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.0 = x;
-        x
-    }
-
-    fn range(&mut self, lo: f32, hi: f32) -> f32 {
-        let r = (self.next() >> 11) as f32 / (1u64 << 53) as f32;
-        lo + r * (hi - lo)
     }
 }

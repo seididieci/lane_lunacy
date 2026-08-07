@@ -9,6 +9,7 @@ use crate::vertex::Vertex3d;
 const ASPHALT_BASE: SurfaceMaterial = SurfaceMaterial::AsphaltBase;
 const GRASS: SurfaceMaterial = SurfaceMaterial::Grass;
 
+#[allow(clippy::too_many_arguments)]
 fn push_quad(
     v: &mut Vec<Vertex3d>,
     i: &mut Vec<u32>,

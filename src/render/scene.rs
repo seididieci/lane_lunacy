@@ -59,6 +59,9 @@ const ASPHALT_WORN_PNG: &[u8] = include_bytes!("../../assets/textures/asphalt_wo
 const ASPHALT_CRACKED_PNG: &[u8] = include_bytes!("../../assets/textures/asphalt_cracked.png");
 const GRASS_PNG: &[u8] = include_bytes!("../../assets/textures/grass.png");
 
+/// One traffic car's mesh: vertex buffer, index buffer, and its lamp anchors.
+pub type TrafficMesh = (Subbuffer<[Vertex3d]>, Subbuffer<[u32]>, CarLightAnchors);
+
 /// All GPU state a frame needs except the swapchain/framebuffer and the
 /// per-frame mutable state (particles, camera smoothing, world chunks).
 pub struct SceneResources {
@@ -95,7 +98,7 @@ pub struct SceneResources {
     pub car_vertices: Subbuffer<[Vertex3d]>,
     pub car_indices: Subbuffer<[u32]>,
     pub player_anchors: CarLightAnchors,
-    pub traffic_meshes: Vec<(Subbuffer<[Vertex3d]>, Subbuffer<[u32]>, CarLightAnchors)>,
+    pub traffic_meshes: Vec<TrafficMesh>,
     pub traffic_anchors: Vec<CarLightAnchors>,
 }
 

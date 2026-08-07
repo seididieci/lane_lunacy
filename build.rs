@@ -14,7 +14,7 @@ fn main() {
     let mut entries: Vec<_> = fs::read_dir(&shader_dir)
         .expect("read shaders dir")
         .map(|e| e.expect("shader dir entry"))
-        .filter(|e| e.path().extension().map_or(false, |x| x == "glsl"))
+        .filter(|e| e.path().extension().is_some_and(|x| x == "glsl"))
         .collect();
     entries.sort_by_key(|e| e.file_name());
 

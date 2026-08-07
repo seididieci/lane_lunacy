@@ -75,7 +75,7 @@ fn load_from_document(
         append_node_meshes(
             node,
             Mat4::IDENTITY,
-            &buffers,
+            buffers,
             &mut vertices,
             &mut indices,
             source_label,
@@ -132,10 +132,11 @@ fn append_node_meshes(
                 });
 
             let base_index = vertices.len() as u32;
-            for idx in 0..positions.len() {
-                let pos = world_transform.transform_point3(Vec3::from(positions[idx]));
-                let nrm = (normal_transform * Vec3::from(*normals.get(idx).unwrap_or(&[0.0, 1.0, 0.0])))
-                    .normalize_or_zero();
+            for (idx, position) in positions.iter().enumerate() {
+                let pos = world_transform.transform_point3(Vec3::from(*position));
+                let nrm = (normal_transform
+                    * Vec3::from(*normals.get(idx).unwrap_or(&[0.0, 1.0, 0.0])))
+                .normalize_or_zero();
                 vertices.push(Vertex3d {
                     position: pos.to_array(),
                     normal: nrm.to_array(),

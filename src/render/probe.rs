@@ -211,8 +211,7 @@ pub fn to_json(probe: &Probe) -> String {
 mod tests {
     use super::*;
     use crate::game::Weather;
-    use crate::render::frame::build_frame;
-    use crate::render::particles::{DustSystem, RainSystem};
+    use crate::render::frame::{build_frame, FrameState};
     use std::time::Duration;
 
     fn deterministic_game(time: f32, weather: Weather) -> Game {
@@ -224,10 +223,7 @@ mod tests {
     }
 
     fn frame_for(game: &Game) -> Frame {
-        let mut sky_time = 0.0;
-        let mut camera_heading = 0.0;
-        let mut rain = RainSystem::new();
-        let mut dust = DustSystem::new();
+        let mut state = FrameState::default();
         let anchors = crate::model::CarLightAnchors {
             lateral: 0.8,
             long_half: 1.84,
@@ -238,10 +234,7 @@ mod tests {
             game,
             Duration::ZERO,
             16.0 / 9.0,
-            &mut sky_time,
-            &mut camera_heading,
-            &mut rain,
-            &mut dust,
+            &mut state,
             &anchors,
             &[anchors],
             Vec::new(),

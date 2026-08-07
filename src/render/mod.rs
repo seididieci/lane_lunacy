@@ -3,12 +3,11 @@ use std::sync::Arc;
 
 use winit::window::Window;
 
-use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
 use vulkano::device::{Device, Queue};
 use vulkano::format::Format;
 use vulkano::image::view::ImageView;
 use vulkano::image::{Image, ImageCreateInfo, ImageType};
-use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter};
+use vulkano::memory::allocator::AllocationCreateInfo;
 use vulkano::pipeline::graphics::viewport::Viewport;
 use vulkano::render_pass::{Framebuffer, RenderPass};
 use vulkano::swapchain::{
@@ -20,18 +19,17 @@ use vulkano::{Validated, VulkanError};
 
 use crate::font::FontAtlas;
 use crate::game::Game;
-use crate::mesh::build_world_chunk;
-use crate::render::frame::build_frame;
-use crate::render::particles::{DustSystem, RainSystem};
+use crate::render::frame_builder::FrameBuilder;
 use crate::render::record::record_frame;
 use crate::render::scene::SceneResources;
-use crate::vertex::{HudVertex, Vertex3d};
+use crate::vertex::HudVertex;
 
 pub mod camera;
 pub mod cloud;
 pub mod daynight;
 pub mod flare;
 pub mod frame;
+pub mod frame_builder;
 pub mod particles;
 pub mod pipeline;
 pub mod probe;
@@ -44,6 +42,12 @@ pub(crate) const WORLD_CHUNK_LEN: f32 = 260.0;
 pub(crate) const WORLD_CHUNKS_BEHIND: i32 = 1;
 pub(crate) const WORLD_CHUNKS_AHEAD: i32 = 6;
 
+/// An in-flight present future, pinned per swapchain image so we can wait on
+/// the oldest one before re-using the image. Stored as `Arc` because vulkano's
+/// `FenceSignalFuture` implements `GpuFuture` only behind an `Arc` (see
+/// `vulkano::sync::future::fence_signal`).
+type FrameFence = Arc<FenceSignalFuture<Box<dyn GpuFuture>>>;
+
 pub struct Renderer {
     device: Arc<Device>,
     queue: Arc<Queue>,
@@ -55,15 +59,12 @@ pub struct Renderer {
     /// Everything shared with the headless snapshot path: pipelines, textures,
     /// samplers, models, buffers, allocators.
     scene: SceneResources,
-    rain: RainSystem,
-    dust: DustSystem,
-    sky_time: f32,
-    world_chunks: Vec<(Subbuffer<[Vertex3d]>, Subbuffer<[u32]>)>,
-    world_anchor_chunk: i32,
+    /// Mutable per-frame state (particles, camera smoothing, world chunks).
+    /// Math lives in `FrameBuilder`; this struct only feeds it the swapchain.
+    frame_builder: FrameBuilder,
     viewport: Viewport,
     pub recreate: bool,
-    camera_heading: f32,
-    fences: Vec<Option<Arc<FenceSignalFuture<Box<dyn GpuFuture>>>>>,
+    fences: Vec<Option<FrameFence>>,
     previous_fence_i: u32,
 }
 
@@ -153,66 +154,16 @@ impl Renderer {
             )
             .expect("depth view"),
             scene,
-            rain: RainSystem::new(),
-            dust: DustSystem::new(),
-            sky_time: 0.0,
-            world_chunks: Vec::new(),
-            world_anchor_chunk: i32::MIN,
+            frame_builder: FrameBuilder::new(),
             viewport,
             recreate: false,
-            camera_heading: 0.0,
             fences: Vec::new(),
             previous_fence_i: 0,
         };
 
         renderer.framebuffers = renderer.create_framebuffers(&images);
         renderer.fences = vec![None; renderer.framebuffers.len()];
-        renderer.rebuild_world_chunks(0);
         renderer
-    }
-
-    fn rebuild_world_chunks(&mut self, anchor_chunk: i32) {
-        self.world_chunks.clear();
-        for rel in -WORLD_CHUNKS_BEHIND..=WORLD_CHUNKS_AHEAD {
-            let chunk_idx = anchor_chunk + rel;
-            let start_s = chunk_idx as f32 * WORLD_CHUNK_LEN;
-            let (wv, wi) = build_world_chunk(start_s, WORLD_CHUNK_LEN);
-            let world_vertices = Buffer::from_iter(
-                self.scene.memory_allocator.clone(),
-                BufferCreateInfo {
-                    usage: BufferUsage::VERTEX_BUFFER,
-                    ..Default::default()
-                },
-                AllocationCreateInfo {
-                    memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                    ..Default::default()
-                },
-                wv,
-            )
-            .expect("world chunk vertices");
-            let world_indices = Buffer::from_iter(
-                self.scene.memory_allocator.clone(),
-                BufferCreateInfo {
-                    usage: BufferUsage::INDEX_BUFFER,
-                    ..Default::default()
-                },
-                AllocationCreateInfo {
-                    memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                    ..Default::default()
-                },
-                wi,
-            )
-            .expect("world chunk indices");
-            self.world_chunks.push((world_vertices, world_indices));
-        }
-        self.world_anchor_chunk = anchor_chunk;
-    }
-
-    fn ensure_world_chunks_for_player(&mut self, player_distance: f32) {
-        let current_chunk = (player_distance / WORLD_CHUNK_LEN).floor() as i32;
-        if current_chunk != self.world_anchor_chunk {
-            self.rebuild_world_chunks(current_chunk);
-        }
     }
 
     fn create_framebuffers(&self, images: &[Arc<Image>]) -> Vec<Arc<Framebuffer>> {
@@ -267,6 +218,9 @@ impl Renderer {
         unsafe { self.device.wait_idle() }.expect("failed to wait for device idle");
     }
 
+    // Single-threaded by design (this is the window presenter); the `Arc` is
+    // mandated by vulkano's `GpuFuture` impl for `FenceSignalFuture`.
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn render(&mut self, game: &Game, dt: std::time::Duration, hud_verts: &[HudVertex]) {
         if self.recreate {
             self.recreate_swapchain();
@@ -295,19 +249,9 @@ impl Renderer {
         // camera, day/night lights, sky uniform, headlight projectors,
         // particles, and flare. The same builder drives the headless snapshot
         // path, so windowed and offline renders are pixel-identical.
-        self.ensure_world_chunks_for_player(game.vehicle.distance);
-        let frame = build_frame(
-            game,
-            dt,
-            aspect,
-            &mut self.sky_time,
-            &mut self.camera_heading,
-            &mut self.rain,
-            &mut self.dust,
-            &self.scene.player_anchors,
-            &self.scene.traffic_anchors,
-            hud_verts.to_vec(),
-        );
+        let frame = self
+            .frame_builder
+            .build(&self.scene, game, dt, aspect, hud_verts.to_vec());
 
         // Everything between begin/end render pass is recorded identically for
         // the swapchain and the headless snapshot target.
@@ -315,7 +259,7 @@ impl Renderer {
             &self.scene,
             game,
             &frame,
-            &self.world_chunks,
+            self.frame_builder.world_chunks(),
             self.framebuffers[image_i as usize].clone(),
             &self.viewport,
         );

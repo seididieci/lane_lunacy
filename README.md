@@ -129,6 +129,41 @@ or set one up front with `--gpu <N>`) and a difficulty, then press **START**.
 
 ---
 
+## 📸 Headless snapshots & the programmatic eye
+
+The renderer is fully deterministic given a seed, time of day, and weather, so a
+frame can be rendered **offscreen, without a window or display**:
+
+```bash
+# one deterministic frame → PNG (1280x720 unless --size is given)
+cargo run --release -- --snapshot shot.png --size 1280x720 --seed 42 --time 12 --weather clear
+cargo run --release -- --snapshot night.png --size 1280x720 --seed 42 --time 0 --weather rain
+```
+
+This is the backbone of visual regression checking. Golden baselines (PNG +
+probe JSON) live in `snapshots/baseline/` (gitignored) and are captured/compared
+with the parity harness:
+
+```bash
+# capture baselines from the current code
+scripts/snapshot_parity.sh capture
+
+# compare current output against the captured baselines (probes + pixels)
+scripts/snapshot_parity.sh check
+```
+
+Each scenario is probed both ways: **CPU probes** (`CpuProbe` — sun position,
+flare intensity, wet/night factors) are pure scene math, while **GPU probes**
+(`GpuProbe` — sky, road, and sun luminance) read the actual rendered pixels.
+The regression tests in `tests/snapshot.rs` pin both against the baselines:
+
+```bash
+cargo test                              # CPU probes always run
+LANE_SNAPSHOT_TESTS=1 cargo test        # + GPU probes (needs a Vulkan device)
+```
+
+---
+
 ## 🧰 Project Layout
 
 ```

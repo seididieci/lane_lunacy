@@ -35,10 +35,10 @@ visual parity.
 - [x] Pipeline factory `graphics_pipeline()` (stages, vertex input, blend, depth, cull, samples) killing the 6 duplicated blocks in `render/mod.rs`
 - [x] Deduplicate math: shared `smoothstep`/`mix`; remove copies in `game/mod.rs`, `daynight.rs`, `flare.rs`
 - [x] Bundle headlight/projector arrays into structs; shrink `mvp_buffer`/`draw_particles` signatures (ISP)
-- [ ] Decouple windowed `Renderer` to only own swapchain/acquire/present; delegate math + recording
-- [ ] Snapshot regression tests: CPU probes always run; GPU probe tests gated behind `LANE_SNAPSHOT_TESTS=1`
-- [ ] Re-run baselines after refactor; diff probe JSON + PNG to prove visual parity
-- [ ] `cargo test`, `cargo build`, clippy/fmt clean; document snapshot usage in README
+- [x] Decouple windowed `Renderer` to only own swapchain/acquire/present; delegate math + recording (via shared `FrameBuilder`)
+- [x] Snapshot regression tests: CPU probes always run; GPU probe tests gated behind `LANE_SNAPSHOT_TESTS=1`
+- [x] Re-run baselines after refactor; diff probe JSON + PNG to prove visual parity (`scripts/snapshot_parity.sh`; pre-refactor HEAD vs post-refactor = 0 differing pixels)
+- [x] `cargo test`, `cargo build`, clippy/fmt clean; document snapshot usage in README
 
 ## 1. Realistic road textures
 - [x] Create/replace asphalt + grass tile textures under `assets/textures/`
@@ -72,3 +72,24 @@ visual parity.
 - [x] Sun elevation drives `light_dir`; sky, fog, ambient, cloud-tint palettes interpolate day↔night with a dawn/dusk warm tint; night gets a faint moon, moonlit `light_dir`, and procedural stars
 - [x] Night-aware overcast colors (cloudy nights stay dark), weather-dimmed fog matching the horizon
 - [x] Headlight cone + taillights at night (scaled by `night_darkness`), HUD clock (HH:MM) top-right, lamps placed at real per-model corner geometry (`CarLightAnchors`, incl. the player car's own rear taillights)
+
+## 6. Menu polish + Settings: antialiasing, post-processing, visual filters
+
+> Detailed implementation plan: `PLAN.md` (section 6).
+
+Goals:
+- Main menu selects START first; Settings is a submenu off the main menu.
+- Settings exposes GPU, mode, weather, AA (MSAA + FXAA) and a post-FX stack,
+  gated to what the selected GPU supports, all applied live.
+- Post-processing is built on a dedicated offscreen target + fullscreen pass,
+  leaving the headless snapshot/probe path untouched.
+
+- [ ] Main menu opens with START as the first selected value (title + pause menu)
+- [ ] Settings submenu: two-screen menu model (Main: START/SETTINGS/EXIT; Settings: options + BACK); per-screen keyboard routing
+- [ ] Post-processing foundation: offscreen color target + fullscreen post pass + `PostSettings` UBO + passthrough shader (windowed only)
+- [ ] MSAA 2x/4x: `samples` in the pipeline factory + render pass, resolve to offscreen target, backend rebuild on toggle, gated by device sample-count support
+- [ ] FXAA post effect + toggle
+- [ ] Bloom (downsample → blur → composite) + toggle
+- [ ] Cheap FX set: vignette + film grain + saturation + chromatic aberration + toggles
+- [ ] Live apply wiring: renderer rebuild on AA change, `PostSettings` UBO update on filter toggles, generalized `recreate_renderer()`
+- [ ] Settings layout polish (11 rows fit 720p), menu tests, README controls, final test/build/clippy/fmt, snapshot parity re-check

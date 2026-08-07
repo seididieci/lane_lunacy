@@ -75,7 +75,7 @@ pub fn load_shaders<V: VertexTrait>(
     )
     .unwrap();
     ShaderStages {
-        stages: stages.into(),
+        stages,
         vertex_input,
         layout,
         _vertex: PhantomData,

@@ -74,6 +74,40 @@ pub struct Frame {
     pub hud_verts: Vec<HudVertex>,
 }
 
+/// Persistent per-frame state shared by every presenter: the smoothed camera
+/// heading, the sky clock, and the particle systems. Pure CPU (no vulkano
+/// types), so `build_frame` stays deterministic and testable.
+pub struct FrameState {
+    pub sky_time: f32,
+    pub camera_heading: f32,
+    pub rain: RainSystem,
+    pub dust: DustSystem,
+}
+
+impl Default for FrameState {
+    fn default() -> Self {
+        FrameState {
+            sky_time: 0.0,
+            camera_heading: 0.0,
+            rain: RainSystem::new(),
+            dust: DustSystem::new(),
+        }
+    }
+}
+
+impl FrameState {
+    /// Deterministic variant for the headless snapshot path: the particle
+    /// systems seed from the scenario seed so the render is reproducible.
+    pub fn with_seed(seed: u64) -> Self {
+        FrameState {
+            sky_time: 0.0,
+            camera_heading: 0.0,
+            rain: RainSystem::with_seed(seed),
+            dust: DustSystem::with_seed(seed),
+        }
+    }
+}
+
 /// Rotation aligning a traffic car to its lane direction. Cars on the right
 /// (lane > 0) drive toward -Z; oncoming cars (lane < 0) face +Z.
 pub(crate) fn traffic_rotation(lane: f32, distance: f32) -> glam::Quat {
@@ -86,22 +120,26 @@ pub(crate) fn traffic_rotation(lane: f32, distance: f32) -> glam::Quat {
 
 /// Computes the full frame for a `Game` state.
 ///
-/// `sky_time`/`camera_heading` are the renderer's persistent smoothed camera
-/// state (updated here); `rain`/`dust` are the persistent particle systems.
-/// `player_anchors` and `traffic_anchors` are the per-model lamp anchors from
-/// the loaded GLB meshes. `hud_verts` are the UI quads drawn last.
+/// `state` is the presenter's persistent smoothed camera + particle state
+/// (updated here). `player_anchors` and `traffic_anchors` are the per-model
+/// lamp anchors from the loaded GLB meshes. `hud_verts` are the UI quads drawn
+/// last.
 pub fn build_frame(
     game: &Game,
     dt: Duration,
     aspect: f32,
-    sky_time: &mut f32,
-    camera_heading: &mut f32,
-    rain: &mut RainSystem,
-    dust: &mut DustSystem,
+    state: &mut FrameState,
     player_anchors: &CarLightAnchors,
     traffic_anchors: &[CarLightAnchors],
     hud_verts: Vec<HudVertex>,
 ) -> Frame {
+    let FrameState {
+        sky_time,
+        camera_heading,
+        rain,
+        dust,
+    } = state;
+
     let proj = perspective_vulkan(60.0f32.to_radians(), aspect, 0.1, 600.0);
 
     // Day/night lighting: the sun sweeps through the day, giving way to faint
@@ -378,18 +416,12 @@ mod tests {
     }
 
     fn frame_for(game: &Game) -> Frame {
-        let mut sky_time = 0.0;
-        let mut camera_heading = 0.0;
-        let mut rain = RainSystem::new();
-        let mut dust = DustSystem::new();
+        let mut state = FrameState::default();
         build_frame(
             game,
             Duration::from_secs_f32(1.0 / 60.0),
             16.0 / 9.0,
-            &mut sky_time,
-            &mut camera_heading,
-            &mut rain,
-            &mut dust,
+            &mut state,
             &anchors(),
             &[anchors()],
             Vec::new(),

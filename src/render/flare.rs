@@ -158,6 +158,7 @@ pub fn build_flare_verts(sun_ndc: [f32; 2], aspect: f32, intensity: f32) -> Vec<
 
 /// Appends a quad (two triangles, 6 vertices) centered at `(cx, cy)` with
 /// half-extents `hw` along the axis and `hh` along the perpendicular.
+#[allow(clippy::too_many_arguments)]
 fn push_quad(
     out: &mut Vec<FlareVertex>,
     cx: f32,

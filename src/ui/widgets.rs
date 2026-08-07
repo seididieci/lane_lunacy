@@ -315,7 +315,7 @@ impl Widget for Panel {
     fn handle_pointer(&mut self, ev: PointerEvent, rect: Rect) -> bool {
         self.child
             .as_mut()
-            .map_or(false, |child| child.widget.handle_pointer(ev, child.placed(rect)))
+            .is_some_and(|child| child.widget.handle_pointer(ev, child.placed(rect)))
     }
 }
 

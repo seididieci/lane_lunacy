@@ -27,11 +27,10 @@ use vulkano::sync::{self, GpuFuture};
 use crate::font::FontAtlas;
 use crate::game::Game;
 use crate::hud::build_hud_tree;
-use crate::mesh::build_world_chunk;
-use crate::render::frame::{build_frame, Frame};
+use crate::render::frame::Frame;
+use crate::render::frame_builder::FrameBuilder;
 use crate::render::record::record_frame;
 use crate::render::scene::SceneResources;
-use crate::render::{WORLD_CHUNKS_AHEAD, WORLD_CHUNKS_BEHIND, WORLD_CHUNK_LEN};
 use crate::ui::Ui;
 
 /// Result of one offscreen render: the sRGB PNG pixels, the raw linear (HDR)
@@ -130,68 +129,25 @@ pub fn render_snapshot(
         depth_range: 0.0..=1.0,
     };
 
-    // World chunks anchored at the player's current chunk, exactly like the
-    // windowed renderer keeps them.
-    let mut world_chunks = Vec::new();
-    let anchor_chunk = (game.vehicle.distance / WORLD_CHUNK_LEN).floor() as i32;
-    for rel in -WORLD_CHUNKS_BEHIND..=WORLD_CHUNKS_AHEAD {
-        let chunk_idx = anchor_chunk + rel;
-        let start_s = chunk_idx as f32 * WORLD_CHUNK_LEN;
-        let (wv, wi) = build_world_chunk(start_s, WORLD_CHUNK_LEN);
-        let world_vertices = Buffer::from_iter(
-            scene.memory_allocator.clone(),
-            BufferCreateInfo {
-                usage: BufferUsage::VERTEX_BUFFER,
-                ..Default::default()
-            },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-            wv,
-        )
-        .expect("world chunk vertices");
-        let world_indices = Buffer::from_iter(
-            scene.memory_allocator.clone(),
-            BufferCreateInfo {
-                usage: BufferUsage::INDEX_BUFFER,
-                ..Default::default()
-            },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-            wi,
-        )
-        .expect("world chunk indices");
-        world_chunks.push((world_vertices, world_indices));
-    }
-
     // Deterministic CPU frame: zero dt (no sky drift, no camera smoothing),
     // particle systems seeded from the scenario seed (not the clock), and the
-    // playing HUD.
+    // playing HUD. `FrameBuilder` also owns the world chunks, anchored at the
+    // player's current chunk exactly like the windowed renderer keeps them.
     let aspect = width as f32 / height as f32;
-    let mut sky_time = 0.0;
-    let mut camera_heading = 0.0;
-    let mut rain = crate::render::particles::RainSystem::with_seed(seed);
-    let mut dust = crate::render::particles::DustSystem::with_seed(seed);
     let mut hud_root = build_hud_tree(game);
     let hud_verts = Ui::new().build(&mut hud_root, font_atlas, aspect, 0.0);
 
-    let frame = build_frame(
-        game,
-        Duration::ZERO,
-        aspect,
-        &mut sky_time,
-        &mut camera_heading,
-        &mut rain,
-        &mut dust,
-        &scene.player_anchors,
-        &scene.traffic_anchors,
-        hud_verts,
-    );
+    let mut frame_builder = FrameBuilder::with_seed(seed);
+    let frame = frame_builder.build(&scene, game, Duration::ZERO, aspect, hud_verts);
 
-    let command_buffer = record_frame(&scene, game, &frame, &world_chunks, framebuffer, &viewport);
+    let command_buffer = record_frame(
+        &scene,
+        game,
+        &frame,
+        frame_builder.world_chunks(),
+        framebuffer,
+        &viewport,
+    );
 
     let readback = Buffer::new_slice::<u8>(
         scene.memory_allocator.clone(),

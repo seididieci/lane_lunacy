@@ -46,7 +46,7 @@ pub struct FontAtlas {
 
 impl FontAtlas {
     pub fn load() -> Self {
-        let font = Font::from_bytes(FONT_BYTES.to_vec(), fontdue::FontSettings::default())
+        let font = Font::from_bytes(FONT_BYTES, fontdue::FontSettings::default())
             .expect("failed to parse font");
 
         let mut rasters: Vec<(char, fontdue::Metrics, Vec<u8>)> = Vec::new();
@@ -60,7 +60,7 @@ impl FontAtlas {
         let cell_w = RASTER_PX.ceil() as usize + PADDING * 2;
         let cell_h = row_height + PADDING * 2;
         let cols = 12usize;
-        let rows = (rasters.len() + cols - 1) / cols;
+        let rows = rasters.len().div_ceil(cols);
         let width = cell_w * cols;
         let height = cell_h * rows;
 

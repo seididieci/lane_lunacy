@@ -313,11 +313,9 @@ impl ApplicationHandler for App {
                                 self.input.gear_down = true;
                             }
                         }
-                        PhysicalKey::Code(KeyCode::KeyR) => {
-                            if press {
-                                self.game.restart();
-                                println!("Run restarted");
-                            }
+                        PhysicalKey::Code(KeyCode::KeyR) if press => {
+                            self.game.restart();
+                            println!("Run restarted");
                         }
                         _ => {}
                     },

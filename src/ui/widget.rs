@@ -33,6 +33,7 @@ impl Node {
 ///  1. `layout` measures the widget (and lays out its children, assigning their
 ///     rects relative to this widget's origin);
 ///  2. `draw` emits the vertices for the final absolute `rect`.
+///
 /// `hit_test` / `handle_pointer` back the pointer API (wired to input later).
 pub trait Widget {
     fn layout(&mut self, ctx: &mut LayoutCtx, constraints: Constraints) -> Size;
