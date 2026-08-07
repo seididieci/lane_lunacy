@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: MIT
 
 use crate::road::{road_curve, ROAD_HALF};
+
+/// Half-width of the flat ground ribbon on each side of the road. Wide enough
+/// that its outer edge stays behind the fog ramp, so the open terrain reads as
+/// intentional instead of ending in a visible cutoff. Widening this adds no
+/// vertices (each ground quad already spans the full width).
+const GROUND_HALF_W: f32 = 200.0;
 use crate::surface::{material_at, SurfaceMaterial};
 use crate::vertex::Vertex3d;
 
@@ -160,10 +166,10 @@ pub fn build_world_chunk(start_s: f32, chunk_len: f32) -> (Vec<Vertex3d>, Vec<u3
         push_quad(
             &mut v,
             &mut i,
-            [x0 - 44.0, 0.0, z0],
-            [x0 + 44.0, 0.0, z0],
-            [x1 + 44.0, 0.0, z1],
-            [x1 - 44.0, 0.0, z1],
+            [x0 - GROUND_HALF_W, 0.0, z0],
+            [x0 + GROUND_HALF_W, 0.0, z0],
+            [x1 + GROUND_HALF_W, 0.0, z1],
+            [x1 - GROUND_HALF_W, 0.0, z1],
             [0.0, 1.0, 0.0],
             ground,
             GRASS.atlas_slot(),
@@ -342,49 +348,49 @@ pub fn build_world_chunk(start_s: f32, chunk_len: f32) -> (Vec<Vertex3d>, Vec<u3
         post_s += 18.0;
     }
 
-    // stepped banks on both sides (denser segments to reduce blocky silhouettes)
-    let bank_cols = [
-        [0.3, 0.25, 0.19],
-        [0.34, 0.28, 0.21],
-        [0.38, 0.31, 0.24],
-        [0.42, 0.35, 0.27],
-    ];
-    let mut s_bank = (start_s / 4.0).floor() * 4.0;
-    let bank_step = 4.0;
-    while s_bank < end_s {
-        let s0 = s_bank;
-        let s1 = (s_bank + bank_step).min(end_s);
-        let z0 = -s1 - 0.45;
-        let z1 = -s0 + 0.45;
-        let cx = road_curve((s0 + s1) * 0.5);
-        let und = (((s0 * 0.11).sin()) + 1.0) * 0.5;
+    (v, i)
+}
 
-        for side in [-1.0, 1.0] {
-            for (lvl, col) in bank_cols.iter().enumerate() {
-                let inner = half_w + 1.3 + lvl as f32 * 1.3;
-                let outer = inner + 1.25;
-                let base_y = lvl as f32 * 0.85;
-                let top_y = base_y + 0.95 + und * 0.32;
-                let x_inner = cx + side * inner;
-                let x_outer = cx + side * outer;
-                let min_x = x_inner.min(x_outer);
-                let max_x = x_inner.max(x_outer);
-                push_box(
-                    &mut v,
-                    &mut i,
-                    [min_x, base_y, z0],
-                    [max_x, top_y, z1],
-                    *col,
-                    GRASS.atlas_slot(),
-                    GRASS.uv_scale(),
-                );
-            }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Builds one chunk and returns its vertex bounds for geometry assertions.
+    fn chunk_bounds(start_s: f32, len: f32) -> (f32, f32, f32) {
+        let (v, _) = build_world_chunk(start_s, len);
+        let mut min_x = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+        for vert in &v {
+            min_x = min_x.min(vert.position[0]);
+            max_x = max_x.max(vert.position[0]);
+            max_y = max_y.max(vert.position[1]);
         }
-
-        s_bank += bank_step;
+        (min_x, max_x, max_y)
     }
 
-    (v, i)
+    #[test]
+    fn world_chunk_has_open_ground_and_no_banks() {
+        let (min_x, max_x, max_y) = chunk_bounds(0.0, 260.0);
+        // The flat ground ribbon spans ±GROUND_HALF_W around the road.
+        assert!(
+            min_x <= -GROUND_HALF_W + 0.01 && max_x >= GROUND_HALF_W - 0.01,
+            "ground must span ±GROUND_HALF_W, got [{min_x}, {max_x}]"
+        );
+        // The banks (which rose to ~3.8m) are gone: the tallest geometry left
+        // is the marker posts (1.05m).
+        assert!(
+            max_y <= 1.1,
+            "no wall geometry may remain above the marker posts, got y={max_y}"
+        );
+    }
+
+    #[test]
+    fn marker_posts_remain_on_both_sides() {
+        let (v, _) = build_world_chunk(0.0, 260.0);
+        let posts = v.iter().filter(|vert| vert.position[1] > 1.0).count();
+        assert!(posts > 0, "marker posts should still exist");
+    }
 }
 
 /// Unit hemisphere (radius 1, y >= 0) centered at the origin, used for the sky
