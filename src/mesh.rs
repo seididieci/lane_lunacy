@@ -24,10 +24,34 @@ fn push_quad(
 ) {
     let base = v.len() as u32;
     let uv = |p: [f32; 3]| [p[0] * scale, p[2] * scale];
-    v.push(Vertex3d { position: a, normal: n, color: col, tex_coord: uv(a), material });
-    v.push(Vertex3d { position: b, normal: n, color: col, tex_coord: uv(b), material });
-    v.push(Vertex3d { position: c, normal: n, color: col, tex_coord: uv(c), material });
-    v.push(Vertex3d { position: d, normal: n, color: col, tex_coord: uv(d), material });
+    v.push(Vertex3d {
+        position: a,
+        normal: n,
+        color: col,
+        tex_coord: uv(a),
+        material,
+    });
+    v.push(Vertex3d {
+        position: b,
+        normal: n,
+        color: col,
+        tex_coord: uv(b),
+        material,
+    });
+    v.push(Vertex3d {
+        position: c,
+        normal: n,
+        color: col,
+        tex_coord: uv(c),
+        material,
+    });
+    v.push(Vertex3d {
+        position: d,
+        normal: n,
+        color: col,
+        tex_coord: uv(d),
+        material,
+    });
     i.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
 
@@ -42,12 +66,78 @@ fn push_box(
 ) {
     let (x0, y0, z0) = (min[0], min[1], min[2]);
     let (x1, y1, z1) = (max[0], max[1], max[2]);
-    push_quad(v, i, [x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1], [0.0, -1.0, 0.0], col, material, scale);
-    push_quad(v, i, [x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [x0, y1, z0], [0.0, 1.0, 0.0], col, material, scale);
-    push_quad(v, i, [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1], [0.0, 0.0, 1.0], col, material, scale);
-    push_quad(v, i, [x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0], [0.0, 0.0, -1.0], col, material, scale);
-    push_quad(v, i, [x1, y0, z0], [x1, y0, z1], [x1, y1, z1], [x1, y1, z0], [1.0, 0.0, 0.0], col, material, scale);
-    push_quad(v, i, [x0, y0, z1], [x0, y0, z0], [x0, y1, z0], [x0, y1, z1], [-1.0, 0.0, 0.0], col, material, scale);
+    push_quad(
+        v,
+        i,
+        [x0, y0, z0],
+        [x1, y0, z0],
+        [x1, y0, z1],
+        [x0, y0, z1],
+        [0.0, -1.0, 0.0],
+        col,
+        material,
+        scale,
+    );
+    push_quad(
+        v,
+        i,
+        [x0, y1, z1],
+        [x1, y1, z1],
+        [x1, y1, z0],
+        [x0, y1, z0],
+        [0.0, 1.0, 0.0],
+        col,
+        material,
+        scale,
+    );
+    push_quad(
+        v,
+        i,
+        [x0, y0, z1],
+        [x1, y0, z1],
+        [x1, y1, z1],
+        [x0, y1, z1],
+        [0.0, 0.0, 1.0],
+        col,
+        material,
+        scale,
+    );
+    push_quad(
+        v,
+        i,
+        [x1, y0, z0],
+        [x0, y0, z0],
+        [x0, y1, z0],
+        [x1, y1, z0],
+        [0.0, 0.0, -1.0],
+        col,
+        material,
+        scale,
+    );
+    push_quad(
+        v,
+        i,
+        [x1, y0, z0],
+        [x1, y0, z1],
+        [x1, y1, z1],
+        [x1, y1, z0],
+        [1.0, 0.0, 0.0],
+        col,
+        material,
+        scale,
+    );
+    push_quad(
+        v,
+        i,
+        [x0, y0, z1],
+        [x0, y0, z0],
+        [x0, y1, z0],
+        [x0, y1, z1],
+        [-1.0, 0.0, 0.0],
+        col,
+        material,
+        scale,
+    );
 }
 
 pub fn build_world_chunk(start_s: f32, chunk_len: f32) -> (Vec<Vertex3d>, Vec<u32>) {

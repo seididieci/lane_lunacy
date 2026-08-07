@@ -142,7 +142,10 @@ mod tests {
 
     #[test]
     fn shoulder_is_asphalt_and_beyond_is_grass() {
-        assert_eq!(material_at(0.0, ROAD_HALF + 0.2), SurfaceMaterial::AsphaltBase);
+        assert_eq!(
+            material_at(0.0, ROAD_HALF + 0.2),
+            SurfaceMaterial::AsphaltBase
+        );
         assert_eq!(material_at(0.0, ROAD_HALF + 1.0), SurfaceMaterial::Grass);
         assert_eq!(material_at(0.0, 50.0), SurfaceMaterial::Grass);
     }

@@ -62,7 +62,6 @@ fn load_from_document(
     buffers: &[gltf::buffer::Data],
     source_label: &str,
 ) -> Result<(Vec<Vertex3d>, Vec<u32>, CarLightAnchors), String> {
-
     let mut vertices = Vec::<Vertex3d>::new();
     let mut indices = Vec::<u32>::new();
 
@@ -127,7 +126,10 @@ fn append_node_meshes(
                 .read_colors(0)
                 .map(|iter| iter.into_rgb_f32().collect())
                 .unwrap_or_else(|| {
-                    let base = primitive.material().pbr_metallic_roughness().base_color_factor();
+                    let base = primitive
+                        .material()
+                        .pbr_metallic_roughness()
+                        .base_color_factor();
                     vec![[base[0], base[1], base[2]]; positions.len()]
                 });
 
@@ -282,8 +284,14 @@ mod tests {
         let a = compute_anchors(&verts);
         assert_eq!(a.lateral, 0.8);
         assert_eq!(a.long_half, 1.84);
-        assert!((a.headlight_y - 0.48).abs() < 1e-4, "front corner band 0..0.6");
-        assert!((a.taillight_y - 0.48).abs() < 1e-4, "rear corner band 0..0.6");
+        assert!(
+            (a.headlight_y - 0.48).abs() < 1e-4,
+            "front corner band 0..0.6"
+        );
+        assert!(
+            (a.taillight_y - 0.48).abs() < 1e-4,
+            "rear corner band 0..0.6"
+        );
     }
 
     #[test]
@@ -305,6 +313,9 @@ mod tests {
         let a = compute_anchors(&verts);
         assert!((a.lateral - 0.8).abs() < 1e-4, "half-width 1.0 * 0.8");
         assert_eq!(a.headlight_y, 0.5, "falls back to half body height");
-        assert!((a.taillight_y - 0.8).abs() < 1e-4, "rear corners 0..1 -> mix 0.8");
+        assert!(
+            (a.taillight_y - 0.8).abs() < 1e-4,
+            "rear corners 0..1 -> mix 0.8"
+        );
     }
 }

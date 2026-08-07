@@ -70,8 +70,8 @@ pub fn update_traffic(
                 attempt += 1;
             }
 
-            let speed_roll = ((vehicle.distance * 0.013 + idx as f32 * 1.37).sin() * 0.5 + 0.5)
-                .clamp(0.0, 1.0);
+            let speed_roll =
+                ((vehicle.distance * 0.013 + idx as f32 * 1.37).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
             traffic[idx].distance = spawn_distance;
             traffic[idx].lane = lane;
             traffic[idx].speed = tuning.speed_base + speed_roll * tuning.speed_var;
@@ -79,11 +79,7 @@ pub fn update_traffic(
     }
 }
 
-pub fn check_collision(
-    traffic: &[Traffic],
-    vehicle: &Vehicle,
-    tuning: &DifficultyTuning,
-) -> bool {
+pub fn check_collision(traffic: &[Traffic], vehicle: &Vehicle, tuning: &DifficultyTuning) -> bool {
     let pvx = road_curve(vehicle.distance) + vehicle.offset;
     traffic.iter().any(|t| {
         let tvx = road_curve(t.distance) + t.lane;

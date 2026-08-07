@@ -47,6 +47,7 @@ pub fn record_frame(
         sky_uniform,
         particle_verts,
         dust_verts,
+        mist_verts,
         flare_verts,
         hud_verts,
         ..
@@ -217,8 +218,25 @@ pub fn record_frame(
     // ---- Particles (rain + night taillights + drift dust) ----
     // Additive, depth-tested (no depth write) so particles fall over the
     // road but behind cars, and fade into the sky fog like everything else.
+    // Mist is drawn first (big, soft, background) with alpha blending; drift
+    // dust and rain composite on top.
+    if !mist_verts.is_empty() {
+        scene.draw_particles(
+            &mut builder,
+            &scene.dust_pipeline,
+            mist_verts,
+            uniforms,
+            headlights,
+        );
+    }
     if !dust_verts.is_empty() {
-        scene.draw_particles(&mut builder, &scene.dust_pipeline, dust_verts, uniforms, headlights);
+        scene.draw_particles(
+            &mut builder,
+            &scene.dust_pipeline,
+            dust_verts,
+            uniforms,
+            headlights,
+        );
     }
     if !particle_verts.is_empty() {
         scene.draw_particles(

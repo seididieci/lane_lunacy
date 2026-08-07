@@ -46,14 +46,13 @@ mod tests {
     #[test]
     fn builds_and_renders_a_screen() {
         let ui = Ui::new();
-        let mut root = Node::new(
-            Overlay::new().child(
-                Align::Center,
-                Node::new(Panel::wrap(
-                    [0.1, 0.1, 0.1, 0.5],
-                    Insets::uniform(20.0),
-                    Node::new(Column::new(
-                        vec![
+        let mut root = Node::new(Overlay::new().child(
+            Align::Center,
+            Node::new(Panel::wrap(
+                [0.1, 0.1, 0.1, 0.5],
+                Insets::uniform(20.0),
+                Node::new(Column::new(
+                    vec![
                             Node::new(Button::new(
                                 "START",
                                 40.0,
@@ -70,12 +69,11 @@ mod tests {
                                 .aligned(HAlign::Center),
                             ),
                         ],
-                        12.0,
-                        HAlign::Center,
-                    )),
+                    12.0,
+                    HAlign::Center,
                 )),
-            ),
-        );
+            )),
+        ));
         let verts = ui.build(&mut root, &atlas(), aspect_ratio(), 0.0);
         assert!(!verts.is_empty());
     }
@@ -94,14 +92,8 @@ mod tests {
         let center = Point::new(canvas.w / 2.0, canvas.h / 2.0);
         assert_eq!(ui.hit_test(&root, center), Some(Hit { id: 42 }));
 
-        assert!(ui.handle_pointer(
-            &mut root,
-            PointerEvent::Press { pos: center },
-        ));
-        assert!(ui.handle_pointer(
-            &mut root,
-            PointerEvent::Release { pos: center },
-        ));
+        assert!(ui.handle_pointer(&mut root, PointerEvent::Press { pos: center },));
+        assert!(ui.handle_pointer(&mut root, PointerEvent::Release { pos: center },));
     }
 
     #[test]
@@ -116,10 +108,7 @@ mod tests {
 
         let canvas = ui.virtual_size(aspect_ratio());
         let far = Point::new(canvas.w - 3.0, canvas.h - 3.0);
-        assert!(!ui.handle_pointer(
-            &mut root,
-            PointerEvent::Press { pos: far },
-        ));
+        assert!(!ui.handle_pointer(&mut root, PointerEvent::Press { pos: far },));
         assert_eq!(ui.hit_test(&root, far), None);
     }
 
@@ -150,9 +139,7 @@ mod tests {
             let mut tree = Node::new(Column::new(
                 vec![
                     Node::new(Text::new("READY", 24.0, [1.0, 1.0, 1.0, 1.0])),
-                    Node::new(
-                        Text::new("GO", 24.0, [1.0, 1.0, 1.0, 1.0]).blinking(1.0),
-                    ),
+                    Node::new(Text::new("GO", 24.0, [1.0, 1.0, 1.0, 1.0]).blinking(1.0)),
                 ],
                 8.0,
                 HAlign::Left,

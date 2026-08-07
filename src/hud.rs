@@ -1,13 +1,10 @@
 // SPDX-License-Identifier: MIT
 
 use crate::font::ICON_TROPHY;
-use crate::game::vehicle::{
-    REDLINE_RPM, RED_ZONE_START, PERFECT_LO, PERFECT_HI,
-};
+use crate::game::vehicle::{PERFECT_HI, PERFECT_LO, REDLINE_RPM, RED_ZONE_START};
 use crate::game::Game;
 use crate::ui::{
-    Align, Column, Gauge, GaugeZone, HAlign, Insets, Node, Overlay, Panel, Row, Size, Text,
-    VAlign,
+    Align, Column, Gauge, GaugeZone, HAlign, Insets, Node, Overlay, Panel, Row, Size, Text, VAlign,
 };
 
 const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
@@ -58,11 +55,7 @@ pub(crate) fn build_hud_tree(game: &Game) -> Node {
 
 /// A transparent spacer that pushes a child in from the screen edges.
 fn margin(child: Node, insets: Insets) -> Node {
-    Node::new(
-        Panel::colored(TRANSPARENT)
-            .padded(insets)
-            .with_child(child),
-    )
+    Node::new(Panel::colored(TRANSPARENT).padded(insets).with_child(child))
 }
 
 fn top_left(game: &Game) -> Node {
@@ -138,10 +131,18 @@ fn gauges(game: &Game) -> Node {
     let rpm = Gauge::new(Size::new(GAUGE_SIZE, GAUGE_SIZE), rpm_frac, GREEN)
         .zone(GaugeZone::new(PERFECT_LO, PERFECT_HI, PERFECT_COL))
         .zone(GaugeZone::new(RED_ZONE_START, 1.0, RED))
-        .number(format!("{:.1}", game.vehicle.rpm() / 1000.0), EM_GAUGE_NUM, WHITE)
+        .number(
+            format!("{:.1}", game.vehicle.rpm() / 1000.0),
+            EM_GAUGE_NUM,
+            WHITE,
+        )
         .label("RPM x1000", EM_GAUGE_LABEL, PERFECT_COL);
 
-    let row = Row::new(vec![Node::new(speed), Node::new(rpm)], GAUGE_GAP, VAlign::Center);
+    let row = Row::new(
+        vec![Node::new(speed), Node::new(rpm)],
+        GAUGE_GAP,
+        VAlign::Center,
+    );
     margin(Node::new(row), Insets::new(0.0, 0.0, 0.0, EDGE))
 }
 
@@ -149,11 +150,14 @@ fn gauges(game: &Game) -> Node {
 fn heat_bar(game: &Game) -> Option<Node> {
     let max_w = 180.0;
     let fill = (game.engine_heat * max_w).clamp(0.0, max_w);
-    let col = if game.engine_heat >= 0.6 { RED } else { WRECK_ORANGE };
+    let col = if game.engine_heat >= 0.6 {
+        RED
+    } else {
+        WRECK_ORANGE
+    };
     let track = Panel::sized([0.12, 0.13, 0.16, 0.9], Size::new(max_w, 10.0))
         .with_child(Node::new(Panel::sized(col, Size::new(fill, 10.0))));
-    margin(Node::new(track), Insets::new(0.0, 0.0, 0.0, EDGE + 14.0))
-        .into()
+    margin(Node::new(track), Insets::new(0.0, 0.0, 0.0, EDGE + 14.0)).into()
 }
 
 /// Brief "PERFECT SHIFT +N" feedback above the gauges.
@@ -162,12 +166,8 @@ fn perfect_shift_popup(game: &Game) -> Option<Node> {
         return None;
     }
     let gain = game.score.min(9999);
-    let text = Text::new(
-        format!("PERFECT SHIFT +{}", gain),
-        EM_LG,
-        PERFECT_COL,
-    )
-    .aligned(HAlign::Center);
+    let text =
+        Text::new(format!("PERFECT SHIFT +{}", gain), EM_LG, PERFECT_COL).aligned(HAlign::Center);
     let bottom = EDGE + GAUGE_SIZE + 20.0;
     margin(Node::new(text), Insets::new(0.0, 0.0, 0.0, bottom)).into()
 }

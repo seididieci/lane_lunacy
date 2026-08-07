@@ -120,6 +120,11 @@ Rain renders in the **RAIN** sky state (full downpour) and periodically in
 **AUTO**, where it fades in as the cloud-cover cycle peaks — additive rain
 streaks that lean into your forward motion and melt into the horizon fog.
 
+A low band of **ground mist** banks along the road near the camera whenever the
+sky is heavily overcast or the sun sits low at dawn/dusk — dim, drifting puffs
+that haze the asphalt and melt into the fog, rendered by the same particle
+system as the rain and dust.
+
 That's it. The first build takes a few minutes while shaderc compiles glslang;
 after that, incremental builds are fast and shaders are recompiled automatically
 whenever you edit anything in `shaders/`.

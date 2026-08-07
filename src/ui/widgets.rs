@@ -69,7 +69,10 @@ impl Text {
     /// The text keeps occupying its layout space while hidden, so surrounding
     /// widgets do not resize.
     pub fn blinking(mut self, period: f32) -> Text {
-        self.blink = Some(Blink { period, ..Blink::default() });
+        self.blink = Some(Blink {
+            period,
+            ..Blink::default()
+        });
         self
     }
 
@@ -111,7 +114,12 @@ impl Widget for Text {
             Some(b) => {
                 let t = (ctx.time + b.phase) % b.period;
                 let a = if t < b.period * b.duty { 1.0 } else { 0.0 };
-                [self.color[0], self.color[1], self.color[2], self.color[3] * a]
+                [
+                    self.color[0],
+                    self.color[1],
+                    self.color[2],
+                    self.color[3] * a,
+                ]
             }
             None => self.color,
         };
@@ -283,12 +291,7 @@ impl Widget for Panel {
                     (constraints.max.h - self.padding.t - self.padding.b).max(0.0),
                 );
                 let child_size = child.widget.layout(ctx, Constraints::loose(inner_max));
-                child.rect = Rect::new(
-                    self.padding.l,
-                    self.padding.t,
-                    child_size.w,
-                    child_size.h,
-                );
+                child.rect = Rect::new(self.padding.l, self.padding.t, child_size.w, child_size.h);
                 Size::new(
                     child_size.w + self.padding.l + self.padding.r,
                     child_size.h + self.padding.t + self.padding.b,
@@ -347,9 +350,9 @@ impl Widget for Column {
         let mut max_child_w = 0.0f32;
         let count = self.children.len();
         for (i, node) in self.children.iter_mut().enumerate() {
-            let size =
-                node.widget
-                    .layout(ctx, Constraints::loose(Size::new(max_w, f32::INFINITY)));
+            let size = node
+                .widget
+                .layout(ctx, Constraints::loose(Size::new(max_w, f32::INFINITY)));
             node.rect = Rect::new(0.0, y, size.w, size.h);
             y += size.h;
             if i + 1 < count {
@@ -411,9 +414,9 @@ impl Widget for Row {
         let mut max_child_h = 0.0f32;
         let count = self.children.len();
         for (i, node) in self.children.iter_mut().enumerate() {
-            let size =
-                node.widget
-                    .layout(ctx, Constraints::loose(Size::new(f32::INFINITY, max_h)));
+            let size = node
+                .widget
+                .layout(ctx, Constraints::loose(Size::new(f32::INFINITY, max_h)));
             node.rect = Rect::new(x, 0.0, size.w, size.h);
             x += size.w;
             if i + 1 < count {
@@ -505,10 +508,12 @@ impl Widget for Overlay {
     }
 
     fn handle_pointer(&mut self, ev: PointerEvent, rect: Rect) -> bool {
-        self.children
-            .iter_mut()
-            .rev()
-            .any(|child| child.node.widget.handle_pointer(ev, child.node.placed(rect)))
+        self.children.iter_mut().rev().any(|child| {
+            child
+                .node
+                .widget
+                .handle_pointer(ev, child.node.placed(rect))
+        })
     }
 }
 
@@ -641,18 +646,37 @@ impl Widget for Gauge {
         if self.ticks {
             for i in 0..=4 {
                 let frac = i as f32 / 4.0;
-                ctx.draw_needle(center, r_out * 1.04, r_out * 1.12, frac, 4.0, [1.0, 1.0, 1.0, 0.55]);
+                ctx.draw_needle(
+                    center,
+                    r_out * 1.04,
+                    r_out * 1.12,
+                    frac,
+                    4.0,
+                    [1.0, 1.0, 1.0, 0.55],
+                );
             }
         }
 
         // Needle.
         if self.needle {
-            ctx.draw_needle(center, r_in * 0.55, r_out * 0.9, v, 6.0, [1.0, 1.0, 1.0, 1.0]);
+            ctx.draw_needle(
+                center,
+                r_in * 0.55,
+                r_out * 0.9,
+                v,
+                6.0,
+                [1.0, 1.0, 1.0, 1.0],
+            );
         }
 
         // Centered readout + unit label.
         if let Some((text, em, color)) = &self.number {
-            ctx.draw_text_centered(text, *em, *color, Point::new(center.x, center.y - em * 0.55));
+            ctx.draw_text_centered(
+                text,
+                *em,
+                *color,
+                Point::new(center.x, center.y - em * 0.55),
+            );
         }
         if let Some((text, em, color)) = &self.label {
             ctx.draw_text_centered(text, *em, *color, Point::new(center.x, center.y + em * 0.7));

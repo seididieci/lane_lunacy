@@ -34,6 +34,8 @@ pub struct CpuProbe {
     pub wet_fac: f32,
     /// Night darkness 0..1 (0 = full day, 1 = full night).
     pub night_fac: f32,
+    /// Low-hanging mist 0..1 (weather + dawn/dusk driven).
+    pub mist_fac: f32,
 }
 
 /// GPU-side probes measured from rendered pixels (linear HDR values).
@@ -69,6 +71,7 @@ pub fn compute_cpu(game: &Game, frame: &Frame) -> CpuProbe {
         projector_road_coverage: projector_road_coverage(game),
         wet_fac: frame.uniforms.wet_fac,
         night_fac: frame.night_fac,
+        mist_fac: frame.mist_intensity,
     }
 }
 
@@ -195,11 +198,12 @@ pub fn to_json(probe: &Probe) -> String {
         None => "null".to_string(),
     };
     format!(
-        "{{\n  \"sun_ndc\": {sun},\n  \"flare_intensity\": {fi:.6},\n  \"projector_road_coverage\": {prc:.6},\n  \"wet_fac\": {wf:.6},\n  \"night_fac\": {nf:.6},\n  \"sky_top_lum\": {stl:.6},\n  \"road_center_lum\": {rcl:.6},\n  \"sun_disc_max_lum\": {sdml:.6},\n  \"flare_bloom_lum\": {fbl:.6}\n}}",
+        "{{\n  \"sun_ndc\": {sun},\n  \"flare_intensity\": {fi:.6},\n  \"projector_road_coverage\": {prc:.6},\n  \"wet_fac\": {wf:.6},\n  \"night_fac\": {nf:.6},\n  \"mist_fac\": {mf:.6},\n  \"sky_top_lum\": {stl:.6},\n  \"road_center_lum\": {rcl:.6},\n  \"sun_disc_max_lum\": {sdml:.6},\n  \"flare_bloom_lum\": {fbl:.6}\n}}",
         fi = probe.cpu.flare_intensity,
         prc = probe.cpu.projector_road_coverage,
         wf = probe.cpu.wet_fac,
         nf = probe.cpu.night_fac,
+        mf = probe.cpu.mist_fac,
         stl = probe.gpu.sky_top_lum,
         rcl = probe.gpu.road_center_lum,
         sdml = probe.gpu.sun_disc_max_lum,
@@ -308,6 +312,7 @@ mod tests {
                 projector_road_coverage: 0.75,
                 wet_fac: 0.3,
                 night_fac: 0.9,
+                mist_fac: 0.4,
             },
             gpu: GpuProbe {
                 sky_top_lum: 0.1,
@@ -324,6 +329,8 @@ mod tests {
             "projector_road_coverage",
             "wet_fac",
             "night_fac",
+            "mist_fac",
+            "0.400000",
             "sky_top_lum",
             "road_center_lum",
             "sun_disc_max_lum",

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 
-use crate::font::{ICON_CHIP, ICON_LOGOUT, ICON_PLAY, ICON_SPEEDOMETER, ICON_STEERING, ICON_WEATHER};
+use crate::font::{
+    ICON_CHIP, ICON_LOGOUT, ICON_PLAY, ICON_SPEEDOMETER, ICON_STEERING, ICON_WEATHER,
+};
 use crate::game::{DifficultyLevel, Weather};
 use crate::ui::{Align, Button, Column, HAlign, Insets, Node, Overlay, Panel, Spacer, Text};
 
@@ -107,11 +109,13 @@ impl MenuState {
     }
 
     pub fn cycle_weather(&mut self, delta: i32) {
-        let states = [Weather::Auto, Weather::Clear, Weather::Cloudy, Weather::Rain];
-        let cur = states
-            .iter()
-            .position(|w| *w == self.weather)
-            .unwrap_or(0);
+        let states = [
+            Weather::Auto,
+            Weather::Clear,
+            Weather::Cloudy,
+            Weather::Rain,
+        ];
+        let cur = states.iter().position(|w| *w == self.weather).unwrap_or(0);
         let next = (cur as i32 + delta).rem_euclid(states.len() as i32) as usize;
         self.weather = states[next];
     }
@@ -174,12 +178,10 @@ pub(crate) fn build_menu_tree(menu: &MenuState, gpu_names: &[String]) -> Node {
         HAlign::Center,
     );
 
-    Node::new(
-        Overlay::new().child(
-            Align::Center,
-            Node::new(Panel::wrap(BACKDROP, CARD_PAD, Node::new(card))),
-        ),
-    )
+    Node::new(Overlay::new().child(
+        Align::Center,
+        Node::new(Panel::wrap(BACKDROP, CARD_PAD, Node::new(card))),
+    ))
 }
 
 #[cfg(test)]
@@ -214,6 +216,9 @@ mod tests {
             }
             y += 8.0;
         }
-        assert!(start_hit, "START button must be hit-testable on the center line");
+        assert!(
+            start_hit,
+            "START button must be hit-testable on the center line"
+        );
     }
 }

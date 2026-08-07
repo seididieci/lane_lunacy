@@ -30,7 +30,11 @@ fn main() {
         let (kind, stage) = match stem.rsplit_once('.').map(|(_, s)| s) {
             Some("vert") => (ShaderKind::Vertex, "vertex"),
             Some("frag") => (ShaderKind::Fragment, "fragment"),
-            other => panic!("unrecognized shader stage in {}: {:?}", src_path.display(), other),
+            other => panic!(
+                "unrecognized shader stage in {}: {:?}",
+                src_path.display(),
+                other
+            ),
         };
 
         let mut options = CompileOptions::new().expect("failed to create compile options");
@@ -39,7 +43,12 @@ fn main() {
 
         let artifact = compiler
             .compile_into_spirv(&src, kind, stem, "main", Some(&options))
-            .unwrap_or_else(|e| panic!("failed to compile {stage} shader {}: {e}", src_path.display()));
+            .unwrap_or_else(|e| {
+                panic!(
+                    "failed to compile {stage} shader {}: {e}",
+                    src_path.display()
+                )
+            });
 
         fs::write(spv_dir.join(format!("{stem}.spv")), artifact.as_binary_u8())
             .unwrap_or_else(|e| panic!("failed to write {stem}.spv: {e}"));

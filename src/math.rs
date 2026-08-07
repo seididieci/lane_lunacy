@@ -27,7 +27,9 @@ mod tests {
         assert_eq!(smoothstep(0.0, 1.0, -1.0), 0.0);
         assert_eq!(smoothstep(0.0, 1.0, 2.0), 1.0);
         assert!((smoothstep(0.0, 1.0, 0.5) - 0.5).abs() < 1e-6);
-        let v: Vec<f32> = (0..=10).map(|i| smoothstep(0.0, 1.0, i as f32 / 10.0)).collect();
+        let v: Vec<f32> = (0..=10)
+            .map(|i| smoothstep(0.0, 1.0, i as f32 / 10.0))
+            .collect();
         assert!(v.windows(2).all(|w| w[0] <= w[1]));
     }
 

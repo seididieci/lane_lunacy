@@ -65,7 +65,7 @@ visual parity.
 - [x] Rain: fast-falling streaks in a volume around the camera, tied to weather/night (RAIN = full downpour; AUTO rains as its cover cycle peaks)
 - [x] (Night) Red taillight billboards on traffic via the same particle pipeline, scaled by night darkness
 - [x] Drift dust: puffs on hard steering/sideslip (lateral velocity while speed high), quantity bound to the road material under the car (per-surface `DustProfile`, ready for future surfaces like gravel)
-- [ ] (Hybrid) Optional local cloud puffs / low-hanging mist near the camera via the same billboard system; the ambient sky layer stays tile-based on the dome (task 2)
+- [x] (Hybrid) Optional local cloud puffs / low-hanging mist near the camera via the same billboard system; the ambient sky layer stays tile-based on the dome (task 2)
 
 ## 5. Night / Day cycle
 - [x] Per-difficulty cycle: `day_fraction`, `cycle_speed`, `night_darkness` (EASY mostly day / NORMAL full / HARD long dark nights)

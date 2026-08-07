@@ -13,12 +13,13 @@ use std::time::Duration;
 use glam::{Mat4, Vec3};
 
 use crate::game::Game;
+use crate::math::smoothstep;
 use crate::model::CarLightAnchors;
 use crate::render::camera::{perspective_vulkan, Camera};
 use crate::render::daynight::{self, Lights};
 use crate::render::flare;
 use crate::render::particles::{
-    build_headlights, build_taillights, drift_intensity, DustSystem, RainSystem,
+    build_headlights, build_taillights, drift_intensity, DustSystem, MistSystem, RainSystem,
 };
 use crate::road::{road_curve, road_tangent, CAR_HALF_W, CAR_LEN};
 use crate::shaders::SkyUniform;
@@ -65,6 +66,11 @@ pub struct Frame {
     pub headlights: Headlights,
     pub particle_verts: Vec<ParticleVertex>,
     pub dust_verts: Vec<ParticleVertex>,
+    /// Local low-hanging mist quads (camera-following ground haze).
+    pub mist_verts: Vec<ParticleVertex>,
+    /// Mist intensity 0..1 this frame (weather + dawn/dusk driven). Exposed
+    /// for CPU probes / tests.
+    pub mist_intensity: f32,
     pub flare_verts: Vec<FlareVertex>,
     /// Projected sun NDC position and flare intensity, when the flare is
     /// visible. Exposed for CPU probes / tests.
@@ -82,6 +88,7 @@ pub struct FrameState {
     pub camera_heading: f32,
     pub rain: RainSystem,
     pub dust: DustSystem,
+    pub mist: MistSystem,
 }
 
 impl Default for FrameState {
@@ -91,6 +98,7 @@ impl Default for FrameState {
             camera_heading: 0.0,
             rain: RainSystem::new(),
             dust: DustSystem::new(),
+            mist: MistSystem::new(),
         }
     }
 }
@@ -104,8 +112,19 @@ impl FrameState {
             camera_heading: 0.0,
             rain: RainSystem::with_seed(seed),
             dust: DustSystem::with_seed(seed),
+            mist: MistSystem::with_seed(seed),
         }
     }
+}
+
+/// Low-hanging mist amount (0..1) for a frame. Weather cover drives the bulk
+/// so CLEAR skies stay clear; a low-sun term peaks near the horizon and dies
+/// out by mid-morning, giving faint banks at dawn/dusk. Zero at noon and at
+/// mid-night (when the sun is at its most extreme elevation).
+fn mist_intensity(cloud_amount: f32, sun_elevation: f32) -> f32 {
+    let cover = smoothstep(0.55, 0.95, cloud_amount);
+    let low_sun = 1.0 - smoothstep(0.0, 0.9, sun_elevation.abs());
+    (cover * 0.5 + low_sun * 0.25).clamp(0.0, 1.0)
 }
 
 /// Rotation aligning a traffic car to its lane direction. Cars on the right
@@ -138,6 +157,7 @@ pub fn build_frame(
         camera_heading,
         rain,
         dust,
+        mist,
     } = state;
 
     let proj = perspective_vulkan(60.0f32.to_radians(), aspect, 0.1, 600.0);
@@ -277,6 +297,24 @@ pub fn build_frame(
         dust_verts.append(&mut dust.build_vertices(eye, cam_right));
     }
 
+    // Low-hanging mist: a camera-following bank of soft puffs at road level,
+    // driven by the weather cover plus a dawn/dusk boost. The far sky keeps its
+    // tile-based dome (task 2); this is the local "hybrid" layer.
+    let mist_intensity = mist_intensity(game.cloud_amount(), game.sun_elevation());
+    let mut mist_verts = Vec::new();
+    if mist_intensity > 0.0 {
+        let cam_right = cam_forward.cross(Vec3::Y);
+        // Anchor the volume at a road-level point under the camera so the bank
+        // stays grounded, and cull against the eye.
+        mist.update(dt_secs, Vec3::new(eye.x, 0.0, eye.z));
+        mist_verts = mist.build_vertices(
+            eye,
+            cam_right,
+            mist_intensity,
+            Vec3::new(fog_color[0], fog_color[1], fog_color[2]),
+        );
+    }
+
     // Night traffic/player lights (additive, camera-facing).
     if night_fac > 0.02 {
         let cam_right = cam_forward.cross(Vec3::Y);
@@ -386,6 +424,8 @@ pub fn build_frame(
         },
         particle_verts,
         dust_verts,
+        mist_verts,
+        mist_intensity,
         flare_verts,
         sun_ndc,
         flare_intensity,
@@ -463,5 +503,36 @@ mod tests {
         let rain = deterministic_game(12.0, Weather::Rain);
         assert_eq!(frame_for(&clear).uniforms.wet_fac, 0.0);
         assert!(frame_for(&rain).uniforms.wet_fac > 0.9);
+    }
+
+    #[test]
+    fn mist_tracks_weather_and_low_sun() {
+        // Noon clear: no clouds, high sun -> no mist.
+        let noon = frame_for(&deterministic_game(12.0, Weather::Clear));
+        assert_eq!(noon.mist_intensity, 0.0);
+        assert!(noon.mist_verts.is_empty(), "clear noon stays mist-free");
+
+        // Full rain -> a dense bank regardless of the clock.
+        let rain = frame_for(&deterministic_game(12.0, Weather::Rain));
+        assert!(rain.mist_intensity >= 0.5, "rain mist dense");
+        assert!(!rain.mist_verts.is_empty(), "rain mist rendered");
+
+        // Clear dusk (sun near the horizon, EASY) -> faint but present.
+        let dusk = frame_for(&deterministic_game(18.0, Weather::Clear));
+        assert!(
+            (0.02..0.5).contains(&dusk.mist_intensity),
+            "dusk mist is subtle: {}",
+            dusk.mist_intensity
+        );
+        assert!(!dusk.mist_verts.is_empty(), "dusk mist rendered");
+    }
+
+    #[test]
+    fn mist_intensity_peaks_at_the_horizon_and_zeroes_at_extremes() {
+        assert_eq!(mist_intensity(0.15, 1.0), 0.0, "clear noon");
+        assert_eq!(mist_intensity(0.15, -1.0), 0.0, "clear midnight");
+        assert!(mist_intensity(1.0, 1.0) >= 0.5, "rain is misty by day");
+        assert!(mist_intensity(0.15, 0.2) > 0.15, "dawn/dusk boost");
+        assert!(mist_intensity(0.15, 0.2) > mist_intensity(0.15, 0.8));
     }
 }

@@ -93,8 +93,16 @@ pub fn compute(
     // Warm tint on the horizon at dawn/dusk (sun low but above the horizon).
     let dusk = smoothstep(0.22, 0.0, sun_elevation) * smoothstep(-0.12, -0.02, sun_elevation);
 
-    let zenith = mix3(mix3(DAY_ZENITH, NIGHT_ZENITH, night_curve), DUSK_WARM, dusk * 0.25);
-    let horizon = mix3(mix3(DAY_HORIZON, NIGHT_HORIZON, night_curve), DUSK_WARM, dusk * 0.55);
+    let zenith = mix3(
+        mix3(DAY_ZENITH, NIGHT_ZENITH, night_curve),
+        DUSK_WARM,
+        dusk * 0.25,
+    );
+    let horizon = mix3(
+        mix3(DAY_HORIZON, NIGHT_HORIZON, night_curve),
+        DUSK_WARM,
+        dusk * 0.55,
+    );
     let cloud_tint = mix3(DAY_CLOUD_TINT, NIGHT_CLOUD_TINT, night_curve);
 
     // Fog mirrors the sky shader's horizon at t=0, keeping the weather dim and
@@ -193,9 +201,9 @@ mod tests {
         let (_, lights) = compute(-1.0, 0.0, DAY_FRACTION, 0.0, 1.0);
         // The moon mirrors the sun's low arc as its antipode, so it sits at the
         // same ~20° elevation at midnight.
-        let horiz =
-            (lights.light_dir[0] * lights.light_dir[0] + lights.light_dir[2] * lights.light_dir[2])
-                .sqrt();
+        let horiz = (lights.light_dir[0] * lights.light_dir[0]
+            + lights.light_dir[2] * lights.light_dir[2])
+            .sqrt();
         let elev = lights.light_dir[1].atan2(horiz);
         let expected = 1.0_f32.atan2(SUN_HORIZONTAL);
         assert!(
@@ -232,9 +240,18 @@ mod tests {
                 .atan2(l.light_dir[2])
                 .rem_euclid(std::f32::consts::TAU)
         };
-        assert!((az(&rise) - SUN_AZ_SUNRISE).abs() < 1e-3, "sun rises in the east");
-        assert!((az(&noon) - std::f32::consts::PI).abs() < 1e-3, "sun crosses the south at noon");
-        assert!((az(&set) - SUN_AZ_SUNSET).abs() < 1e-3, "sun sets in the west");
+        assert!(
+            (az(&rise) - SUN_AZ_SUNRISE).abs() < 1e-3,
+            "sun rises in the east"
+        );
+        assert!(
+            (az(&noon) - std::f32::consts::PI).abs() < 1e-3,
+            "sun crosses the south at noon"
+        );
+        assert!(
+            (az(&set) - SUN_AZ_SUNSET).abs() < 1e-3,
+            "sun sets in the west"
+        );
     }
 
     #[test]
@@ -245,10 +262,12 @@ mod tests {
         let dusk_az = dusk.light_dir[0]
             .atan2(dusk.light_dir[2])
             .rem_euclid(std::f32::consts::TAU);
-        let expected =
-            (solar_azimuth(sunset() + 0.5, DAY_FRACTION) + std::f32::consts::PI)
-                .rem_euclid(std::f32::consts::TAU);
-        assert!((dusk_az - expected).abs() < 1e-3, "moon azimuth mirrors the sun");
+        let expected = (solar_azimuth(sunset() + 0.5, DAY_FRACTION) + std::f32::consts::PI)
+            .rem_euclid(std::f32::consts::TAU);
+        assert!(
+            (dusk_az - expected).abs() < 1e-3,
+            "moon azimuth mirrors the sun"
+        );
 
         // Midnight: moon at the top of its (low) arc, antipodal to the
         // extrapolated sun.
@@ -263,7 +282,10 @@ mod tests {
             .rem_euclid(std::f32::consts::TAU);
         let expected = (solar_azimuth(0.0, DAY_FRACTION) + std::f32::consts::PI)
             .rem_euclid(std::f32::consts::TAU);
-        assert!((midnight_az - expected).abs() < 1e-3, "midnight moon mirrors the sun");
+        assert!(
+            (midnight_az - expected).abs() < 1e-3,
+            "midnight moon mirrors the sun"
+        );
     }
 
     #[test]
@@ -275,8 +297,7 @@ mod tests {
         let (_, noon) = compute(1.0, 12.0, DAY_FRACTION, 0.0, 0.0);
         let (_, set) = compute(0.0, sunset(), DAY_FRACTION, 0.0, 0.0);
         let elev = |l: &Lights| {
-            let horiz =
-                (l.light_dir[0] * l.light_dir[0] + l.light_dir[2] * l.light_dir[2]).sqrt();
+            let horiz = (l.light_dir[0] * l.light_dir[0] + l.light_dir[2] * l.light_dir[2]).sqrt();
             l.light_dir[1].atan2(horiz)
         };
         let expected_noon = 1.0_f32.atan2(SUN_HORIZONTAL);

@@ -8,12 +8,10 @@ use vulkano::command_buffer::{
     AutoCommandBufferBuilder, BlitImageInfo, CommandBufferUsage, CopyBufferToImageInfo,
 };
 use vulkano::device::Queue;
-use vulkano::image::view::ImageView;
 use vulkano::image::sampler::Filter;
+use vulkano::image::view::ImageView;
 use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
-use vulkano::memory::allocator::{
-    AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator,
-};
+use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
 use vulkano::sync::{self, GpuFuture};
 
 use crate::vertex::Vertex3d;
@@ -67,7 +65,8 @@ pub fn upload_rgba8_texture(
             ..Default::default()
         },
         AllocationCreateInfo {
-            memory_type_filter: MemoryTypeFilter::PREFER_HOST | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+            memory_type_filter: MemoryTypeFilter::PREFER_HOST
+                | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
             ..Default::default()
         },
         pixels,
@@ -94,7 +93,10 @@ pub fn upload_rgba8_texture(
     )
     .expect("texture upload builder");
     upload_builder
-        .copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(staging, texture_image.clone()))
+        .copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(
+            staging,
+            texture_image.clone(),
+        ))
         .expect("copy texture to image");
     let upload_cb = upload_builder
         .build()
@@ -161,7 +163,10 @@ pub fn upload_rgba8_texture_mipmapped(
     )
     .expect("texture upload builder");
     upload_builder
-        .copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(staging, texture_image.clone()))
+        .copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(
+            staging,
+            texture_image.clone(),
+        ))
         .expect("copy texture to image");
 
     // Blit each level down to the next, one at a time, so every level is in a

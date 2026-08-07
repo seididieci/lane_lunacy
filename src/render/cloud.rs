@@ -16,7 +16,9 @@ pub fn generate_cloud_tile(size: u32, seed: u64) -> Vec<u8> {
     let mut out = Vec::with_capacity(n * n * 4);
 
     let warp = size as f32 * 0.05;
-    let warp_seed = seed.wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(0xBF58476D1CE4E5B9);
+    let warp_seed = seed
+        .wrapping_mul(0x9E3779B97F4A7C15)
+        .wrapping_add(0xBF58476D1CE4E5B9);
 
     for py in 0..n {
         let y = py as f32;
@@ -72,7 +74,9 @@ fn fbm(seed: u64, size: u32, x: f32, y: f32, base_cells: i32, octaves: usize) ->
         sum += amp * value_noise(s, cells, fx, fy);
         norm += amp;
         amp *= 0.58;
-        s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
     }
     sum / norm
 }

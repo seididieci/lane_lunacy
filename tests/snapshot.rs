@@ -37,6 +37,7 @@ fn scenarios() -> [Scenario; 3] {
                 projector_road_coverage: 0.875,
                 wet_fac: 0.0,
                 night_fac: 0.0,
+                mist_fac: 0.0,
             },
             gpu: GpuProbe {
                 sky_top_lum: 0.534974,
@@ -55,10 +56,11 @@ fn scenarios() -> [Scenario; 3] {
                 projector_road_coverage: 0.875,
                 wet_fac: 1.0,
                 night_fac: 0.6,
+                mist_fac: 0.5,
             },
             gpu: GpuProbe {
                 sky_top_lum: 0.086070,
-                road_center_lum: 0.082073,
+                road_center_lum: 0.103819,
                 sun_disc_max_lum: 0.538,
                 flare_bloom_lum: 0.538318,
             },
@@ -73,10 +75,11 @@ fn scenarios() -> [Scenario; 3] {
                 projector_road_coverage: 0.875,
                 wet_fac: 0.0,
                 night_fac: 0.0,
+                mist_fac: 0.07413377,
             },
             gpu: GpuProbe {
                 sky_top_lum: 0.390496,
-                road_center_lum: 0.143130,
+                road_center_lum: 0.147498,
                 sun_disc_max_lum: 0.0,
                 flare_bloom_lum: 0.0,
             },
@@ -130,6 +133,12 @@ fn assert_cpu(label: &str, actual: CpuProbe, expected: CpuProbe) {
         &format!("{label}.night_fac"),
         actual.night_fac,
         expected.night_fac,
+        TOL_CPU,
+    );
+    assert_close(
+        &format!("{label}.mist_fac"),
+        actual.mist_fac,
+        expected.mist_fac,
         TOL_CPU,
     );
 }

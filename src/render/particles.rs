@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: MIT
 
-//! CPU billboard rain particles, drift dust, and traffic lights.
+//! CPU billboard rain particles, drift dust, low-hanging mist, and traffic
+//! lights.
 //!
 //! `RainSystem` keeps a fixed pool of streak drops inside a camera-following
 //! box, advances them each frame (fast fall with wrap-around respawn), and
 //! bakes the billboard quads into a per-frame vertex buffer. Streaks lean
 //! along the apparent motion (gravity plus the player's forward speed) so the
 //! rain reads as streaming toward the camera. `DustSystem` spawns clumped,
-//! slow-drifting cloud puffs on hard steering/sideslip; `build_taillights`
+//! slow-drifting cloud puffs on hard steering/sideslip; `MistSystem` lays a
+//! camera-following pool of large, soft cloud puffs along the road as local
+//! ground mist, complementing the tile-based sky dome; `build_taillights`
 //! and `build_headlights` are the night-time traffic glows. All share the same
 //! camera-facing CPU-quad pass and a sprite atlas (cell 0 = rain gaussian,
 //! cells 1..=3 = organic cloud shapes).
@@ -279,6 +282,132 @@ impl DustSystem {
             push_quad(&mut out, tl, tr, br, bl, color, p.variant);
         }
         out
+    }
+}
+
+/// Low-hanging ground mist: a fixed, camera-following pool of large soft cloud
+/// puffs at road level, recycled like the rain box so the car drives through a
+/// persistent bank. Unlike the tile-based dome (task 2), these are local
+/// 2.5D billboards, so they read as "hybrid" clouds near the camera.
+const MAX_MIST_PUFFS: usize = 96;
+/// Half-width of the mist volume around the camera (metres).
+const MIST_X: f32 = 14.0;
+/// Vertical band of the mist volume in world space. The pool is anchored to a
+/// road-level point under the camera (y≈0), so the bank hugs the asphalt.
+const MIST_Y_MIN: f32 = 0.15;
+const MIST_Y_MAX: f32 = 1.6;
+/// Depth range of the mist volume ahead of / behind the camera.
+const MIST_Z_NEAR: f32 = -45.0;
+const MIST_Z_FAR: f32 = 8.0;
+/// Slow horizontal churn so the bank drifts instead of looking frozen.
+const MIST_DRIFT: f32 = 1.2;
+
+#[derive(Clone, Copy, Debug)]
+struct MistPuff {
+    pos: Vec3,
+    vel: Vec3,
+    size: f32,
+    alpha: f32,
+    variant: f32,
+}
+
+pub struct MistSystem {
+    puffs: Vec<MistPuff>,
+    rng: Rng,
+}
+
+impl Default for MistSystem {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MistSystem {
+    pub fn new() -> Self {
+        let mut rng = Rng::new();
+        let puffs = (0..MAX_MIST_PUFFS)
+            .map(|_| spawn_mist_puff(&mut rng, Vec3::ZERO))
+            .collect();
+        MistSystem { puffs, rng }
+    }
+
+    /// Deterministic variant for the headless snapshot path.
+    pub fn with_seed(seed: u64) -> Self {
+        let mut rng = Rng::from_seed(seed);
+        let puffs = (0..MAX_MIST_PUFFS)
+            .map(|_| spawn_mist_puff(&mut rng, Vec3::ZERO))
+            .collect();
+        MistSystem { puffs, rng }
+    }
+
+    /// Advances the pool: puffs drift slowly in place and recycle whenever the
+    /// car moves past them. `anchor` is the road-level point (y≈0) the volume
+    /// follows; the bank stays grounded there.
+    pub fn update(&mut self, dt: f32, anchor: Vec3) {
+        for p in &mut self.puffs {
+            p.pos += p.vel * dt;
+            let o = p.pos - anchor;
+            let outside = o.y < MIST_Y_MIN
+                || o.y > MIST_Y_MAX
+                || o.x.abs() > MIST_X
+                || o.z < MIST_Z_NEAR
+                || o.z > MIST_Z_FAR;
+            if outside {
+                *p = spawn_mist_puff(&mut self.rng, anchor);
+            }
+        }
+    }
+
+    /// Bakes one camera-facing cloud quad per puff. `intensity` (0..1) scales
+    /// the alpha so the bank fades in/out with the weather; `tint` dresses the
+    /// puffs with the current fog color so they blend with the lighting.
+    pub fn build_vertices(
+        &self,
+        eye: Vec3,
+        right: Vec3,
+        intensity: f32,
+        tint: Vec3,
+    ) -> Vec<ParticleVertex> {
+        if intensity <= 0.001 {
+            return Vec::new();
+        }
+        let right = right.normalize_or_zero();
+        let mut out = Vec::with_capacity(self.puffs.len() * 6);
+        for p in &self.puffs {
+            if p.pos.z - eye.z > 5.0 {
+                continue; // behind the camera
+            }
+            let color = [tint.x, tint.y, tint.z, p.alpha * intensity];
+            let side = right * p.size;
+            // Flatten the quads so the mist hugs the road as a low bank.
+            let up = Vec3::Y * p.size * 0.4;
+            let tl = p.pos - side + up;
+            let tr = p.pos + side + up;
+            let br = p.pos + side - up;
+            let bl = p.pos - side - up;
+            push_quad(&mut out, tl, tr, br, bl, color, p.variant);
+        }
+        out
+    }
+}
+
+fn spawn_mist_puff(rng: &mut Rng, anchor: Vec3) -> MistPuff {
+    let pos = anchor
+        + Vec3::new(
+            rng.range(-MIST_X, MIST_X),
+            rng.range(MIST_Y_MIN, MIST_Y_MAX),
+            rng.range(MIST_Z_NEAR, MIST_Z_FAR),
+        );
+    MistPuff {
+        pos,
+        vel: Vec3::new(
+            rng.range(-MIST_DRIFT, MIST_DRIFT),
+            rng.range(0.05, MIST_DRIFT * 0.5),
+            rng.range(-MIST_DRIFT, MIST_DRIFT),
+        ),
+        size: rng.range(2.5, 5.0),
+        alpha: rng.range(0.10, 0.18),
+        variant: 1.0 + (rng.next() % 3) as f32,
     }
 }
 
@@ -749,5 +878,70 @@ mod tests {
         dust.update(2.5, 0.0, &profile, rear, Vec3::NEG_Z);
         assert!(dust.puffs.is_empty());
         assert!(dust.build_vertices(Vec3::ZERO, Vec3::X).is_empty());
+    }
+
+    #[test]
+    fn mist_with_seed_is_deterministic() {
+        let fingerprint = |system: &MistSystem| {
+            system
+                .build_vertices(Vec3::ZERO, Vec3::X, 1.0, Vec3::ONE)
+                .iter()
+                .map(|v| v.position[0] * 1e3 + v.position[1] * 1e1 + v.position[2])
+                .fold(0.0, |acc, f| acc + f)
+        };
+        assert_eq!(
+            fingerprint(&MistSystem::with_seed(42)),
+            fingerprint(&MistSystem::with_seed(42))
+        );
+        assert_ne!(
+            fingerprint(&MistSystem::with_seed(42)),
+            fingerprint(&MistSystem::with_seed(7))
+        );
+    }
+
+    #[test]
+    fn mist_emits_quads_only_with_intensity() {
+        let mist = MistSystem::with_seed(42);
+        assert!(
+            mist.build_vertices(Vec3::ZERO, Vec3::X, 0.0, Vec3::ONE)
+                .is_empty(),
+            "no mist at zero intensity"
+        );
+        let verts = mist.build_vertices(Vec3::ZERO, Vec3::X, 1.0, Vec3::ONE);
+        assert!(!verts.is_empty(), "mist must render");
+        assert_eq!(verts.len() % 6, 0, "complete quads only");
+        assert!(
+            verts.len() <= MAX_MIST_PUFFS * 6,
+            "pool is capped (some puffs culled behind the camera)"
+        );
+        assert!(
+            verts
+                .iter()
+                .all(|v| (1.0..=3.0).contains(&v.sprite_variant)),
+            "mist uses cloud sprite cells"
+        );
+    }
+
+    #[test]
+    fn mist_stays_a_low_near_camera_bank() {
+        let mut mist = MistSystem::with_seed(42);
+        // Anchor the bank at road level; the eye sits 4m above it.
+        let anchor = Vec3::ZERO;
+        let eye = Vec3::new(0.0, 4.0, 0.0);
+        mist.update(1.0, anchor);
+        let verts = mist.build_vertices(eye, Vec3::X, 1.0, Vec3::ONE);
+        assert!(
+            verts.iter().all(|v| v.position[1] < eye.y),
+            "mist hugs the road below the eye"
+        );
+    }
+
+    #[test]
+    fn mist_culls_puffs_behind_the_camera() {
+        let mist = MistSystem::with_seed(42);
+        // Puffs ahead of the eye have z < 0; a camera looking along -Z sees
+        // them, while anything with z > eye.z + 5 is behind and culled.
+        let verts = mist.build_vertices(Vec3::ZERO, Vec3::X, 1.0, Vec3::ONE);
+        assert!(verts.iter().all(|v| v.position[2] <= 5.0));
     }
 }

@@ -131,13 +131,7 @@ pub(crate) fn draw_text(
 /// A point on a ring in NDC. Angles are degrees from +x, counter-clockwise
 /// (NDC y-up). `aspect` stretches the x axis so rings render physically
 /// circular on any window aspect.
-pub(crate) fn ring_point(
-    cx: f32,
-    cy: f32,
-    r: f32,
-    angle_deg: f32,
-    aspect: f32,
-) -> [f32; 2] {
+pub(crate) fn ring_point(cx: f32, cy: f32, r: f32, angle_deg: f32, aspect: f32) -> [f32; 2] {
     let rad = angle_deg.to_radians();
     [cx + r * rad.cos() * aspect, cy + r * rad.sin()]
 }
@@ -171,12 +165,36 @@ pub(crate) fn push_ring_segment(
         let p1 = ring_point(cx, cy, r0, a, aspect);
         let p2 = ring_point(cx, cy, r0, b, aspect);
         let p3 = ring_point(cx, cy, r1, b, aspect);
-        out.push(HudVertex { position: p0, color: c, uv: SOLID_UV });
-        out.push(HudVertex { position: p1, color: c, uv: SOLID_UV });
-        out.push(HudVertex { position: p2, color: c, uv: SOLID_UV });
-        out.push(HudVertex { position: p0, color: c, uv: SOLID_UV });
-        out.push(HudVertex { position: p2, color: c, uv: SOLID_UV });
-        out.push(HudVertex { position: p3, color: c, uv: SOLID_UV });
+        out.push(HudVertex {
+            position: p0,
+            color: c,
+            uv: SOLID_UV,
+        });
+        out.push(HudVertex {
+            position: p1,
+            color: c,
+            uv: SOLID_UV,
+        });
+        out.push(HudVertex {
+            position: p2,
+            color: c,
+            uv: SOLID_UV,
+        });
+        out.push(HudVertex {
+            position: p0,
+            color: c,
+            uv: SOLID_UV,
+        });
+        out.push(HudVertex {
+            position: p2,
+            color: c,
+            uv: SOLID_UV,
+        });
+        out.push(HudVertex {
+            position: p3,
+            color: c,
+            uv: SOLID_UV,
+        });
     }
 }
 
@@ -205,11 +223,34 @@ pub(crate) fn push_needle(
     let a = [cx + r0 * dx, cy + r0 * dy];
     let b = [cx + r1 * dx, cy + r1 * dy];
     let c = color;
-    out.push(HudVertex { position: [a[0] + ux * h, a[1] + uy * h], color: c, uv: SOLID_UV });
-    out.push(HudVertex { position: [b[0] + ux * h, b[1] + uy * h], color: c, uv: SOLID_UV });
-    out.push(HudVertex { position: [b[0] - ux * h, b[1] - uy * h], color: c, uv: SOLID_UV });
-    out.push(HudVertex { position: [a[0] + ux * h, a[1] + uy * h], color: c, uv: SOLID_UV });
-    out.push(HudVertex { position: [b[0] - ux * h, b[1] - uy * h], color: c, uv: SOLID_UV });
-    out.push(HudVertex { position: [a[0] - ux * h, a[1] - uy * h], color: c, uv: SOLID_UV });
+    out.push(HudVertex {
+        position: [a[0] + ux * h, a[1] + uy * h],
+        color: c,
+        uv: SOLID_UV,
+    });
+    out.push(HudVertex {
+        position: [b[0] + ux * h, b[1] + uy * h],
+        color: c,
+        uv: SOLID_UV,
+    });
+    out.push(HudVertex {
+        position: [b[0] - ux * h, b[1] - uy * h],
+        color: c,
+        uv: SOLID_UV,
+    });
+    out.push(HudVertex {
+        position: [a[0] + ux * h, a[1] + uy * h],
+        color: c,
+        uv: SOLID_UV,
+    });
+    out.push(HudVertex {
+        position: [b[0] - ux * h, b[1] - uy * h],
+        color: c,
+        uv: SOLID_UV,
+    });
+    out.push(HudVertex {
+        position: [a[0] - ux * h, a[1] - uy * h],
+        color: c,
+        uv: SOLID_UV,
+    });
 }
-

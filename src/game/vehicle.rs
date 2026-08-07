@@ -112,15 +112,18 @@ impl Vehicle {
         // at its own top speed (the redline reference sits far beyond it).
         let speed_limit = if gear >= 5 { GEAR_MAX[5] } else { redline };
         if drivetrain_live {
-            let boost_mul = if self.boost > 0.0 { BOOST_ACCEL_MUL } else { 1.0 };
+            let boost_mul = if self.boost > 0.0 {
+                BOOST_ACCEL_MUL
+            } else {
+                1.0
+            };
             self.boost = (self.boost - dt).max(0.0);
             if input.throttle {
                 // Soft rev limiter: above the gear's natural top speed the
                 // engine gradually loses power, so the needle creeps toward the
                 // redline instead of slamming into it.
                 let overrev = (redline - GEAR_MAX[gear]).max(1.0);
-                let limiter_scale =
-                    ((redline - self.speed) / overrev).clamp(0.0, 1.0);
+                let limiter_scale = ((redline - self.speed) / overrev).clamp(0.0, 1.0);
                 self.speed += GEAR_ACCEL[gear] * boost_mul * limiter_scale * dt;
             } else if input.brake {
                 self.speed -= BRAKE_DECEL * dt;

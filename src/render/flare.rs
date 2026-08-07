@@ -132,7 +132,20 @@ pub fn build_flare_verts(sun_ndc: [f32; 2], aspect: f32, intensity: f32) -> Vec<
         let cx = sun_ndc[0] + ax * dist * t;
         let cy = sun_ndc[1] + ay * dist * t;
         let hw = hh * inv_aspect * hw_scale;
-        push_quad(&mut out, cx, cy, ax, ay, px, py, hw, hh, rgb, kind, alpha * intensity);
+        push_quad(
+            &mut out,
+            cx,
+            cy,
+            ax,
+            ay,
+            px,
+            py,
+            hw,
+            hh,
+            rgb,
+            kind,
+            alpha * intensity,
+        );
     }
 
     // Anamorphic streak bridging the sun and the screen center.
@@ -216,7 +229,9 @@ mod tests {
     #[test]
     fn sun_at_screen_center_cannot_divide_by_zero() {
         let verts = build_flare_verts([0.0, 0.0], 1.0, 1.0);
-        assert!(verts.iter().all(|v| v.position.iter().all(|p| p.is_finite())));
+        assert!(verts
+            .iter()
+            .all(|v| v.position.iter().all(|p| p.is_finite())));
     }
 
     #[test]
@@ -226,6 +241,9 @@ mod tests {
         assert!(core[mid + 3] > 250, "core is near-opaque at its center");
         let streak = generate_flare_streak(256, 32);
         let smid = (16 * 256 + 128) * 4;
-        assert!(streak[smid + 3] > 250, "streak is near-opaque at its center");
+        assert!(
+            streak[smid + 3] > 250,
+            "streak is near-opaque at its center"
+        );
     }
 }

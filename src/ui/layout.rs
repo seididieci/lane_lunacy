@@ -9,7 +9,10 @@ pub struct Size {
 
 impl Size {
     pub const ZERO: Size = Size { w: 0.0, h: 0.0 };
-    pub const INFINITY: Size = Size { w: f32::INFINITY, h: f32::INFINITY };
+    pub const INFINITY: Size = Size {
+        w: f32::INFINITY,
+        h: f32::INFINITY,
+    };
 
     pub const fn new(w: f32, h: f32) -> Size {
         Size { w, h }
@@ -106,7 +109,10 @@ impl Constraints {
     }
 
     pub const fn tight(size: Size) -> Constraints {
-        Constraints { min: size, max: size }
+        Constraints {
+            min: size,
+            max: size,
+        }
     }
 
     pub const fn loose(max: Size) -> Constraints {
@@ -163,16 +169,12 @@ impl Align {
     pub fn offset_in(&self, container: Size, child: Size) -> Point {
         let x = match self {
             Align::TopLeft | Align::CenterLeft | Align::BottomLeft => 0.0,
-            Align::TopCenter | Align::Center | Align::BottomCenter => {
-                (container.w - child.w) / 2.0
-            }
+            Align::TopCenter | Align::Center | Align::BottomCenter => (container.w - child.w) / 2.0,
             _ => container.w - child.w,
         };
         let y = match self {
             Align::TopLeft | Align::TopCenter | Align::TopRight => 0.0,
-            Align::CenterLeft | Align::Center | Align::CenterRight => {
-                (container.h - child.h) / 2.0
-            }
+            Align::CenterLeft | Align::Center | Align::CenterRight => (container.h - child.h) / 2.0,
             _ => container.h - child.h,
         };
         Point::new(x.max(0.0), y.max(0.0))
