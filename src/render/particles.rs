@@ -436,7 +436,7 @@ pub fn drift_intensity(
     } else {
         0.0
     };
-    let combined = (slip + steer_kick + launch + 0.12).clamp(0.0, 1.0);
+    let combined = (slip + steer_kick + launch + 0.12 * speed_gate).clamp(0.0, 1.0);
     combined * emission
 }
 
@@ -795,6 +795,13 @@ mod tests {
         // Non-dusty surface or standstill -> no dust.
         assert_eq!(drift_intensity(40.0, 6.0, 1.0, false, 0.0), 0.0);
         assert_eq!(drift_intensity(0.0, 6.0, 1.0, true, 1.0), 0.0);
+        // Parked just past the stop threshold (engine blow) with no throttle
+        // must not trail dust either: the ambient baseline is speed-gated.
+        assert_eq!(
+            drift_intensity(0.3, 6.0, 1.0, false, 1.0),
+            0.0,
+            "no dust parked after a blow"
+        );
 
         // Straight cruise on a dusty surface: only the minimal ambient trail.
         let ambient = drift_intensity(40.0, 0.0, 0.0, false, 1.0);
