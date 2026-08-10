@@ -41,10 +41,11 @@ void main() {
     if (v_material >= 90.0) {
         tex_col = texture(tex, v_uv).rgb;
     } else {
-        // World texture atlas, one row of 5 slots:
-        // 0=asphalt base, 1=asphalt worn, 2=asphalt cracked, 3=grass, 4=foliage.
-        float atlas_u = v_material * 0.2;
-        vec2 uv = vec2(fract(v_uv.x) * 0.2 + atlas_u, fract(v_uv.y));
+        // World texture atlas, one row of 6 slots:
+        // 0=asphalt base, 1=asphalt worn, 2=asphalt cracked, 3=grass,
+        // 4=foliage, 5=rock.
+        float atlas_u = v_material * (1.0 / 6.0);
+        vec2 uv = vec2(fract(v_uv.x) * (1.0 / 6.0) + atlas_u, fract(v_uv.y));
         tex_col = texture(tex, uv).rgb;
         // Reduce noisy contrast around local luma (keeps overall brightness).
         float luma = dot(tex_col, vec3(0.299, 0.587, 0.114));
@@ -54,8 +55,9 @@ void main() {
             tex_col = mix(vec3(0.5), tex_col, 0.35);
         }
         // Foliage keeps its own green tint in v_color, using the tile only for
-        // low-contrast canopy texture (mixed toward mid-grey).
-        if (v_material >= 4.0 && v_material < 90.0) {
+        // low-contrast canopy texture (mixed toward mid-grey). Rock (slot 5)
+        // must stay clear of this branch.
+        if (v_material >= 4.0 && v_material < 5.0) {
             tex_col = mix(vec3(0.85), tex_col, 0.25);
         }
     }

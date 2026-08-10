@@ -3,18 +3,39 @@
 use crate::geom::push_quad;
 use crate::road::{road_curve, ROAD_HALF};
 
-/// Half-width of the flat ground ribbon on each side of the road. Wide enough
-/// that its outer edge stays behind the fog ramp, so the open terrain reads as
-/// intentional instead of ending in a visible cutoff. Widening this adds no
-/// vertices (each ground quad already spans the full width).
+/// Half-width of the terrain ribbon on each side of the road. Wide enough
+/// that its outer edge stays behind the fog ramp, so the terrain reads as
+/// intentional instead of ending in a visible cutoff.
 const GROUND_HALF_W: f32 = 200.0;
 use crate::surface::{material_at, SurfaceMaterial};
 use crate::vertex::Vertex3d;
+use crate::world::terrain::{terrain_height, terrain_slope};
 
 /// Shortcuts for the ribbon cross-section's fixed surfaces. The asphalt slots
 /// and UV scales live in `surface.rs` so the mesh and gameplay agree.
 const ASPHALT_BASE: SurfaceMaterial = SurfaceMaterial::AsphaltBase;
 const GRASS: SurfaceMaterial = SurfaceMaterial::Grass;
+
+/// Flat normal for a ground cell from three of its corners, flopped to point
+/// up/outward (toward the road on a cliff wall) so it lights the visible face.
+fn flat_normal(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> [f32; 3] {
+    let e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    let e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+    let mut n = [
+        e1[1] * e2[2] - e1[2] * e2[1],
+        e1[2] * e2[0] - e1[0] * e2[2],
+        e1[0] * e2[1] - e1[1] * e2[0],
+    ];
+    if n[1] < 0.0 {
+        n = [-n[0], -n[1], -n[2]];
+    }
+    let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+    if len < 1e-6 {
+        [0.0, 1.0, 0.0]
+    } else {
+        [n[0] / len, n[1] / len, n[2] / len]
+    }
+}
 
 /// Builds one chunk of the world mesh: the flat ground ribbon and the road
 /// (asphalt, shoulders, verges, edge + center lines), then the roadside objects
@@ -27,28 +48,78 @@ pub fn build_world_chunk(start_s: f32, chunk_len: f32) -> (Vec<Vertex3d>, Vec<u3
     let end_s = start_s + chunk_len;
     let step = 2.0;
 
-    // local ground ribbon around the road (per-chunk)
-    let ground = [0.7, 0.85, 0.6];
+    // Local terrain ribbon around the road (per-chunk). The old single
+    // full-width quad was too coarse to displace, so the ribbon is re-tessellated
+    // into lateral bands (dense near the road where the hills live, coarse far
+    // out where the fog hides detail). Each vertex sits on the deterministic
+    // terrain_height(s, lateral); each cell gets a flat normal from its corners
+    // and the surface material its slope warrants (grass vs rock). Shared
+    // corners land on identical coordinates between cells, so hills and cliff
+    // walls are seamless within and across chunks.
+    let ground_color = [0.7, 0.85, 0.6];
+    let rock_color = [0.85, 0.85, 0.88];
+    let mut lat_edges = vec![0.0f32, 2.0, 4.5, 7.0];
+    let mut d = 7.0;
+    while d < 20.0 {
+        d += 1.0;
+        lat_edges.push(d);
+    }
+    while d < 50.0 {
+        d += 3.0;
+        lat_edges.push(d);
+    }
+    while d < 100.0 {
+        d += 5.0;
+        lat_edges.push(d);
+    }
+    while d < GROUND_HALF_W {
+        d += 10.0;
+        lat_edges.push(d);
+    }
+    if *lat_edges.last().unwrap() != GROUND_HALF_W {
+        lat_edges.push(GROUND_HALF_W);
+    }
+
     let mut s_ground = start_s;
     while s_ground < end_s {
         let s0 = s_ground;
         let s1 = (s_ground + step).min(end_s);
-        let x0 = road_curve(s0);
-        let x1 = road_curve(s1);
+        let s_mid = (s0 + s1) * 0.5;
         let z0 = -s0;
         let z1 = -s1;
-        push_quad(
-            &mut v,
-            &mut i,
-            [x0 - GROUND_HALF_W, 0.0, z0],
-            [x0 + GROUND_HALF_W, 0.0, z0],
-            [x1 + GROUND_HALF_W, 0.0, z1],
-            [x1 - GROUND_HALF_W, 0.0, z1],
-            [0.0, 1.0, 0.0],
-            ground,
-            GRASS.atlas_slot(),
-            GRASS.uv_scale(),
-        );
+        let x0 = road_curve(s0);
+        let x1 = road_curve(s1);
+        for w in lat_edges.windows(2) {
+            let l0 = w[0];
+            let l1 = w[1];
+            for side in [-1.0, 1.0] {
+                let la0 = l0 * side;
+                let la1 = l1 * side;
+                let ca = [x0 + la0, terrain_height(s0, la0), z0];
+                let cb = [x0 + la1, terrain_height(s0, la1), z0];
+                let cc = [x1 + la1, terrain_height(s1, la1), z1];
+                let cd = [x1 + la0, terrain_height(s1, la0), z1];
+                let lat_mid = (l0 + l1) * 0.5 * side;
+                let m = material_at(s_mid, lat_mid, terrain_slope(s_mid, lat_mid));
+                let col = if m == SurfaceMaterial::Rock {
+                    rock_color
+                } else {
+                    ground_color
+                };
+                push_quad(
+                    &mut v,
+                    &mut i,
+                    ca,
+                    cb,
+                    cc,
+                    cd,
+                    flat_normal(ca, cb, cc),
+                    col,
+                    m.atlas_slot(),
+                    m.uv_scale(),
+                );
+            }
+        }
         s_ground += step;
     }
 
@@ -67,7 +138,7 @@ pub fn build_world_chunk(start_s: f32, chunk_len: f32) -> (Vec<Vertex3d>, Vec<u3
         let x1 = road_curve(s1);
         let z0 = -s0;
         let z1 = -s1;
-        let asphalt = material_at(s0, 0.0);
+        let asphalt = material_at(s0, 0.0, 0.0);
         let asphalt_slot = asphalt.atlas_slot();
         let asphalt_scale = asphalt.uv_scale();
 
@@ -202,50 +273,79 @@ mod tests {
     use super::*;
 
     #[test]
-    fn world_chunk_has_open_ground_and_no_banks() {
+    fn world_chunk_has_open_ground_and_clear_road_corridor() {
         let (v, _) = build_world_chunk(0.0, 260.0);
         let mut min_x = f32::INFINITY;
         let mut max_x = f32::NEG_INFINITY;
-        let mut tall = 0;
+        let mut max_y = 0.0f32;
+        let mut min_y = f32::INFINITY;
         for vert in &v {
             min_x = min_x.min(vert.position[0]);
             max_x = max_x.max(vert.position[0]);
-            if vert.position[1] > 1.5 {
-                tall += 1;
-            }
+            max_y = max_y.max(vert.position[1]);
+            min_y = min_y.min(vert.position[1]);
         }
-        // The flat ground ribbon spans ±GROUND_HALF_W around the road.
+        // The terrain ribbon spans ±GROUND_HALF_W around the road.
         assert!(
             min_x <= -GROUND_HALF_W + 0.01 && max_x >= GROUND_HALF_W - 0.01,
-            "ground must span ±GROUND_HALF_W, got [{min_x}, {max_x}]"
+            "terrain must span ±GROUND_HALF_W, got [{min_x}, {max_x}]"
         );
-        // No wall-like geometry: nothing tall may sit inside the road lanes
-        // (|lateral| < half_w - 0.5), and the total tall-vertex budget stays
-        // small (trees + lamp poles + arms ≈ ~2k verts). The old banks were a
-        // continuous ~3.8m wall hugging the road edge (~12.5k verts/chunk).
-        for vert in v.iter().filter(|vert| vert.position[1] > 1.5) {
+        // The road corridor stays open and flat: nothing inside the road lanes
+        // (|lateral| < ROAD_HALF) may rise above the ribbon surface. Terrain
+        // rises only beyond RISE_START, and posts/lamp poles/trees sit further
+        // out — so this is a hard guarantee there is no wall hugging the road.
+        for vert in v.iter().filter(|vert| vert.position[1] > 0.05) {
             let lateral = vert.position[0] - road_curve(-vert.position[2]);
             assert!(
-                lateral.abs() > ROAD_HALF - 0.5,
-                "tall geometry must clear the road lanes, got lateral={lateral}"
+                lateral.abs() > ROAD_HALF,
+                "the road corridor must stay clear, got lateral={lateral}"
             );
         }
+        // Terrain is bounded: nothing below the road plane, nothing past the
+        // deterministic ceiling (cliff tops).
+        assert!(min_y >= -0.01, "terrain must not dip below the road plane");
         assert!(
-            tall < 5000,
-            "no continuous wall may remain, got {tall} tall vertices"
+            max_y <= 25.0 + 0.01,
+            "terrain must stay bounded, got max_y={max_y}"
         );
+        // Hills/cliffs are actually present in the chunk.
+        assert!(max_y > 1.5, "the terrain must rise off the road");
     }
 
     #[test]
     fn world_chunk_builds_roadside_scenery() {
         let (v, _) = build_world_chunk(0.0, 260.0);
-        let trees = v.iter().filter(|vert| vert.material >= 4.0).count();
+        let trees = v
+            .iter()
+            .filter(|vert| vert.material >= 4.0 && vert.material < 5.0)
+            .count();
         let elevated = v.iter().filter(|vert| vert.position[1] > 1.0).count();
         assert!(trees > 0, "trees should be part of the chunk");
         assert!(
             elevated > 0,
             "posts and lamp poles should be part of the chunk"
         );
+    }
+
+    #[test]
+    fn world_chunk_terrain_bakes_rock_into_cliff_faces() {
+        // Cliff walls are steep enough to cross the rock threshold whenever a
+        // deterministic cliff block is active; scan chunks until one is found
+        // (the world is deterministic, so this is a fixed guarantee, not a
+        // probability).
+        let mut s = 0.0;
+        let mut found = false;
+        while s < 5200.0 {
+            let (v, _) = build_world_chunk(s, 260.0);
+            if v.iter()
+                .any(|vert| vert.material == SurfaceMaterial::Rock.atlas_slot())
+            {
+                found = true;
+                break;
+            }
+            s += 260.0;
+        }
+        assert!(found, "some chunk must contain rock cliff faces");
     }
 }
 

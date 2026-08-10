@@ -77,8 +77,11 @@ impl Vehicle {
 
     /// Update drivetrain + steering. When `drivetrain_live` is false the engine
     /// is dead: throttle/brake/gear are ignored and the car only coasts to a
-    /// stop on drag (used after an engine blow).
-    pub fn update(&mut self, dt: f32, input: &Input, drivetrain_live: bool) {
+    /// stop on drag (used after an engine blow). `terrain_factor` (0..=1) is
+    /// the terrain speed multiplier at the car's position — steep canyons
+    /// reduce the effective top speed. Pass `1.0` when the engine is dead so
+    /// coasting is unaffected.
+    pub fn update(&mut self, dt: f32, input: &Input, drivetrain_live: bool, terrain_factor: f32) {
         if drivetrain_live {
             if input.gear_up {
                 self.gear = (self.gear + 1).min(5);
@@ -134,6 +137,13 @@ impl Vehicle {
             self.speed -= COAST_DECEL * dt;
         }
         self.speed = self.speed.clamp(0.0, speed_limit);
+        // Terrain-limited top speed. Ease the car down instead of snapping it
+        // so entering a canyon feels like the engine bogging, not a wall.
+        let terrain_limit = speed_limit * terrain_factor;
+        if self.speed > terrain_limit {
+            self.speed -= (self.speed - terrain_limit).min(TERRAIN_DRAG_DECEL * dt);
+        }
+        self.speed = self.speed.max(0.0);
         self.throttle = drivetrain_live && input.throttle;
     }
 }
@@ -147,6 +157,9 @@ const DRAG_DECEL: f32 = 3.0;
 /// Strong deceleration used while the engine is dead (after a blow), so the
 /// car rolls to a stop promptly.
 const COAST_DECEL: f32 = 10.0;
+/// How quickly the car eases down toward the terrain-limited top speed when it
+/// is overshooting (m/s^2). Smooths the canyon slowdown into engine-bog feel.
+const TERRAIN_DRAG_DECEL: f32 = 25.0;
 
 /// Fraction of `GEAR_MAX` a redline-speed reference sits past a gear's top speed.
 pub const LIMITER_FRAC: f32 = 1.12;
@@ -191,7 +204,7 @@ mod tests {
     #[test]
     fn rpm_idles_at_standstill_and_redlines_at_the_limiter() {
         let mut v = Vehicle::new();
-        v.update(0.0, &idle_input(), true);
+        v.update(0.0, &idle_input(), true, 1.0);
         assert!((v.rpm() - IDLE_RPM).abs() < 1.0);
 
         // In 1st gear the limiter is GEAR_MAX[1] * LIMITER_FRAC.
@@ -221,7 +234,7 @@ mod tests {
         };
         // Gear-1 limiter is GEAR_MAX[1] * LIMITER_FRAC; the car must not exceed it.
         for _ in 0..300 {
-            v.update(0.016, &input, true);
+            v.update(0.016, &input, true, 1.0);
             assert!(v.speed <= redline_speed(1) + 1e-3);
         }
         assert!(v.speed >= GEAR_MAX[1]);
@@ -231,9 +244,9 @@ mod tests {
     fn boost_decays_over_time() {
         let mut v = Vehicle::new();
         v.boost = BOOST_DURATION;
-        v.update(BOOST_DURATION / 2.0, &idle_input(), true);
+        v.update(BOOST_DURATION / 2.0, &idle_input(), true, 1.0);
         assert!(v.boost > 0.0);
-        v.update(BOOST_DURATION, &idle_input(), true);
+        v.update(BOOST_DURATION, &idle_input(), true, 1.0);
         assert_eq!(v.boost, 0.0);
     }
 
@@ -247,8 +260,38 @@ mod tests {
         };
         // With the engine dead, throttle is ignored: the car only slows down.
         for _ in 0..400 {
-            v.update(0.016, &input, false);
+            v.update(0.016, &input, false, 1.0);
         }
         assert_eq!(v.speed, 0.0);
+    }
+
+    #[test]
+    fn terrain_factor_caps_top_speed_and_returns() {
+        let mut v = Vehicle::new();
+        v.gear = 5;
+        v.speed = GEAR_MAX[5];
+        let input = Input {
+            throttle: true,
+            ..Input::default()
+        };
+        // A full canyon (terrain_factor = 0.75) eases the top speed down to
+        // ~71 instead of snapping it.
+        for _ in 0..300 {
+            v.update(0.016, &input, true, 0.75);
+        }
+        assert!(
+            (v.speed - GEAR_MAX[5] * 0.75).abs() < 0.5,
+            "top speed in a canyon should settle at 0.75x, got {}",
+            v.speed
+        );
+        // Out of the canyon the full top speed becomes reachable again.
+        for _ in 0..600 {
+            v.update(0.016, &input, true, 1.0);
+        }
+        assert!(
+            v.speed > GEAR_MAX[5] * 0.75 + 1.0,
+            "leaving the canyon must restore top speed, got {}",
+            v.speed
+        );
     }
 }

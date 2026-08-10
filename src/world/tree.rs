@@ -8,6 +8,7 @@
 use crate::geom::{push_box, push_cone};
 use crate::road::{road_curve, ROAD_HALF};
 use crate::vertex::Vertex3d;
+use crate::world::terrain::{terrain_height, terrain_slope};
 use crate::world::{hash01, spaced_placements, Placement, RoadsideObject};
 
 /// Material slot for tree trunks and foliage (atlas slot 4, see mesh.frag.glsl).
@@ -45,18 +46,28 @@ impl RoadsideObject for Tree {
 
     fn push_geometry(&self, v: &mut Vec<Vertex3d>, i: &mut Vec<u32>, p: &Placement) {
         let height = 2.6 + hash01(p.s * 0.37 + 1.7) * 2.0;
-        let x = road_curve(p.s) + p.side * p.lateral;
-        push_tree(v, i, x, -p.s, height, p.variant, TREE_UV_SCALE);
+        let lateral = p.side * p.lateral;
+        let ground_y = terrain_height(p.s, lateral);
+        // Trees root on the displaced terrain; a tree whose base would sit on a
+        // cliff wall (steep terrain) or atop a high wall gets culled so trunks
+        // never poke sideways out of a cliff face or float over thin air.
+        if terrain_slope(p.s, lateral) > 0.7 || ground_y > 6.0 {
+            return;
+        }
+        let x = road_curve(p.s) + lateral;
+        push_tree(v, i, x, -p.s, ground_y, height, p.variant, TREE_UV_SCALE);
     }
 }
 
 /// Pushes one stylized roadside tree. All parts use `TREE_MATERIAL`; the vertex
-/// color distinguishes trunk from foliage.
+/// color distinguishes trunk from foliage. `ground_y` roots the whole tree on
+/// the terrain surface.
 fn push_tree(
     v: &mut Vec<Vertex3d>,
     i: &mut Vec<u32>,
     x: f32,
     z: f32,
+    ground_y: f32,
     height: f32,
     variant: u32,
     scale: f32,
@@ -72,8 +83,8 @@ fn push_tree(
     push_box(
         v,
         i,
-        [x - trunk_r, 0.0, z - trunk_r],
-        [x + trunk_r, trunk_h, z + trunk_r],
+        [x - trunk_r, ground_y, z - trunk_r],
+        [x + trunk_r, ground_y + trunk_h, z + trunk_r],
         trunk_col,
         TREE_MATERIAL,
         scale,
@@ -83,8 +94,9 @@ fn push_tree(
         let c_span = height - trunk_h;
         let mut r = height * 0.30;
         for k in 0..3u32 {
-            let cb = c_base + c_span * (k as f32 * 0.28);
-            let apex = (c_base + c_span * (0.55 + k as f32 * 0.15)).min(height);
+            let cb = ground_y + c_base + c_span * (k as f32 * 0.28);
+            let apex =
+                (ground_y + c_base + c_span * (0.55 + k as f32 * 0.15)).min(ground_y + height);
             push_cone(
                 v,
                 i,
@@ -107,8 +119,8 @@ fn push_tree(
             x,
             z,
             height * 0.52,
-            trunk_h * 0.9,
-            height * 0.74,
+            ground_y + trunk_h * 0.9,
+            ground_y + height * 0.74,
             foliage_col,
             TREE_MATERIAL,
             scale,
@@ -120,8 +132,8 @@ fn push_tree(
             x,
             z,
             height * 0.30,
-            height * 0.64,
-            height,
+            ground_y + height * 0.64,
+            ground_y + height,
             foliage_col,
             TREE_MATERIAL,
             scale,
@@ -137,10 +149,8 @@ mod tests {
     #[test]
     fn trees_are_generated_off_the_road_deterministically() {
         let (v, i) = crate::mesh::build_world_chunk(0.0, 260.0);
-        let foliage: Vec<&Vertex3d> = v
-            .iter()
-            .filter(|vert| vert.material >= TREE_MATERIAL)
-            .collect();
+        let is_tree = |vert: &Vertex3d| vert.material >= TREE_MATERIAL && vert.material < 5.0;
+        let foliage: Vec<&Vertex3d> = v.iter().filter(|vert| is_tree(vert)).collect();
         assert!(!foliage.is_empty(), "trees should be generated");
         for vert in &foliage {
             let lateral = vert.position[0] - road_curve(-vert.position[2]);
@@ -149,7 +159,7 @@ mod tests {
                 "tree geometry must stay off the road, got lateral={lateral}"
             );
             assert!(
-                vert.position[1] >= 0.0 && vert.position[1] <= 5.0,
+                vert.position[1] >= 0.0 && vert.position[1] <= 12.0,
                 "tree heights out of range: {}",
                 vert.position[1]
             );
@@ -163,7 +173,7 @@ mod tests {
         let sig = |verts: &[Vertex3d]| -> Vec<[f32; 3]> {
             let mut out: Vec<[f32; 3]> = verts
                 .iter()
-                .filter(|vert| vert.material >= TREE_MATERIAL)
+                .filter(|vert| is_tree(vert))
                 .map(|vert| vert.position)
                 .collect();
             out.sort_by(|a, b| a.partial_cmp(b).unwrap());

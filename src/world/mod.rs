@@ -11,6 +11,7 @@
 
 pub mod marker_post;
 pub mod street_lamp;
+pub mod terrain;
 pub mod tree;
 
 use crate::vertex::Vertex3d;

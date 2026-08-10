@@ -15,6 +15,8 @@ pub const MAT_CAR: f32 = 99.0;
 
 /// Shoulder strip width (metres), mirroring `mesh.rs`'s cross-section.
 const SHOULDER_W: f32 = 0.55;
+/// Off-road terrain steeper than this (rise/m) renders as rock instead of grass.
+pub const ROCK_SLOPE: f32 = 0.8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SurfaceMaterial {
@@ -22,6 +24,7 @@ pub enum SurfaceMaterial {
     AsphaltWorn,
     AsphaltCracked,
     Grass,
+    Rock,
 }
 
 impl SurfaceMaterial {
@@ -32,6 +35,7 @@ impl SurfaceMaterial {
             SurfaceMaterial::AsphaltWorn => 1.0,
             SurfaceMaterial::AsphaltCracked => 2.0,
             SurfaceMaterial::Grass => 3.0,
+            SurfaceMaterial::Rock => 5.0,
         }
     }
 
@@ -42,6 +46,8 @@ impl SurfaceMaterial {
             | SurfaceMaterial::AsphaltWorn
             | SurfaceMaterial::AsphaltCracked => 0.32,
             SurfaceMaterial::Grass => 0.10,
+            // Larger tiles on big cliff faces so the rock doesn't swim.
+            SurfaceMaterial::Rock => 0.08,
         }
     }
 
@@ -74,6 +80,12 @@ impl SurfaceMaterial {
                 puff_scale: 1.2,
                 alpha: 0.75,
             },
+            SurfaceMaterial::Rock => DustProfile {
+                emission: 0.2,
+                color: [0.42, 0.4, 0.38],
+                puff_scale: 1.1,
+                alpha: 0.6,
+            },
         }
     }
 }
@@ -89,9 +101,11 @@ pub struct DustProfile {
 
 /// The surface under a point of the road cross-section, expressed as a
 /// distance along the ribbon plus a lateral offset from the center line.
+/// `slope` (rise per metre) only matters beyond the shoulder, where the
+/// surrounding terrain is grass unless it's steep enough to read as rock.
 /// Mirrors the geometry built in `mesh.rs` so gameplay queries (drift dust)
 /// always agree with what is actually drawn.
-pub fn material_at(distance: f32, offset: f32) -> SurfaceMaterial {
+pub fn material_at(distance: f32, offset: f32, slope: f32) -> SurfaceMaterial {
     let abs_x = offset.abs();
     if abs_x <= ROAD_HALF {
         // Asphalt ribbon: pick the per-block variant deterministically.
@@ -99,6 +113,9 @@ pub fn material_at(distance: f32, offset: f32) -> SurfaceMaterial {
     } else if abs_x <= ROAD_HALF + SHOULDER_W {
         // Shoulder strips are always asphalt base.
         SurfaceMaterial::AsphaltBase
+    } else if slope > ROCK_SLOPE {
+        // Steep off-road terrain (cliff faces, escarpments) reads as rock.
+        SurfaceMaterial::Rock
     } else {
         // Verge and the surrounding ground are grass.
         SurfaceMaterial::Grass
@@ -127,7 +144,7 @@ mod tests {
     #[test]
     fn inside_the_ribbon_is_asphalt() {
         for offset in [-3.0, 0.0, 4.7] {
-            let m = material_at(0.0, offset);
+            let m = material_at(0.0, offset, 0.0);
             assert!(
                 matches!(
                     m,
@@ -143,17 +160,31 @@ mod tests {
     #[test]
     fn shoulder_is_asphalt_and_beyond_is_grass() {
         assert_eq!(
-            material_at(0.0, ROAD_HALF + 0.2),
+            material_at(0.0, ROAD_HALF + 0.2, 0.0),
             SurfaceMaterial::AsphaltBase
         );
-        assert_eq!(material_at(0.0, ROAD_HALF + 1.0), SurfaceMaterial::Grass);
-        assert_eq!(material_at(0.0, 50.0), SurfaceMaterial::Grass);
+        assert_eq!(
+            material_at(0.0, ROAD_HALF + 1.0, 0.0),
+            SurfaceMaterial::Grass
+        );
+        assert_eq!(material_at(0.0, 50.0, 0.0), SurfaceMaterial::Grass);
+    }
+
+    #[test]
+    fn steep_off_road_terrain_is_rock() {
+        assert_eq!(
+            material_at(0.0, ROAD_HALF + 1.0, ROCK_SLOPE + 0.1),
+            SurfaceMaterial::Rock
+        );
+        // The slope only matters beyond the shoulder: the ribbon is asphalt
+        // regardless of how steep the terrain beyond it is.
+        assert_eq!(material_at(0.0, 0.0, 10.0), material_at(0.0, 0.0, 0.0));
     }
 
     #[test]
     fn variant_pick_is_deterministic() {
-        assert_eq!(material_at(0.0, 0.0), material_at(0.0, 0.0));
-        assert_eq!(material_at(1234.0, 1.0), material_at(1234.0, 1.0));
+        assert_eq!(material_at(0.0, 0.0, 0.0), material_at(0.0, 0.0, 0.0));
+        assert_eq!(material_at(1234.0, 1.0, 0.0), material_at(1234.0, 1.0, 0.0));
     }
 
     #[test]
@@ -162,6 +193,7 @@ mod tests {
         assert_eq!(SurfaceMaterial::AsphaltWorn.atlas_slot(), 1.0);
         assert_eq!(SurfaceMaterial::AsphaltCracked.atlas_slot(), 2.0);
         assert_eq!(SurfaceMaterial::Grass.atlas_slot(), 3.0);
+        assert_eq!(SurfaceMaterial::Rock.atlas_slot(), 5.0);
         assert!(SurfaceMaterial::Grass.uv_scale() < SurfaceMaterial::AsphaltBase.uv_scale());
     }
 
@@ -172,6 +204,7 @@ mod tests {
             SurfaceMaterial::AsphaltWorn,
             SurfaceMaterial::AsphaltCracked,
             SurfaceMaterial::Grass,
+            SurfaceMaterial::Rock,
         ] {
             let p = m.dust_profile();
             assert!((0.0..=1.0).contains(&p.emission));

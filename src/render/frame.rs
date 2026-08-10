@@ -318,7 +318,7 @@ pub fn build_frame(
         let cam_right = cam_forward.cross(Vec3::Y);
         let v = &game.vehicle;
         let lateral_v = v.speed * (v.heading.sin() - road_tangent(v.distance) * v.heading.cos());
-        let profile = material_at(v.distance, v.offset).dust_profile();
+        let profile = material_at(v.distance, v.offset, 0.0).dust_profile();
         let drift = drift_intensity(v.speed, lateral_v, v.steer, v.throttle, profile.emission);
         let p_rot = glam::Quat::from_rotation_y(-v.heading);
         let base = Vec3::new(game.player_world_x(), 0.12, game.player_world_z());

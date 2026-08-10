@@ -217,8 +217,9 @@ impl Game {
 
         if self.engine_blown {
             // Engine dead: the car only coasts to a stop while the world keeps
-            // moving; collisions no longer matter.
-            self.vehicle.update(dt, input, false);
+            // moving; collisions no longer matter. Terrain does not slow a dead
+            // engine (terrain_factor = 1.0).
+            self.vehicle.update(dt, input, false, 1.0);
             update_traffic(&mut self.traffic, &self.vehicle, &tuning, dt);
             if self.vehicle.speed <= COAST_STOP_SPEED {
                 self.game_over = true;
@@ -229,7 +230,8 @@ impl Game {
         }
 
         let gear_before = self.vehicle.gear;
-        self.vehicle.update(dt, input, true);
+        let terrain_factor = crate::world::terrain::speed_factor(self.vehicle.distance);
+        self.vehicle.update(dt, input, true, terrain_factor);
         update_traffic(&mut self.traffic, &self.vehicle, &tuning, dt);
 
         // Judge a gear change at the pre-shift ratio.

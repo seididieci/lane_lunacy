@@ -101,6 +101,41 @@ pub fn generate_foliage_tile(size: u32, seed: u64) -> Vec<u8> {
     out
 }
 
+/// Bakes a `size`×`size` opaque RGBA rock tile for the world atlas (slot 5).
+///
+/// Neutral grey rock with coarse horizontal strata bands plus a little mid and
+/// fine speckle, so cliff faces get organic banding without strong color. The
+/// lattice is periodic, so the tile tiles seamlessly over large cliff faces.
+pub fn generate_rock_tile(size: u32, seed: u64) -> Vec<u8> {
+    let n = size as usize;
+    let mut out = Vec::with_capacity(n * n * 4);
+    for py in 0..n {
+        let y = py as f32;
+        for px in 0..n {
+            let x = px as f32;
+            let strata = fbm(seed, size, x * 0.4 + 3.0, y * 1.3 + 11.0, 4, 3);
+            let n1 = fbm(seed ^ 0x9E3779B9, size, x + 17.0, y + 3.0, 8, 3);
+            let n2 = fbm(
+                seed ^ 0x5DEECE66D,
+                size,
+                x * 2.3 + 5.0,
+                y * 2.3 + 7.0,
+                14,
+                2,
+            );
+            // Neutral grey with slight warm/cool variation from the bands.
+            let g = 0.44 + 0.10 * (strata - 0.5) + 0.05 * (n1 - 0.5) + 0.04 * (n2 - 0.5);
+            let r = g + 0.02 * (n1 - 0.5);
+            let b = g - 0.02 * (n2 - 0.5);
+            out.push((r * 255.0).clamp(0.0, 255.0) as u8);
+            out.push((g * 255.0).clamp(0.0, 255.0) as u8);
+            out.push((b * 255.0).clamp(0.0, 255.0) as u8);
+            out.push(255);
+        }
+    }
+    out
+}
+
 /// Fractal value noise, periodic across the tile.
 fn fbm(seed: u64, size: u32, x: f32, y: f32, base_cells: i32, octaves: usize) -> f32 {
     let mut sum = 0.0;
@@ -185,10 +220,27 @@ mod tests {
     }
 
     #[test]
-    fn foliage_tile_is_deterministic_per_seed() {
-        let a = generate_foliage_tile(32, 9);
-        let b = generate_foliage_tile(32, 9);
-        let c = generate_foliage_tile(32, 10);
+    fn rock_tile_is_opaque_neutral_grey_noise() {
+        let size = 64u32;
+        let tile = generate_rock_tile(size, 7);
+        assert_eq!(tile.len(), (size * size * 4) as usize);
+        for px in tile.chunks_exact(4).step_by(64) {
+            assert_eq!(px[3], 255, "rock is opaque");
+            // Neutral grey: channels close together, mid luminance.
+            let (r, g, b) = (px[0] as i16, px[1] as i16, px[2] as i16);
+            assert!(
+                (r - g).abs() <= 12 && (b - g).abs() <= 12,
+                "rock must read neutral grey, got ({r},{g},{b})"
+            );
+            assert!((80..=170).contains(&g), "rock luminance mid-range");
+        }
+    }
+
+    #[test]
+    fn rock_tile_is_deterministic_per_seed() {
+        let a = generate_rock_tile(32, 9);
+        let b = generate_rock_tile(32, 9);
+        let c = generate_rock_tile(32, 10);
         assert_eq!(a, b, "same seed -> same tile");
         assert_ne!(a, c, "different seed -> different tile");
     }
