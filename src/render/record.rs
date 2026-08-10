@@ -585,6 +585,11 @@ fn record_hud(
     hud_pipeline: Arc<GraphicsPipeline>,
     hud_verts: &[HudVertex],
 ) {
+    if hud_verts.is_empty() {
+        // No HUD (e.g. F4 clean-screen): skip the draw entirely. Vulkano's
+        // `Buffer::from_iter` panics on an empty iterator.
+        return;
+    }
     builder
         .bind_pipeline_graphics(hud_pipeline.clone())
         .expect("bind hud pipeline")

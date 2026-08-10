@@ -24,6 +24,7 @@ use vulkano::pipeline::graphics::viewport::Viewport;
 use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo};
 use vulkano::sync::{self, GpuFuture};
 
+use crate::debug::DebugStats;
 use crate::font::FontAtlas;
 use crate::game::Game;
 use crate::hud::build_hud_tree;
@@ -55,6 +56,7 @@ pub fn render_snapshot(
     seed: u64,
     width: u32,
     height: u32,
+    debug: bool,
 ) -> SnapshotOutput {
     let render_pass = vulkano::single_pass_renderpass!(
         device.clone(),
@@ -135,7 +137,8 @@ pub fn render_snapshot(
     // playing HUD. `FrameBuilder` also owns the world chunks, anchored at the
     // player's current chunk exactly like the windowed renderer keeps them.
     let aspect = width as f32 / height as f32;
-    let mut hud_root = build_hud_tree(game);
+    let debug_stats = debug.then(|| debug_stats_for_snapshot(game));
+    let mut hud_root = build_hud_tree(game, debug_stats.as_ref());
     let hud_verts = Ui::new().build(&mut hud_root, font_atlas, aspect, 0.0);
 
     let mut frame_builder = FrameBuilder::with_seed(seed);
@@ -209,6 +212,26 @@ pub fn render_snapshot(
         height,
         frame,
     }
+}
+
+/// Deterministic `DebugStats` for a `--debug` snapshot: plausible values so the
+/// HUD layout can be eyeballed without a live render loop.
+fn debug_stats_for_snapshot(game: &Game) -> DebugStats {
+    let mut stats = DebugStats::default();
+    stats.fps = 60.0;
+    stats.frame_ms = 16.6;
+    stats.cpu_ms = 3.2;
+    stats.world_chunks = 8;
+    stats.world_verts = 92_000;
+    stats.world_tris = 46_000;
+    stats.chunk_rebuild_ms = 1.4;
+    stats.chunks_rebuilt = 1;
+    stats.particles = 24;
+    stats.hud_verts = 512;
+    stats.distance = game.vehicle.distance;
+    stats.chunk_index = (game.vehicle.distance / crate::render::WORLD_CHUNK_LEN).floor() as i32;
+    stats.terrain_factor = crate::world::terrain::speed_factor(game.vehicle.distance);
+    stats
 }
 
 /// Converts a linear float color channel (0..1, as stored in the HDR

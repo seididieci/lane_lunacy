@@ -18,6 +18,7 @@ use vulkano::image::{SampleCount, SampleCounts};
 use vulkano::instance::Instance;
 use vulkano::swapchain::Surface;
 
+use crate::debug::DebugStats;
 use crate::font::FontAtlas;
 use crate::game::{Game, Weather};
 use crate::gpu::{create_graphics_context, enumerate_devices, select_physical_device};
@@ -65,6 +66,9 @@ pub struct App {
     font_atlas: FontAtlas,
     ui_clock: f32,
     previous: Instant,
+    /// F3: dev-only diagnostics overlay (FPS, timings, mesh volume).
+    debug_visible: bool,
+    debug: DebugStats,
     /// `false` (default) starts borderless fullscreen; `--windowed` sets this.
     windowed: bool,
 }
@@ -77,6 +81,8 @@ impl App {
         start_hour: Option<f32>,
         seed: u64,
         windowed: bool,
+        // `--debug`: start with the F3 debug HUD enabled.
+        debug: bool,
     ) -> Self {
         let mut game = Game::new();
         game.set_weather(weather);
@@ -117,6 +123,8 @@ impl App {
             font_atlas: FontAtlas::load(),
             ui_clock: 0.0,
             previous: Instant::now(),
+            debug_visible: debug,
+            debug: DebugStats::default(),
             windowed,
         }
     }
@@ -198,7 +206,7 @@ impl App {
         self.previous = Instant::now();
 
         println!(
-            "Controls: W / Up = throttle | S / Down = brake | A / Left & D / Right = steer | E = gear up | Q = gear down | R = restart | F11 = fullscreen | ESC = pause menu"
+            "Controls: W / Up = throttle | S / Down = brake | A / Left & D / Right = steer | E = gear up | Q = gear down | R = restart | F3 / F4 = debug HUD | F11 = fullscreen | ESC = pause menu"
         );
     }
 
@@ -448,6 +456,20 @@ impl ApplicationHandler for App {
                         }
                     }
                     PhysicalKey::Code(KeyCode::F11) if press => self.toggle_fullscreen(),
+                    PhysicalKey::Code(KeyCode::F4) if press => {
+                        self.debug_visible = !self.debug_visible;
+                        println!(
+                            "debug HUD {}",
+                            if self.debug_visible { "on" } else { "off" }
+                        );
+                    }
+                    PhysicalKey::Code(KeyCode::F3) if press => {
+                        self.debug_visible = !self.debug_visible;
+                        println!(
+                            "debug HUD {}",
+                            if self.debug_visible { "on" } else { "off" }
+                        );
+                    }
                     _ if matches!(self.mode, AppMode::Menu) => {
                         self.handle_menu_key(event_loop, &kb, press);
                     }
@@ -500,6 +522,7 @@ impl ApplicationHandler for App {
         let dt = now.duration_since(self.previous);
         self.previous = now;
         self.ui_clock += dt.as_secs_f32();
+        self.debug.sample_frame(dt.as_secs_f32());
 
         if matches!(self.mode, AppMode::Playing) {
             self.game.update(dt, &self.input);
@@ -522,11 +545,14 @@ impl ApplicationHandler for App {
                 &self.supported_aa,
                 self.menu.settings != self.applied,
             ),
-            AppMode::Playing => build_hud_tree(&self.game),
+            AppMode::Playing => {
+                build_hud_tree(&self.game, self.debug_visible.then_some(&self.debug))
+            }
         };
         let hud_verts = self
             .ui
             .build(&mut root, &self.font_atlas, aspect, self.ui_clock);
+        self.debug.hud_verts = hud_verts.len();
         let fx = FxSettings {
             fxaa: self.applied.fxaa,
             bloom: self.applied.bloom,
@@ -535,7 +561,22 @@ impl ApplicationHandler for App {
             saturation: self.applied.saturation,
             chroma: self.applied.chroma,
         };
+        let render_started = Instant::now();
         renderer.render(&self.game, dt, &hud_verts, &fx);
+        self.debug
+            .sample_cpu(render_started.elapsed().as_secs_f32() * 1000.0);
+
+        let ws = renderer.world_stats();
+        self.debug.world_chunks = ws.chunk_count;
+        self.debug.world_verts = ws.world_verts;
+        self.debug.world_tris = ws.world_tris;
+        self.debug.chunk_rebuild_ms = ws.last_rebuild_ms;
+        self.debug.chunks_rebuilt = ws.chunks_rebuilt;
+        self.debug.particles = ws.particles;
+        self.debug.distance = self.game.vehicle.distance;
+        self.debug.chunk_index =
+            (self.game.vehicle.distance / crate::render::WORLD_CHUNK_LEN).floor() as i32;
+        self.debug.terrain_factor = crate::world::terrain::speed_factor(self.game.vehicle.distance);
     }
 }
 

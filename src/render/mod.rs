@@ -272,6 +272,11 @@ impl Renderer {
         unsafe { self.device.wait_idle() }.expect("failed to wait for device idle");
     }
 
+    /// Cached world-mesh volume and rebuild timing (debug HUD).
+    pub fn world_stats(&self) -> frame_builder::WorldStats {
+        self.frame_builder.world_stats()
+    }
+
     // Single-threaded by design (this is the window presenter); the `Arc` is
     // mandated by vulkano's `GpuFuture` impl for `FenceSignalFuture`.
     #[allow(clippy::arc_with_non_send_sync)]

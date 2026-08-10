@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 
+use crate::debug::DebugStats;
 use crate::font::ICON_TROPHY;
-use crate::game::vehicle::{PERFECT_HI, PERFECT_LO, REDLINE_RPM, RED_ZONE_START};
+use crate::game::vehicle::{PERFECT_HI, PERFECT_LO, RED_ZONE_START};
 use crate::game::Game;
 use crate::ui::{
     Align, Column, Gauge, GaugeZone, HAlign, Insets, Node, Overlay, Panel, Row, Size, Text, VAlign,
@@ -35,8 +36,9 @@ const GAUGE_GAP: f32 = 64.0;
 /// True top speed (~342 km/h) used to scale the speed gauge.
 const TOP_SPEED: f32 = 342.0;
 
-/// Builds the in-game HUD widget tree for the current game state.
-pub(crate) fn build_hud_tree(game: &Game) -> Node {
+/// Builds the in-game HUD widget tree for the current game state. When
+/// `debug` is `Some`, a dev-only diagnostics panel (F3) is added.
+pub(crate) fn build_hud_tree(game: &Game, debug: Option<&DebugStats>) -> Node {
     let mut overlay = Overlay::new();
     overlay.push(Align::TopLeft, top_left(game));
     overlay.push(Align::TopRight, top_right(game));
@@ -50,7 +52,54 @@ pub(crate) fn build_hud_tree(game: &Game) -> Node {
     if let Some(alert) = alert(game) {
         overlay.push(Align::Center, alert);
     }
+    if let Some(d) = debug {
+        overlay.push(Align::TopCenter, debug_panel(d));
+    }
     Node::new(overlay)
+}
+
+/// Dev-only diagnostics: FPS / frame times, world-mesh volume and rebuild cost,
+/// particle counts, and current position/terrain state.
+fn debug_panel(d: &DebugStats) -> Node {
+    let lines = vec![
+        Node::new(Text::new(
+            format!("FPS {:.0}   FRAME {:.1} ms", d.fps, d.frame_ms),
+            EM_SM,
+            YELLOW,
+        )),
+        Node::new(Text::new(
+            format!(
+                "CPU {:.2} ms   CHUNKS {}   TRIS {}",
+                d.cpu_ms, d.world_chunks, d.world_tris
+            ),
+            EM_SM,
+            DIM,
+        )),
+        Node::new(Text::new(
+            format!(
+                "REBUILD {:.0} ms ({} chunks)",
+                d.chunk_rebuild_ms, d.chunks_rebuilt
+            ),
+            EM_SM,
+            DIM,
+        )),
+        Node::new(Text::new(
+            format!("PARTS {}   HUD {}", d.particles, d.hud_verts),
+            EM_SM,
+            DIM,
+        )),
+        Node::new(Text::new(
+            format!(
+                "DIST {:.0} m   CHK {}   TERRAIN {:.2}",
+                d.distance, d.chunk_index, d.terrain_factor
+            ),
+            EM_SM,
+            DIM,
+        )),
+    ];
+    let col = Column::new(lines, 6.0, HAlign::Left);
+    let panel = Panel::wrap(PANEL_BG, PANEL_INSETS, Node::new(col));
+    margin(Node::new(panel), Insets::new(EDGE, EDGE, 0.0, 0.0))
 }
 
 /// A transparent spacer that pushes a child in from the screen edges.
@@ -127,7 +176,11 @@ fn gauges(game: &Game) -> Node {
         .number(format!("{:.0}", game.speed_kmh), EM_GAUGE_NUM, WHITE)
         .label("KM/H", EM_GAUGE_LABEL, GREEN);
 
-    let rpm_frac = game.vehicle.rpm() / REDLINE_RPM;
+    // The needle rides on `rpm_frac()` (speed/redline, 0..=1) so the blue
+    // perfect-shift band and red zone on the ring match the exact thresholds
+    // the game judges gear changes and engine heat by. Feeding `rpm()/REDLINE`
+    // here would add the idle-RPM offset and shift the visual zones ~3% early.
+    let rpm_frac = game.vehicle.rpm_frac();
     let rpm = Gauge::new(Size::new(GAUGE_SIZE, GAUGE_SIZE), rpm_frac, GREEN)
         .zone(GaugeZone::new(PERFECT_LO, PERFECT_HI, PERFECT_COL))
         .zone(GaugeZone::new(RED_ZONE_START, 1.0, RED))
@@ -227,13 +280,42 @@ mod tests {
         let ui = Ui::new();
         let atlas = FontAtlas::load();
 
-        let mut playing = build_hud_tree(&Game::new());
+        let mut playing = build_hud_tree(&Game::new(), None);
         assert!(!ui.build(&mut playing, &atlas, 16.0 / 9.0, 0.0).is_empty());
 
         let mut over = Game::new();
         over.game_over = true;
-        let mut over_root = build_hud_tree(&over);
+        let mut over_root = build_hud_tree(&over, None);
         assert!(!ui.build(&mut over_root, &atlas, 16.0 / 9.0, 0.0).is_empty());
+    }
+
+    #[test]
+    fn debug_panel_builds_vertices_with_metrics() {
+        let ui = Ui::new();
+        let atlas = FontAtlas::load();
+
+        let mut stats = DebugStats {
+            fps: 118.0,
+            frame_ms: 8.5,
+            cpu_ms: 3.2,
+            world_chunks: 8,
+            world_tris: 262_000,
+            chunk_rebuild_ms: 41.0,
+            chunks_rebuilt: 8,
+            particles: 1800,
+            hud_verts: 8900,
+            distance: 1234.5,
+            terrain_factor: 0.78,
+            chunk_index: 4,
+            world_verts: 131_000,
+        };
+        let mut root = build_hud_tree(&Game::new(), Some(&stats));
+        let verts = ui.build(&mut root, &atlas, 16.0 / 9.0, 0.0);
+        assert!(!verts.is_empty(), "debug panel should emit vertices");
+
+        // Full path: some metrics survive a round-trip through the stats.
+        stats.sample_frame(0.01);
+        assert!(stats.fps > 0.0);
     }
 
     #[test]
@@ -243,7 +325,7 @@ mod tests {
 
         let mut blown = Game::new();
         blown.engine_blown = true;
-        let mut blown_root = build_hud_tree(&blown);
+        let mut blown_root = build_hud_tree(&blown, None);
         assert!(
             !ui.build(&mut blown_root, &atlas, 16.0 / 9.0, 0.0)
                 .is_empty(),

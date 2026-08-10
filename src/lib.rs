@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod cli;
+pub mod debug;
 pub mod font;
 pub mod game;
 pub mod geom;
@@ -68,6 +69,7 @@ pub fn run(
     start_hour: Option<f32>,
     seed: Option<u64>,
     windowed: bool,
+    debug: bool,
 ) {
     let event_loop = EventLoop::new().expect("failed to create event loop");
     let instance = create_surface_instance(&event_loop);
@@ -81,7 +83,9 @@ pub fn run(
             .as_nanos() as u64
     });
 
-    let mut app = app::App::new(instance, gpu_index, weather, start_hour, seed, windowed);
+    let mut app = app::App::new(
+        instance, gpu_index, weather, start_hour, seed, windowed, debug,
+    );
     event_loop.run_app(&mut app).expect("event loop failed");
 }
 
@@ -125,6 +129,7 @@ pub fn run_snapshot(opts: SnapshotOptions) {
         opts.seed,
         opts.width,
         opts.height,
+        opts.debug,
     );
 
     // Programmatic eye: derive CPU probes from the frame math and GPU probes

@@ -20,6 +20,8 @@ pub struct SnapshotOptions {
     pub seed: u64,
     /// Physical device index to use.
     pub gpu: usize,
+    /// Render the F3 debug HUD on top of the scene.
+    pub debug: bool,
 }
 
 /// Which top-level program the CLI selects.
@@ -34,6 +36,8 @@ pub enum RunMode {
         /// `--windowed`: start in a floating 90%-FHD window instead of
         /// borderless fullscreen (the default). F11 toggles at runtime.
         windowed: bool,
+        /// `--debug`: start with the F3 debug HUD (FPS etc.) enabled.
+        debug: bool,
     },
     Snapshot(SnapshotOptions),
 }
@@ -51,6 +55,8 @@ pub fn parse(args: &[String]) -> RunMode {
     let mut snapshot: Option<PathBuf> = None;
     let mut width = 1280u32;
     let mut height = 720u32;
+    let mut snapshot_debug = false;
+    let mut debug = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -121,6 +127,11 @@ pub fn parse(args: &[String]) -> RunMode {
                 windowed = true;
                 i += 1;
             }
+            "--debug" => {
+                debug = true;
+                snapshot_debug = true;
+                i += 1;
+            }
             _ => {
                 eprintln!("ignoring unrecognized argument: {arg}");
                 i += 1;
@@ -137,6 +148,7 @@ pub fn parse(args: &[String]) -> RunMode {
             height,
             seed: seed.unwrap_or(0),
             gpu,
+            debug: snapshot_debug,
         }),
         None => RunMode::Interactive {
             gpu,
@@ -144,6 +156,7 @@ pub fn parse(args: &[String]) -> RunMode {
             start_hour,
             seed,
             windowed,
+            debug,
         },
     }
 }
@@ -177,12 +190,14 @@ mod tests {
                 start_hour,
                 seed,
                 windowed,
+                debug,
             } => {
                 assert_eq!(gpu, 0);
                 assert_eq!(weather, Weather::Auto);
                 assert_eq!(start_hour, None);
                 assert_eq!(seed, None);
                 assert!(!windowed);
+                assert!(!debug);
             }
             _ => panic!("expected interactive mode"),
         }
@@ -197,6 +212,7 @@ mod tests {
                 start_hour,
                 seed,
                 windowed,
+                ..
             } => {
                 assert_eq!(gpu, 1);
                 assert_eq!(weather, Weather::Rain);
@@ -204,6 +220,14 @@ mod tests {
                 assert_eq!(seed, None);
                 assert!(!windowed);
             }
+            _ => panic!("expected interactive mode"),
+        }
+    }
+
+    #[test]
+    fn interactive_debug_flag_enables_debug_hud() {
+        match parse_args(&["--debug"]) {
+            RunMode::Interactive { debug, .. } => assert!(debug),
             _ => panic!("expected interactive mode"),
         }
     }
@@ -234,6 +258,7 @@ mod tests {
             "42",
             "--gpu",
             "2",
+            "--debug",
         ]) {
             RunMode::Snapshot(o) => {
                 assert_eq!(o.path, PathBuf::from("/tmp/f.png"));
@@ -242,6 +267,7 @@ mod tests {
                 assert_eq!((o.width, o.height), (640, 360));
                 assert_eq!(o.seed, 42);
                 assert_eq!(o.gpu, 2);
+                assert!(o.debug);
             }
             _ => panic!("expected snapshot mode"),
         }
@@ -256,6 +282,7 @@ mod tests {
                 assert_eq!(o.time, None);
                 assert_eq!(o.weather, Weather::Auto);
                 assert_eq!(o.gpu, 0);
+                assert!(!o.debug);
             }
             _ => panic!("expected snapshot mode"),
         }
