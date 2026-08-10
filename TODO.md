@@ -114,7 +114,10 @@ Goals:
       no art assets, culled by the road-mesh chunks; cone/pine + broadleaf
       built in `src/mesh.rs` with a deterministic per-world-s placement and a
       generated foliage tile as atlas slot 4 in `src/render/cloud.rs`)
-- [ ] Add street lamps that switch on at night, reusing the projector/headlight
-      path in `src/render/frame.rs`
+- [x] Add street lamps that switch on at night, reusing the projector/headlight
+      path in `src/render/frame.rs` (pole/arm/head geometry in `src/mesh.rs`,
+      a dedicated warm `lamp_*` UBO pool projected down from each luminaire in
+      `mesh.frag.glsl`, and warm lantern glow sprites in the particle pass; all
+      gated by `night_fac`, both sides every 40m)
 - [ ] Add road cliffs that affect the car's speed (local terrain gradient feeds
       into `vehicle.update`, e.g. uphill drag / downhill assist)

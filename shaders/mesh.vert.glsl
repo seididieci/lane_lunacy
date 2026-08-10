@@ -25,6 +25,9 @@ layout(set = 0, binding = 0) uniform MVP {
     vec4 traffic_head_pos[16];
     vec4 traffic_head_dir[16];
     vec4 traffic_head_state[16];
+    vec4 lamp_pos[16];
+    vec4 lamp_dir[16];
+    vec4 lamp_state[16];
     vec4 terrain_state;
 };
 

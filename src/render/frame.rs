@@ -14,12 +14,14 @@ use glam::{Mat4, Vec3};
 
 use crate::game::Game;
 use crate::math::smoothstep;
+use crate::mesh::{lamp_head_pos, roadside_lamps};
 use crate::model::CarLightAnchors;
 use crate::render::camera::{perspective_vulkan, Camera};
 use crate::render::daynight::{self, Lights};
 use crate::render::flare;
 use crate::render::particles::{
-    build_headlights, build_taillights, drift_intensity, DustSystem, MistSystem, RainSystem,
+    build_headlights, build_lamp_glows, build_taillights, drift_intensity, DustSystem, MistSystem,
+    RainSystem,
 };
 use crate::road::{road_curve, road_tangent, CAR_HALF_W, CAR_LEN};
 use crate::shaders::SkyUniform;
@@ -28,6 +30,9 @@ use crate::vertex::{FlareVertex, HudVertex, ParticleVertex};
 
 pub const SKY_RADIUS: f32 = 550.0;
 pub const MAX_TRAFFIC_HEADLIGHTS: usize = 16;
+/// Street-lamp projector slots. Two lamps per spacing interval on a ~400m
+/// window fit comfortably inside 16.
+pub const MAX_LAMPS: usize = 16;
 
 /// Camera + lighting context shared by every draw in a frame. One bundle keeps
 /// the recorder and the `SceneResources` draw methods from threading half a
@@ -42,8 +47,8 @@ pub struct FrameUniforms {
 }
 
 /// Headlight projector payload for one frame: the player's cone plus the
-/// oncoming/same-direction traffic cones, packed exactly as the mesh and
-/// particle shaders expect them.
+/// oncoming/same-direction traffic cones and the street-lamp pools, packed
+/// exactly as the mesh and particle shaders expect them.
 #[derive(Clone, Copy)]
 pub struct Headlights {
     pub pos: [f32; 4],
@@ -51,6 +56,10 @@ pub struct Headlights {
     pub traffic_pos: [[f32; 4]; MAX_TRAFFIC_HEADLIGHTS],
     pub traffic_dir: [[f32; 4]; MAX_TRAFFIC_HEADLIGHTS],
     pub traffic_state: [[f32; 4]; MAX_TRAFFIC_HEADLIGHTS],
+    /// Street-lamp projectors: `state` = [warm.r, warm.g, warm.b, strength].
+    pub lamp_pos: [[f32; 4]; MAX_LAMPS],
+    pub lamp_dir: [[f32; 4]; MAX_LAMPS],
+    pub lamp_state: [[f32; 4]; MAX_LAMPS],
 }
 
 /// One fully-computed frame, ready to be recorded into a command buffer. All
@@ -268,6 +277,29 @@ pub fn build_frame(
         traffic_head_state[i] = [0.95, 20.0, 0.965, 0.90];
     }
 
+    // Street lamps: warm downward pools from the luminaire heads, placed by the
+    // same deterministic list as the chunk mesh. The closest lamps ahead fill
+    // the fixed pool; pools fade in with night darkness like the headlights.
+    let mut lamp_head_positions = Vec::with_capacity(MAX_LAMPS);
+    let mut lamp_pos_arr = [[0.0; 4]; MAX_LAMPS];
+    let mut lamp_dir_arr = [[0.0; 4]; MAX_LAMPS];
+    let mut lamp_state_arr = [[0.0; 4]; MAX_LAMPS];
+    if night_fac > 0.02 {
+        for (i, (lamp_s, side)) in
+            roadside_lamps(game.vehicle.distance, game.vehicle.distance + 400.0)
+                .into_iter()
+                .take(MAX_LAMPS)
+                .enumerate()
+        {
+            let head = lamp_head_pos(lamp_s, side);
+            lamp_pos_arr[i] = [head[0], head[1], head[2], 1.0];
+            lamp_dir_arr[i] = [0.0, -1.0, 0.0, 0.0];
+            // [warm.r, warm.g, warm.b, strength]
+            lamp_state_arr[i] = [1.0, 0.82, 0.55, 0.8];
+            lamp_head_positions.push(Vec3::new(head[0], head[1], head[2]));
+        }
+    }
+
     // Particles (rain + drift dust).
     let mut particle_verts = Vec::new();
     let mut dust_verts = Vec::new();
@@ -371,6 +403,14 @@ pub fn build_frame(
             cam_right,
             night_fac,
         ));
+        // Street-lamp lantern glows, a touch dimmer than headlights so the
+        // pools stay the main signal.
+        particle_verts.append(&mut build_lamp_glows(
+            &lamp_head_positions,
+            eye,
+            cam_right,
+            night_fac * 0.7,
+        ));
     }
 
     // Sun lens flare: project the sun (a world direction) into NDC and fan
@@ -421,6 +461,9 @@ pub fn build_frame(
             traffic_pos: traffic_head_pos,
             traffic_dir: traffic_head_dir,
             traffic_state: traffic_head_state,
+            lamp_pos: lamp_pos_arr,
+            lamp_dir: lamp_dir_arr,
+            lamp_state: lamp_state_arr,
         },
         particle_verts,
         dust_verts,
@@ -494,6 +537,61 @@ mod tests {
             frame.flare_intensity < 0.05,
             "moon flare must be weak, got {}",
             frame.flare_intensity
+        );
+    }
+
+    #[test]
+    fn midnight_lamps_fill_the_pool_and_glow() {
+        let game = deterministic_game(0.0, Weather::Clear);
+        let frame = frame_for(&game);
+        assert!(frame.night_fac > 0.3, "night darkness active");
+        // Pools are filled from the deterministic roadside_lamps list.
+        let active = frame
+            .headlights
+            .lamp_state
+            .iter()
+            .filter(|s| s[3] > 0.0)
+            .count();
+        assert!(active > 0, "street lamps must light the road at night");
+        assert_eq!(frame.headlights.lamp_dir[0], [0.0, -1.0, 0.0, 0.0]);
+        // Glow sprites are baked into the particle pass: warm lantern discs
+        // (green channel ~0.85), distinct from red taillights and cool-white
+        // headlight discs.
+        let lamp_glow = |v: &crate::vertex::ParticleVertex| {
+            v.color[0] > 0.9
+                && v.color[1] > 0.8
+                && v.color[1] < 0.9
+                && v.color[2] > 0.5
+                && v.color[2] < 0.7
+        };
+        assert!(
+            frame.particle_verts.iter().any(lamp_glow),
+            "warm lamp glow sprites must be present at night"
+        );
+        // Every lamp's pool position sits at its luminaire head, off the road.
+        for (i, state) in frame.headlights.lamp_state.iter().enumerate() {
+            if state[3] > 0.0 {
+                let p = frame.headlights.lamp_pos[i];
+                assert!(p[1] > 4.0, "lamp head is elevated");
+            }
+        }
+    }
+
+    #[test]
+    fn noon_turns_street_lamps_off() {
+        let game = deterministic_game(12.0, Weather::Clear);
+        let frame = frame_for(&game);
+        assert_eq!(frame.night_fac, 0.0);
+        assert!(
+            frame.headlights.lamp_state.iter().all(|s| s[3] == 0.0),
+            "lamps must be off by day"
+        );
+        assert!(
+            !frame.particle_verts.iter().any(|v| v.color[0] > 0.9
+                && v.color[1] > 0.8
+                && v.color[1] < 0.9
+                && v.color[2] < 0.7),
+            "no lamp glow by day"
         );
     }
 

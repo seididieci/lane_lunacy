@@ -565,34 +565,46 @@ pub fn build_taillights(
     out
 }
 
-/// Bakes the visible headlights of oncoming traffic: a warm-white disc with a
-/// faint halo per light. Road illumination is projected in the mesh shader for
-/// uniformity, so this pass renders only the visible lamp glow. `lights` is a
-/// list of `(center, forward_dir)` pairs: the light
-/// at its real anchor position (lateral offset and height baked in by the
-/// caller), and the direction its beams shine. Everything behind the camera is
-/// skipped. `intensity` (0..1) scales the glow.
-pub fn build_headlights(
-    lights: &[(Vec3, Vec3)],
+/// Bakes camera-facing glow discs (bright core + soft halo) for a list of
+/// world-space centers, e.g. car headlights or street-lamp heads. Lights behind
+/// the camera are skipped. `intensity` (0..1) scales the glow.
+pub fn build_glow_discs(
+    centers: &[Vec3],
     eye: Vec3,
     right: Vec3,
+    disc_color: [f32; 3],
+    halo_color: [f32; 3],
+    disc_half_w: f32,
+    disc_half_h: f32,
+    halo_half_w: f32,
+    halo_half_h: f32,
     intensity: f32,
 ) -> Vec<ParticleVertex> {
     if intensity <= 0.001 {
         return Vec::new();
     }
     let right = right.normalize_or_zero();
-    let mut out = Vec::with_capacity(lights.len() * 12);
-    for (center, _forward) in lights {
+    let mut out = Vec::with_capacity(centers.len() * 12);
+    for center in centers {
         if center.z - eye.z > 5.0 {
             continue; // behind the camera
         }
-        let disc = [1.0, 0.98, 0.90, intensity * 0.95];
-        let halo = [1.0, 0.92, 0.75, intensity * 0.25];
-        let up = Vec3::Y * 0.22;
-        let side = right * 0.18;
-        let halo_up = Vec3::Y * 0.36;
-        let halo_side = right * 0.30;
+        let disc = [
+            disc_color[0],
+            disc_color[1],
+            disc_color[2],
+            intensity * 0.95,
+        ];
+        let halo = [
+            halo_color[0],
+            halo_color[1],
+            halo_color[2],
+            intensity * 0.25,
+        ];
+        let up = Vec3::Y * disc_half_h;
+        let side = right * disc_half_w;
+        let halo_up = Vec3::Y * halo_half_h;
+        let halo_side = right * halo_half_w;
         // Disc.
         let tl = *center - side + up;
         let tr = *center + side + up;
@@ -607,6 +619,57 @@ pub fn build_headlights(
         push_quad(&mut out, tl, tr, br, bl, halo, 0.0);
     }
     out
+}
+
+/// Bakes the visible headlights of oncoming traffic: a warm-white disc with a
+/// faint halo per light. Road illumination is projected in the mesh shader for
+/// uniformity, so this pass renders only the visible lamp glow. `lights` is a
+/// list of `(center, forward_dir)` pairs: the light
+/// at its real anchor position (lateral offset and height baked in by the
+/// caller), and the direction its beams shine. Everything behind the camera is
+/// skipped. `intensity` (0..1) scales the glow.
+pub fn build_headlights(
+    lights: &[(Vec3, Vec3)],
+    eye: Vec3,
+    right: Vec3,
+    intensity: f32,
+) -> Vec<ParticleVertex> {
+    let centers: Vec<Vec3> = lights.iter().map(|(c, _)| *c).collect();
+    build_glow_discs(
+        &centers,
+        eye,
+        right,
+        [1.0, 0.98, 0.90],
+        [1.0, 0.92, 0.75],
+        0.18,
+        0.22,
+        0.30,
+        0.36,
+        intensity,
+    )
+}
+
+/// Bakes the warm lantern glow for each street-lamp head. `intensity` (0..1)
+/// scales the glow; callers pass the effective night darkness so lamps switch
+/// off by day.
+pub fn build_lamp_glows(
+    centers: &[Vec3],
+    eye: Vec3,
+    right: Vec3,
+    intensity: f32,
+) -> Vec<ParticleVertex> {
+    build_glow_discs(
+        centers,
+        eye,
+        right,
+        [1.0, 0.85, 0.60],
+        [1.0, 0.78, 0.50],
+        0.22,
+        0.16,
+        0.38,
+        0.28,
+        intensity,
+    )
 }
 
 fn spawn_drop(rng: &mut Rng, eye: Vec3) -> Drop {

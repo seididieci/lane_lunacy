@@ -20,6 +20,40 @@ const TREE_MATERIAL: f32 = 4.0;
 /// World-space UV scale (tiles per metre) for tree foliage.
 const TREE_UV_SCALE: f32 = 0.15;
 
+/// World-space spacing (metres) between street-lamp pairs; one lamp is placed
+/// on each side of the road per spacing interval.
+pub const LAMP_SPACING: f32 = 40.0;
+/// Lateral offset of the lamp pole base from the road center (well past the
+/// verge strips and marker posts, inside the tree line).
+pub const LAMP_LATERAL: f32 = ROAD_HALF + 1.7;
+/// Pole height to the arm (luminaire head sits just above it).
+const LAMP_HEIGHT: f32 = 5.6;
+
+/// Deterministic list of street-lamp positions in `[start_s, end_s)`: every
+/// `LAMP_SPACING` metres, one lamp on each side of the road. Pure function of
+/// world-`s`, so the chunk mesh (pole geometry) and the frame lights (pools +
+/// glow sprites) always agree and chunk rebuilds are stable.
+pub fn roadside_lamps(start_s: f32, end_s: f32) -> Vec<(f32, f32)> {
+    let mut out = Vec::new();
+    let mut s = (start_s / LAMP_SPACING).ceil() * LAMP_SPACING;
+    while s < end_s {
+        out.push((s, 1.0));
+        out.push((s, -1.0));
+        s += LAMP_SPACING;
+    }
+    out
+}
+
+/// World-space luminaire head position for a lamp-pair entry `(s, side)`,
+/// matching the geometry `push_lamp` builds so the light pools and glow
+/// sprites sit exactly on the head.
+pub fn lamp_head_pos(s: f32, side: f32) -> [f32; 3] {
+    let x = road_curve(s) + side * LAMP_LATERAL;
+    let head_lateral = ROAD_HALF + 0.35;
+    let head_x = x - side * (LAMP_LATERAL - head_lateral);
+    [head_x, LAMP_HEIGHT - 0.21, -s]
+}
+
 #[allow(clippy::too_many_arguments)]
 fn push_quad(
     v: &mut Vec<Vertex3d>,
@@ -319,6 +353,50 @@ fn push_tree(
     }
 }
 
+/// Pushes one street lamp: a dark pole at the roadside edge with an arm
+/// reaching toward the road and a small warm-off-white luminaire head. All
+/// parts use the asphalt slot so they stay free of the terrain tint and grass
+/// flattening; the head's light comes from the projector pool + glow sprite,
+/// not the mesh color.
+fn push_lamp(v: &mut Vec<Vertex3d>, i: &mut Vec<u32>, x: f32, z: f32, side: f32) {
+    let pole_col = [0.20, 0.20, 0.22];
+    let head_col = [0.95, 0.88, 0.72];
+    let pole_r = 0.09;
+    // Pole at the roadside edge.
+    push_box(
+        v,
+        i,
+        [x - pole_r, 0.0, z - pole_r],
+        [x + pole_r, LAMP_HEIGHT, z + pole_r],
+        pole_col,
+        ASPHALT_BASE.atlas_slot(),
+        ASPHALT_BASE.uv_scale(),
+    );
+    // Arm reaching inward from the pole top to the head over the road edge.
+    let head_lateral = ROAD_HALF + 0.35;
+    let head_x = x - side * (LAMP_LATERAL - head_lateral);
+    let arm_h = LAMP_HEIGHT - 0.14;
+    push_box(
+        v,
+        i,
+        [x.min(head_x) - 0.06, arm_h, z - 0.06],
+        [x.max(head_x) + 0.06, arm_h + 0.14, z + 0.06],
+        pole_col,
+        ASPHALT_BASE.atlas_slot(),
+        ASPHALT_BASE.uv_scale(),
+    );
+    // Luminaire head hanging from the arm end.
+    push_box(
+        v,
+        i,
+        [head_x - 0.16, arm_h - 0.16, z - 0.10],
+        [head_x + 0.16, arm_h + 0.02, z + 0.10],
+        head_col,
+        ASPHALT_BASE.atlas_slot(),
+        ASPHALT_BASE.uv_scale(),
+    );
+}
+
 /// Deterministic 0..1 hash from a world-space coordinate, so chunk rebuilds and
 /// snapshot runs place scenery identically.
 fn hash01(s: f32) -> f32 {
@@ -559,6 +637,15 @@ pub fn build_world_chunk(start_s: f32, chunk_len: f32) -> (Vec<Vertex3d>, Vec<u3
         tree_s += 11.0;
     }
 
+    // street lamps: a pole on each side every LAMP_SPACING, placed via the same
+    // deterministic list the frame lights use, so poles and their light pools
+    // always line up.
+    for (lamp_s, side) in roadside_lamps(start_s, end_s) {
+        let x = road_curve(lamp_s);
+        let z = -lamp_s;
+        push_lamp(&mut v, &mut i, x + side * LAMP_LATERAL, z, side);
+    }
+
     (v, i)
 }
 
@@ -571,26 +658,34 @@ mod tests {
         let (v, _) = build_world_chunk(0.0, 260.0);
         let mut min_x = f32::INFINITY;
         let mut max_x = f32::NEG_INFINITY;
+        let mut tall = 0;
         for vert in &v {
             min_x = min_x.min(vert.position[0]);
             max_x = max_x.max(vert.position[0]);
+            if vert.position[1] > 1.5 {
+                tall += 1;
+            }
         }
         // The flat ground ribbon spans ±GROUND_HALF_W around the road.
         assert!(
             min_x <= -GROUND_HALF_W + 0.01 && max_x >= GROUND_HALF_W - 0.01,
             "ground must span ±GROUND_HALF_W, got [{min_x}, {max_x}]"
         );
-        // No wall-like geometry: any tall vertex (y > 1.5, i.e. beyond the
-        // marker posts) must sit far from the road axis in a narrow tree-like
-        // footprint. The old banks were a continuous ~3.8m wall hugging the
-        // road edge (|lateral| ≈ 6.1..11m); trees live at |lateral| > half_w + 2.5.
+        // No wall-like geometry: nothing tall may sit inside the road lanes
+        // (|lateral| < half_w - 0.5), and the total tall-vertex budget stays
+        // small (trees + lamp poles + arms ≈ ~2k verts). The old banks were a
+        // continuous ~3.8m wall hugging the road edge (~12.5k verts/chunk).
         for vert in v.iter().filter(|vert| vert.position[1] > 1.5) {
             let lateral = vert.position[0] - road_curve(-vert.position[2]);
             assert!(
-                lateral.abs() > ROAD_HALF + 1.5,
-                "tall geometry must stay off the road, got lateral={lateral}"
+                lateral.abs() > ROAD_HALF - 0.5,
+                "tall geometry must clear the road lanes, got lateral={lateral}"
             );
         }
+        assert!(
+            tall < 5000,
+            "no continuous wall may remain, got {tall} tall vertices"
+        );
     }
 
     #[test]
@@ -598,6 +693,67 @@ mod tests {
         let (v, _) = build_world_chunk(0.0, 260.0);
         let posts = v.iter().filter(|vert| vert.position[1] > 1.0).count();
         assert!(posts > 0, "marker posts should still exist");
+    }
+
+    #[test]
+    fn world_chunk_builds_lamps_both_sides_deterministically() {
+        let (v, _) = build_world_chunk(0.0, 260.0);
+        // Head boxes hang just under the arm (y ≈ 5.30..5.48) and overhang the
+        // road edge (lateral ≈ ±(half_w + 0.35)), while poles stand at
+        // ±LAMP_LATERAL. Check the luminaires exist and sit inward of the poles.
+        let head_lateral = ROAD_HALF + 0.35;
+        let heads: Vec<[f32; 3]> = v
+            .iter()
+            .filter(|vert| vert.position[1] > 5.28 && vert.position[1] < 5.50)
+            .map(|vert| vert.position)
+            .collect();
+        let heads_on_road: Vec<[f32; 3]> = heads
+            .iter()
+            .copied()
+            .filter(|pos| {
+                let lateral = (pos[0] - road_curve(-pos[2])).abs();
+                lateral < head_lateral + 0.3 && lateral > head_lateral - 0.3
+            })
+            .collect();
+        assert!(
+            !heads_on_road.is_empty(),
+            "lamp luminaires must hang over the road edge"
+        );
+        for pos in &heads_on_road {
+            let lateral = pos[0] - road_curve(-pos[2]);
+            assert!(
+                lateral.abs() < LAMP_LATERAL,
+                "lamp heads must sit inward of the pole, got lateral={lateral}"
+            );
+        }
+        // Both sides per LAMP_SPACING: one lamp on each side every 40m.
+        let lamps = roadside_lamps(0.0, 260.0);
+        let expected = (260.0 / LAMP_SPACING).ceil() as usize * 2;
+        assert_eq!(lamps.len(), expected, "one lamp on each side per spacing");
+        assert!(
+            lamps.iter().any(|(_, side)| *side > 0.0) && lamps.iter().any(|(_, side)| *side < 0.0),
+            "lamps appear on both sides"
+        );
+        assert_eq!(
+            lamps,
+            roadside_lamps(0.0, 260.0),
+            "placement is deterministic"
+        );
+        // Boundary consistency: adjacent windows share no lamp and lose none.
+        let a = roadside_lamps(0.0, 260.0);
+        let b = roadside_lamps(260.0, 520.0);
+        assert_eq!(a.len() + b.len(), roadside_lamps(0.0, 520.0).len());
+        // The head-position helper matches the mesh: its lateral sits at the
+        // head over the road edge, not at the pole.
+        for (s, side) in &lamps {
+            let head = lamp_head_pos(*s, *side);
+            let lateral = head[0] - road_curve(-head[2]);
+            assert!(
+                (lateral.abs() - head_lateral).abs() < 1e-3,
+                "lamp_head_pos must sit at the luminaire over the road edge"
+            );
+            assert!(head[1] > 5.2, "lamp head is elevated");
+        }
     }
 
     #[test]

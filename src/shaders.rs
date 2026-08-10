@@ -39,6 +39,11 @@ pub struct MVP {
     pub traffic_head_pos: [[f32; 4]; 16],
     pub traffic_head_dir: [[f32; 4]; 16],
     pub traffic_head_state: [[f32; 4]; 16],
+    /// Street-lamp projectors (downward warm pools). state = [warm.r, warm.g,
+    /// warm.b, strength]. Mirrors `MAX_LAMPS` in `render/frame.rs`.
+    pub lamp_pos: [[f32; 4]; 16],
+    pub lamp_dir: [[f32; 4]; 16],
+    pub lamp_state: [[f32; 4]; 16],
     /// Terrain (grass/verge) day/night tint: [tint.rgb, unused].
     pub terrain_state: [f32; 4],
 }

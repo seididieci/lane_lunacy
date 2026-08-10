@@ -20,6 +20,9 @@ layout(set = 0, binding = 0) uniform MVP {
     vec4 traffic_head_pos[16];
     vec4 traffic_head_dir[16];
     vec4 traffic_head_state[16];
+    vec4 lamp_pos[16];
+    vec4 lamp_dir[16];
+    vec4 lamp_state[16];
     vec4 terrain_state;
 };
 
@@ -126,6 +129,38 @@ void main() {
             beam * dist_falloff * strength * traffic_gain * near_traffic_fade * night_fac * road_mask;
         traffic_head = min(traffic_head, 1.4);
         lit += albedo * traffic_head * 0.80;
+    }
+
+    // Street-lamp projectors: fixed downward warm pools on the road, gated by
+    // night darkness like the headlights. state = [warm.r, warm.g, warm.b,
+    // strength]; strength <= 0.001 means the lamp is off (day).
+    for (int i = 0; i < 16; ++i) {
+        float strength = lamp_state[i].w;
+        if (strength <= 0.001) {
+            continue;
+        }
+        vec3 lp = lamp_pos[i].xyz;
+        vec3 ld = normalize(lamp_dir[i].xyz);
+        vec3 lamp_col = lamp_state[i].rgb;
+        vec3 to_l = lp - v_world_pos;
+        float dist = length(to_l);
+        float max_dist = 24.0;
+        if (dist <= 1e-4 || dist >= max_dist) {
+            continue;
+        }
+        vec3 Ll = to_l / dist;
+        // Lamp beams point straight down; the cone is wide enough to paint a
+        // soft ~4m pool under the luminaire.
+        float cone = dot(-Ll, ld);
+        float beam = smoothstep(0.80, 0.90, cone);
+        float fall = (1.0 - dist / max_dist);
+        float dist_falloff = fall * fall;
+        float road_mask = 1.0 - smoothstep(0.24, 2.2, abs(v_world_pos.y - 0.02));
+        float lamp_light =
+            beam * dist_falloff * strength * night_fac * road_mask;
+        // Keep the pools subtle so headlights stay the dominant night light.
+        lamp_light = min(lamp_light, 0.9);
+        lit += albedo * lamp_col * lamp_light * 0.8;
     }
 
     // Long, gentle fog ramp that reaches full opacity exactly at the far clip

@@ -567,6 +567,9 @@ impl SceneResources {
             traffic_pos: traffic_head_pos,
             traffic_dir: traffic_head_dir,
             traffic_state: traffic_head_state,
+            lamp_pos,
+            lamp_dir,
+            lamp_state,
         } = *headlights;
         let mvp = MVP {
             model: model.to_cols_array_2d(),
@@ -585,6 +588,9 @@ impl SceneResources {
             traffic_head_pos,
             traffic_head_dir,
             traffic_head_state,
+            lamp_pos,
+            lamp_dir,
+            lamp_state,
             terrain_state: [
                 lights.terrain_tint[0],
                 lights.terrain_tint[1],
