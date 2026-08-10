@@ -14,7 +14,6 @@ use glam::{Mat4, Vec3};
 
 use crate::game::Game;
 use crate::math::smoothstep;
-use crate::mesh::{lamp_head_pos, roadside_lamps};
 use crate::model::CarLightAnchors;
 use crate::render::camera::{perspective_vulkan, Camera};
 use crate::render::daynight::{self, Lights};
@@ -27,6 +26,8 @@ use crate::road::{road_curve, road_tangent, CAR_HALF_W, CAR_LEN};
 use crate::shaders::SkyUniform;
 use crate::surface::material_at;
 use crate::vertex::{FlareVertex, HudVertex, ParticleVertex};
+use crate::world::street_lamp::{head_pos, STREET_LAMP};
+use crate::world::RoadsideObject;
 
 pub const SKY_RADIUS: f32 = 550.0;
 pub const MAX_TRAFFIC_HEADLIGHTS: usize = 16;
@@ -285,13 +286,13 @@ pub fn build_frame(
     let mut lamp_dir_arr = [[0.0; 4]; MAX_LAMPS];
     let mut lamp_state_arr = [[0.0; 4]; MAX_LAMPS];
     if night_fac > 0.02 {
-        for (i, (lamp_s, side)) in
-            roadside_lamps(game.vehicle.distance, game.vehicle.distance + 400.0)
-                .into_iter()
-                .take(MAX_LAMPS)
-                .enumerate()
+        for (i, p) in STREET_LAMP
+            .placements(game.vehicle.distance, game.vehicle.distance + 400.0)
+            .into_iter()
+            .take(MAX_LAMPS)
+            .enumerate()
         {
-            let head = lamp_head_pos(lamp_s, side);
+            let head = head_pos(&p);
             lamp_pos_arr[i] = [head[0], head[1], head[2], 1.0];
             lamp_dir_arr[i] = [0.0, -1.0, 0.0, 0.0];
             // [warm.r, warm.g, warm.b, strength]
@@ -545,7 +546,7 @@ mod tests {
         let game = deterministic_game(0.0, Weather::Clear);
         let frame = frame_for(&game);
         assert!(frame.night_fac > 0.3, "night darkness active");
-        // Pools are filled from the deterministic roadside_lamps list.
+        // Pools are filled from the deterministic STREET_LAMP placements.
         let active = frame
             .headlights
             .lamp_state

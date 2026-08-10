@@ -4,6 +4,7 @@ pub mod app;
 pub mod cli;
 pub mod font;
 pub mod game;
+pub mod geom;
 pub mod gpu;
 pub mod hud;
 pub mod input;
@@ -17,6 +18,7 @@ pub mod shaders;
 pub mod surface;
 pub mod ui;
 pub mod vertex;
+pub mod world;
 
 use std::sync::Arc;
 
