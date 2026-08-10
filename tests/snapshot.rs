@@ -40,8 +40,8 @@ fn scenarios() -> [Scenario; 3] {
                 mist_fac: 0.0,
             },
             gpu: GpuProbe {
-                sky_top_lum: 0.534974,
-                road_center_lum: 0.178736,
+                sky_top_lum: 0.465207,
+                road_center_lum: 0.177158,
                 sun_disc_max_lum: 4.1846,
                 flare_bloom_lum: 4.003115,
             },
@@ -59,10 +59,10 @@ fn scenarios() -> [Scenario; 3] {
                 mist_fac: 0.5,
             },
             gpu: GpuProbe {
-                sky_top_lum: 0.086070,
-                road_center_lum: 0.136364,
-                sun_disc_max_lum: 0.538,
-                flare_bloom_lum: 0.538318,
+                sky_top_lum: 0.081573,
+                road_center_lum: 0.134691,
+                sun_disc_max_lum: 0.347,
+                flare_bloom_lum: 0.347888,
             },
         },
         Scenario {
@@ -78,8 +78,8 @@ fn scenarios() -> [Scenario; 3] {
                 mist_fac: 0.07413377,
             },
             gpu: GpuProbe {
-                sky_top_lum: 0.390496,
-                road_center_lum: 0.173058,
+                sky_top_lum: 0.389188,
+                road_center_lum: 0.171513,
                 sun_disc_max_lum: 0.0,
                 flare_bloom_lum: 0.0,
             },
@@ -232,6 +232,7 @@ fn gpu_probes_match_golden_baselines() {
             42,
             1280,
             720,
+            false,
         );
         let cpu = compute_cpu(&game, &output.frame);
         let gpu = compute_gpu(

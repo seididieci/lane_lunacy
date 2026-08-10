@@ -3,10 +3,10 @@
 use crate::geom::push_quad;
 use crate::road::{road_curve, ROAD_HALF};
 
-/// Half-width of the terrain ribbon on each side of the road. Wide enough
-/// that its outer edge stays behind the fog ramp, so the terrain reads as
-/// intentional instead of ending in a visible cutoff.
-const GROUND_HALF_W: f32 = 200.0;
+/// Half-width of the terrain ribbon on each side of the road. Long enough that
+/// its outer edge (foothills ~20m up) sits at the fully-opaque fog distance, so
+/// the terrain reads as a mountain backdrop instead of ending in a cutoff.
+const GROUND_HALF_W: f32 = 600.0;
 use crate::surface::{material_at, SurfaceMaterial};
 use crate::vertex::Vertex3d;
 use crate::world::terrain::{terrain_height, terrain_slope};
@@ -17,7 +17,8 @@ const ASPHALT_BASE: SurfaceMaterial = SurfaceMaterial::AsphaltBase;
 const GRASS: SurfaceMaterial = SurfaceMaterial::Grass;
 
 /// Flat normal for a ground cell from three of its corners, flopped to point
-/// up/outward (toward the road on a cliff wall) so it lights the visible face.
+/// up/outward (toward the road on a mountain face) so it lights the visible
+/// face.
 fn flat_normal(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> [f32; 3] {
     let e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
     let e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
@@ -50,12 +51,12 @@ pub fn build_world_chunk(start_s: f32, chunk_len: f32) -> (Vec<Vertex3d>, Vec<u3
 
     // Local terrain ribbon around the road (per-chunk). The old single
     // full-width quad was too coarse to displace, so the ribbon is re-tessellated
-    // into lateral bands (dense near the road where the hills live, coarse far
-    // out where the fog hides detail). Each vertex sits on the deterministic
-    // terrain_height(s, lateral); each cell gets a flat normal from its corners
-    // and the surface material its slope warrants (grass vs rock). Shared
-    // corners land on identical coordinates between cells, so hills and cliff
-    // walls are seamless within and across chunks.
+    // into lateral bands (dense near the road where the hills and mountains
+    // live, coarse far out where the foothills fade into fog). Each vertex sits
+    // on the deterministic terrain_height(s, lateral); each cell gets a flat
+    // normal from its corners and the surface material its slope warrants
+    // (grass vs rock). Shared corners land on identical coordinates between
+    // cells, so hills and mountain ridges are seamless within and across chunks.
     let ground_color = [0.7, 0.85, 0.6];
     let rock_color = [0.85, 0.85, 0.88];
     let mut lat_edges = vec![0.0f32, 2.0, 4.5, 7.0];
@@ -64,16 +65,16 @@ pub fn build_world_chunk(start_s: f32, chunk_len: f32) -> (Vec<Vertex3d>, Vec<u3
         d += 1.0;
         lat_edges.push(d);
     }
-    while d < 50.0 {
-        d += 3.0;
+    while d < 45.0 {
+        d += 2.0;
         lat_edges.push(d);
     }
-    while d < 100.0 {
+    while d < 120.0 {
         d += 5.0;
         lat_edges.push(d);
     }
     while d < GROUND_HALF_W {
-        d += 10.0;
+        d += 25.0;
         lat_edges.push(d);
     }
     if *lat_edges.last().unwrap() != GROUND_HALF_W {
@@ -302,13 +303,13 @@ mod tests {
             );
         }
         // Terrain is bounded: nothing below the road plane, nothing past the
-        // deterministic ceiling (cliff tops).
+        // deterministic ceiling (mountain crests).
         assert!(min_y >= -0.01, "terrain must not dip below the road plane");
         assert!(
-            max_y <= 25.0 + 0.01,
+            max_y <= crate::world::terrain::MAX_HEIGHT + 0.01,
             "terrain must stay bounded, got max_y={max_y}"
         );
-        // Hills/cliffs are actually present in the chunk.
+        // Hills/mountains are actually present in the chunk.
         assert!(max_y > 1.5, "the terrain must rise off the road");
     }
 
@@ -328,11 +329,11 @@ mod tests {
     }
 
     #[test]
-    fn world_chunk_terrain_bakes_rock_into_cliff_faces() {
-        // Cliff walls are steep enough to cross the rock threshold whenever a
-        // deterministic cliff block is active; scan chunks until one is found
-        // (the world is deterministic, so this is a fixed guarantee, not a
-        // probability).
+    fn world_chunk_terrain_bakes_rock_into_mountain_faces() {
+        // Mountain near/far faces are steep enough to cross the rock threshold
+        // whenever a deterministic ridge block is active; scan chunks until one
+        // is found (the world is deterministic, so this is a fixed guarantee,
+        // not a probability).
         let mut s = 0.0;
         let mut found = false;
         while s < 5200.0 {
@@ -345,7 +346,7 @@ mod tests {
             }
             s += 260.0;
         }
-        assert!(found, "some chunk must contain rock cliff faces");
+        assert!(found, "some chunk must contain rock mountain faces");
     }
 }
 

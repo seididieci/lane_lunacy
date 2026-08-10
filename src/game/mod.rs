@@ -353,7 +353,9 @@ mod tests {
     }
 
     fn pinned_in_red(game: &mut Game) {
-        // Park the vehicle in the danger zone of gear 1 (over-revving).
+        // Park the vehicle in the danger zone of gear 1 (over-revving). The
+        // terrain speed hook only caps the absolute top speed, never a gear's
+        // redline, so the car can over-rev regardless of the local terrain.
         game.vehicle.gear = 1;
         game.vehicle.speed = (redline_speed(1) + redline_speed(2)) / 2.0;
     }

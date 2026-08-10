@@ -49,9 +49,9 @@ impl RoadsideObject for Tree {
         let lateral = p.side * p.lateral;
         let ground_y = terrain_height(p.s, lateral);
         // Trees root on the displaced terrain; a tree whose base would sit on a
-        // cliff wall (steep terrain) or atop a high wall gets culled so trunks
-        // never poke sideways out of a cliff face or float over thin air.
-        if terrain_slope(p.s, lateral) > 0.7 || ground_y > 6.0 {
+        // steep mountain face or high on a ridge gets culled so trunks never
+        // poke sideways out of a slope or float over thin air.
+        if terrain_slope(p.s, lateral) > 0.7 || ground_y > 8.0 {
             return;
         }
         let x = road_curve(p.s) + lateral;

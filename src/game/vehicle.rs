@@ -138,8 +138,11 @@ impl Vehicle {
         }
         self.speed = self.speed.clamp(0.0, speed_limit);
         // Terrain-limited top speed. Ease the car down instead of snapping it
-        // so entering a canyon feels like the engine bogging, not a wall.
-        let terrain_limit = speed_limit * terrain_factor;
+        // so entering a canyon feels like the engine bogging, not a wall. The
+        // terrain caps the car's *absolute* top speed (5th-gear ceiling), NOT
+        // each gear's redline, so revving to the perfect-shift band and red
+        // zone stays possible even in steep canyons.
+        let terrain_limit = GEAR_MAX[5] * terrain_factor;
         if self.speed > terrain_limit {
             self.speed -= (self.speed - terrain_limit).min(TERRAIN_DRAG_DECEL * dt);
         }

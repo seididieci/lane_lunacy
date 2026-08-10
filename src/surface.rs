@@ -16,7 +16,7 @@ pub const MAT_CAR: f32 = 99.0;
 /// Shoulder strip width (metres), mirroring `mesh.rs`'s cross-section.
 const SHOULDER_W: f32 = 0.55;
 /// Off-road terrain steeper than this (rise/m) renders as rock instead of grass.
-pub const ROCK_SLOPE: f32 = 0.8;
+pub const ROCK_SLOPE: f32 = 0.7;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SurfaceMaterial {
@@ -114,7 +114,7 @@ pub fn material_at(distance: f32, offset: f32, slope: f32) -> SurfaceMaterial {
         // Shoulder strips are always asphalt base.
         SurfaceMaterial::AsphaltBase
     } else if slope > ROCK_SLOPE {
-        // Steep off-road terrain (cliff faces, escarpments) reads as rock.
+        // Steep off-road terrain (mountain faces, escarpments) reads as rock.
         SurfaceMaterial::Rock
     } else {
         // Verge and the surrounding ground are grass.
