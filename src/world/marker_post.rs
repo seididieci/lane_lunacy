@@ -78,6 +78,28 @@ mod tests {
     }
 
     #[test]
+    fn marker_posts_tile_cleanly_across_chunk_boundaries() {
+        // Windows anchored at multiples of 260 (the world-chunk cadence) must
+        // share no post and lose none: the post grid is anchored absolutely, so
+        // a boundary can't drop a post that sits inside either window.
+        let a = MARKER_POST.placements(0.0, 260.0);
+        let b = MARKER_POST.placements(260.0, 520.0);
+        assert_eq!(
+            a.len() + b.len(),
+            MARKER_POST.placements(0.0, 520.0).len(),
+            "adjacent windows must tile the post grid exactly"
+        );
+        let full = MARKER_POST.placements(0.0, 520.0);
+        let s_vals: Vec<f32> = full.iter().map(|p| p.s).collect();
+        // The absolute grid is 12 + 18k; 264 (between the two windows) must be
+        // present now that boundaries are anchored on the grid, not the window.
+        assert!(
+            s_vals.iter().any(|s| (s - 264.0).abs() < 1e-4),
+            "the post at s=264 (formerly dropped at the 260m boundary) must exist"
+        );
+    }
+
+    #[test]
     fn marker_posts_are_placed_on_both_sides_with_regular_cadence() {
         let posts = MARKER_POST.placements(0.0, 260.0);
         // Grid: 12 + 18k < 260 → 14 posts, one per side = 28.

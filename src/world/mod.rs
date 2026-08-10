@@ -64,14 +64,14 @@ pub(crate) fn hash01(s: f32) -> f32 {
     ((h & 0x00FF_FFFF) as f32) / 16_777_215.0
 }
 
-/// Grid cadence: the world-`s` values `ceil(start/interval)*interval + offset`
-/// stepped by `interval` while `< end_s`. Faithful to the per-object loops that
-/// predate this helper, including their chunk-boundary behavior (the offset is
-/// applied after the ceil-anchored grid, so boundary windows follow the grid,
-/// not the offset).
+/// Grid cadence: the absolute grid positions `offset + k*interval` that fall in
+/// `[start_s, end_s)`. Anchoring on the absolute grid (not `ceil(start/interval)`
+/// then `+ offset`) keeps every grid position inside a window even when the
+/// window boundaries don't align with the grid — otherwise a non-zero offset
+/// that isn't a multiple of `interval` drops one position at every boundary.
 pub(crate) fn spaced_placements(start_s: f32, end_s: f32, interval: f32, offset: f32) -> Vec<f32> {
     let mut out = Vec::new();
-    let mut s = (start_s / interval).ceil() * interval + offset;
+    let mut s = ((start_s - offset) / interval).ceil() * interval + offset;
     while s < end_s {
         out.push(s);
         s += interval;
