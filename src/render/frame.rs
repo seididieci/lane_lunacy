@@ -170,7 +170,11 @@ pub fn build_frame(
         mist,
     } = state;
 
-    let proj = perspective_vulkan(60.0f32.to_radians(), aspect, 0.1, 600.0);
+    // Speed-based camera: FOV increases with speed, distance decreases for immersion
+    let dynamic_fov = game.dynamic_fov();
+    let dynamic_camera_distance = game.dynamic_camera_distance();
+
+    let proj = perspective_vulkan(dynamic_fov, aspect, 0.1, 600.0);
 
     // Day/night lighting: the sun sweeps through the day, giving way to faint
     // moonlight at night. The palettes also mirror the weather cover so the fog
@@ -190,13 +194,15 @@ pub fn build_frame(
     let wet_fac = game.rain_intensity();
     let night_fac = lights.night_fac;
 
-    let car_pos = Vec3::new(game.player_world_x(), 0.0, game.player_world_z());
+    let player_pos = game.player_world();
+    let car_pos = Vec3::new(player_pos.0, player_pos.1, player_pos.2);
     let dt_secs = dt.as_secs_f32().min(0.05);
     *sky_time += dt_secs;
     let diff = game.vehicle.heading - *camera_heading;
     *camera_heading += diff * (dt_secs * 3.0).min(1.0);
     let cam_forward = Vec3::new(camera_heading.sin(), 0.0, -camera_heading.cos());
-    let eye = car_pos - cam_forward * 8.0 + Vec3::new(0.0, 4.0, 0.0);
+    // Camera follows the player horizontally but stays at fixed vertical offset for stability
+    let eye = car_pos - cam_forward * dynamic_camera_distance + Vec3::new(0.0, 4.0, 0.0);
     let look_at = car_pos + cam_forward * 4.0 + Vec3::new(0.0, 3.6, 0.0);
     let cam = Camera {
         eye,

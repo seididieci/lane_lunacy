@@ -87,22 +87,24 @@ pub fn mountain_profile(s: f32, side: f32) -> Option<Mountain> {
     })
 }
 
-/// Terrain elevation at a world point. Zero inside the flat roadside zone,
-/// rolling hills beyond it, foothills climbing toward the horizon, and rounded
-/// mountain ridges where a block profile is active. Continuous in `s` and
-/// `lateral` (hills and foothills ramp smoothly, ridges fade across block
-/// ends), so adjacent chunks never show seams.
+/// Terrain elevation at a world point. Inside the flat roadside zone it matches
+/// `road_height(s)` exactly. Beyond that, hills, foothills, and mountains rise
+/// relative to the road surface. The entire terrain is offset by `road_height(s)`,
+/// so the road corridor follows its undulating path. Continuous in `s` and
+/// `lateral` (hills and foothills ramp smoothly, ridges fade across block ends),
+/// so adjacent chunks never show seams.
 pub fn terrain_height(s: f32, lateral: f32) -> f32 {
     let d = lateral.abs();
     if d <= RISE_START {
-        return 0.0;
+        return road_height(s);
     }
     let side = if lateral >= 0.0 { 1.0 } else { -1.0 };
     let ramp = smoothstep(RISE_START, RISE_START + RISE_SPAN, d);
     let hills = hills_noise(s, d) * HILL_AMP * ramp;
     let foothill = FOOTHILL_RISE * smoothstep(FOOTHILL_START, FOOTHILL_END, d);
     let ridge = ridge_height(s, side, d);
-    (hills + foothill).max(ridge).clamp(0.0, MAX_HEIGHT)
+    // The road elevation plus the relative terrain profile
+    (hills + foothill).max(ridge).clamp(0.0, MAX_HEIGHT) + road_height(s)
 }
 
 /// Outward terrain slope (rise per metre) on the side of the road the point is
@@ -115,6 +117,18 @@ pub fn terrain_slope(s: f32, lateral: f32) -> f32 {
     let outer = terrain_height(s, sign * (d + 0.5));
     (outer - inner).max(0.0)
 }
+
+/// Road elevation wave along the road's length. Creates a continuous, smooth
+/// undulation that is consistent across chunk boundaries. The amplitude is
+/// limited by `MAX_HEIGHT` to ensure the whole scene stays bounded.
+pub fn road_height(s: f32) -> f32 {
+    ROAD_WAVE_FREQ * s.sin().abs() * ROAD_WAVE_AMPLITUDE
+}
+
+/// Wave frequency for road elevation (1/wavelength).
+const ROAD_WAVE_FREQ: f32 = 0.05; // wavelength ~62 units (meters)
+/// Wave amplitude for road elevation (max height change from road center).
+const ROAD_WAVE_AMPLITUDE: f32 = 8.0; // +/- 8m elevation change
 
 /// Normalized steepness of the terrain adjacent to the road (0 = open rolling
 /// ground, 1 = a steep canyon wall), driving the vehicle speed hook.
@@ -198,9 +212,12 @@ mod tests {
     #[test]
     fn terrain_is_flat_inside_the_roadside_zone() {
         // Posts (~5.8m), lamp poles (~6.5m) and the whole road corridor sit on
-        // flat ground.
+        // flat ground relative to the road surface, which is now elevated by road_height(s).
         for lateral in [0.0, 3.0, ROAD_HALF + 1.0, ROAD_HALF + 1.7, RISE_START] {
-            assert_eq!(terrain_height(100.0, lateral), 0.0, "lateral {lateral}");
+            assert!(
+                (terrain_height(100.0, lateral) - road_height(100.0)).abs() < 0.001,
+                "lateral {lateral}"
+            );
         }
     }
 

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 
 use crate::input::Input;
-use crate::road::{road_tangent, CAR_HALF_W, ROAD_HALF};
+use crate::render::WORLD_CHUNK_LEN;
+use crate::road::{road_curve, road_tangent, CAR_HALF_W, ROAD_HALF};
 
 pub struct Vehicle {
     pub distance: f32,
@@ -10,6 +11,8 @@ pub struct Vehicle {
     pub steer: f32,
     pub gear: u32,
     pub heading: f32,
+    /// Vehicle altitude (y position), derived from road_height(distance).
+    pub height: f32,
     /// Remaining seconds of perfect-shift acceleration boost.
     pub boost: f32,
     /// Whether the player was holding throttle this frame (drives launch dust).
@@ -31,6 +34,7 @@ impl Vehicle {
             steer: 0.0,
             gear: 1,
             heading: 0.0,
+            height: 0.0,
             boost: 0.0,
             throttle: false,
         }
@@ -43,11 +47,19 @@ impl Vehicle {
         self.steer = 0.0;
         self.gear = 1;
         self.heading = 0.0;
+        self.height = 0.0;
         self.boost = 0.0;
         self.throttle = false;
     }
 
-    /// RPM at the current speed and gear. Idles at standstill, reaches
+    /// World position (x, y, z) of the vehicle.
+    pub fn world_position(&self) -> (f32, f32, f32) {
+        let x = road_curve(self.distance) + self.offset;
+        let z = -self.distance;
+        (x, self.height, z)
+    }
+
+    /// Normalized revs at which the danger zone begins (frac >= this => heat builds).
     /// `REDLINE_RPM` at `redline_speed(gear)`.
     pub fn rpm(&self) -> f32 {
         let frac = self.rpm_frac();
@@ -105,6 +117,8 @@ impl Vehicle {
 
         self.distance += travel * cos_h;
         self.offset += travel * (sin_h - tan * cos_h);
+        // Keep the car on the road surface by updating height with road_height
+        self.height = crate::world::terrain::road_height(self.distance);
         self.offset = self
             .offset
             .clamp(-(ROAD_HALF - CAR_HALF_W), ROAD_HALF - CAR_HALF_W);

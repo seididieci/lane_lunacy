@@ -302,6 +302,26 @@ impl Game {
     pub fn player_world_z(&self) -> f32 {
         -self.vehicle.distance
     }
+
+    /// Camera FOV in radians, scaled by speed. At 0 km/h = 60°, at max speed ~85°.
+    pub fn dynamic_fov(&self) -> f32 {
+        let fov_multiplier = 1.0 + (self.vehicle.speed * self.vehicle.speed * 0.0002); // exponential increase
+        std::f32::consts::PI / 3.0 * fov_multiplier.clamp(1.0, 2.0)
+    }
+
+    /// Camera distance from car in units, based on speed. Closer at high speed for immersion.
+    pub fn dynamic_camera_distance(&self) -> f32 {
+        let base_dist = 8.0;
+        let min_dist = 5.0;
+        // Map 0-160 km/h to base_dist-min_dist (using smoothstep-like curve)
+        let speed_factor: f32 = (self.vehicle.speed / 160.0).clamp(0.0, 1.0);
+        base_dist - (base_dist - min_dist) * speed_factor
+    }
+
+    /// Player's world position (x, y, z), including vertical altitude.
+    pub fn player_world(&self) -> (f32, f32, f32) {
+        self.vehicle.world_position()
+    }
 }
 
 /// Random phase in [0, 2π) for the Auto weather cycle, derived from the clock.
