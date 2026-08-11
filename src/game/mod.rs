@@ -303,21 +303,21 @@ impl Game {
         -self.vehicle.distance
     }
 
-    /// Camera FOV in radians, scaled by speed for subtle immersion. At 0 km/h = 60°, at max speed ~64°.
+    /// Camera FOV in radians, scaled by speed for gradual immersion. At 0 km/h = 60°, at max speed ~68°.
     pub fn dynamic_fov(&self) -> f32 {
-        // Gentle linear increase: +1° per 10 km/h, capped at 64° (max)
+        // Smooth linear increase: +1° per 10 km/h, capped at 68° (max)
         let base_fov = std::f32::consts::PI / 3.0; // 60°
-        let speed_boost = (self.vehicle.speed / 100.0).min(0.1); // 0 to 0.1 at max 100 km/h
-        base_fov + speed_boost * std::f32::consts::PI / 18.0 // +4° total
+        let speed_boost = (self.vehicle.speed / 100.0).min(1.0); // 0 to 1 at max 100 km/h
+        base_fov + speed_boost * std::f32::consts::PI / 9.0 // +8° total
     }
 
-    /// Camera distance from car in units, based on speed. Closer at high speed for immersion.
+    /// Camera distance from car in units, based on speed. Farther back at high speed for immersion.
     pub fn dynamic_camera_distance(&self) -> f32 {
         let base_dist = 8.0;
-        let min_dist = 5.0;
-        // Map 0-160 km/h to base_dist-min_dist (using smoothstep-like curve)
-        let speed_factor: f32 = (self.vehicle.speed / 160.0).clamp(0.0, 1.0);
-        base_dist - (base_dist - min_dist) * speed_factor
+        let max_dist = 12.0;
+        // Smooth linear increase from 8 to 12 units as speed goes from 0 to 100 km/h
+        let speed_factor = (self.vehicle.speed / 100.0).min(1.0);
+        base_dist + speed_factor * (max_dist - base_dist)
     }
 
     /// Player's world position (x, y, z), including vertical altitude.
