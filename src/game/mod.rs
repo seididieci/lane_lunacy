@@ -303,10 +303,12 @@ impl Game {
         -self.vehicle.distance
     }
 
-    /// Camera FOV in radians, scaled by speed. At 0 km/h = 60°, at max speed ~85°.
+    /// Camera FOV in radians, scaled by speed for subtle immersion. At 0 km/h = 60°, at max speed ~64°.
     pub fn dynamic_fov(&self) -> f32 {
-        let fov_multiplier = 1.0 + (self.vehicle.speed * self.vehicle.speed * 0.0002); // exponential increase
-        std::f32::consts::PI / 3.0 * fov_multiplier.clamp(1.0, 2.0)
+        // Gentle linear increase: +1° per 10 km/h, capped at 64° (max)
+        let base_fov = std::f32::consts::PI / 3.0; // 60°
+        let speed_boost = (self.vehicle.speed / 100.0).min(0.1); // 0 to 0.1 at max 100 km/h
+        base_fov + speed_boost * std::f32::consts::PI / 18.0 // +4° total
     }
 
     /// Camera distance from car in units, based on speed. Closer at high speed for immersion.
