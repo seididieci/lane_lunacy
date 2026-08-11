@@ -264,8 +264,11 @@ impl App {
             .min(self.gpu_names.len().saturating_sub(1))
             != self.active_gpu_index;
         self.switch_gpu();
-        if !gpu_changed {
-            if let Some(renderer) = &mut self.renderer {
+        if let Some(renderer) = &mut self.renderer {
+            // Applied even on a GPU switch: a fresh backend starts at the Medium
+            // default, so it must be brought in line with the staged value.
+            renderer.set_terrain_detail(self.menu.settings.terrain_detail);
+            if !gpu_changed {
                 renderer.set_aa(aa_samples(self.supported_aa[self.menu.settings.antialias]));
             }
         }
@@ -403,6 +406,7 @@ impl App {
         match self.menu.settings_cursor {
             SettingsRow::Gpu => self.menu.cycle_gpu(delta, device_count),
             SettingsRow::Antialias => self.menu.cycle_antialias(delta, &self.supported_aa),
+            SettingsRow::TerrainDetail => self.menu.cycle_terrain_detail(delta),
             SettingsRow::Fxaa
             | SettingsRow::Bloom
             | SettingsRow::Vignette

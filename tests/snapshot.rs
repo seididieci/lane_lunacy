@@ -233,6 +233,7 @@ fn gpu_probes_match_golden_baselines() {
             1280,
             720,
             false,
+            lane_lunacy::mesh::TerrainDetail::Medium,
         );
         let cpu = compute_cpu(&game, &output.frame);
         let gpu = compute_gpu(

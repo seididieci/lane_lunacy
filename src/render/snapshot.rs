@@ -28,6 +28,7 @@ use crate::debug::DebugStats;
 use crate::font::FontAtlas;
 use crate::game::Game;
 use crate::hud::build_hud_tree;
+use crate::mesh::TerrainDetail;
 use crate::render::frame::Frame;
 use crate::render::frame_builder::FrameBuilder;
 use crate::render::record::record_frame;
@@ -57,6 +58,7 @@ pub fn render_snapshot(
     width: u32,
     height: u32,
     debug: bool,
+    terrain_detail: TerrainDetail,
 ) -> SnapshotOutput {
     let render_pass = vulkano::single_pass_renderpass!(
         device.clone(),
@@ -142,6 +144,7 @@ pub fn render_snapshot(
     let hud_verts = Ui::new().build(&mut hud_root, font_atlas, aspect, 0.0);
 
     let mut frame_builder = FrameBuilder::with_seed(seed);
+    frame_builder.set_terrain_detail(terrain_detail);
     let frame = frame_builder.build(&scene, game, Duration::ZERO, aspect, hud_verts);
 
     let command_buffer = record_frame(

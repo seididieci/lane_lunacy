@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 use crate::geom::push_quad;
-use crate::road::{road_curve, ROAD_HALF};
+use crate::road::{road_curve, road_tangent, ROAD_HALF};
 
 /// Half-width of the terrain ribbon on each side of the road. Long enough that
 /// its outer edge (foothills ~20m up) sits at the fully-opaque fog distance, so
@@ -16,20 +16,100 @@ use crate::world::terrain::{terrain_height, terrain_slope};
 const ASPHALT_BASE: SurfaceMaterial = SurfaceMaterial::AsphaltBase;
 const GRASS: SurfaceMaterial = SurfaceMaterial::Grass;
 
-/// Flat normal for a ground cell from three of its corners, flopped to point
-/// up/outward (toward the road on a mountain face) so it lights the visible
-/// face.
-fn flat_normal(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> [f32; 3] {
-    let e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-    let e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-    let mut n = [
-        e1[1] * e2[2] - e1[2] * e2[1],
-        e1[2] * e2[0] - e1[0] * e2[2],
-        e1[0] * e2[1] - e1[1] * e2[0],
-    ];
-    if n[1] < 0.0 {
-        n = [-n[0], -n[1], -n[2]];
+/// User-facing terrain tessellation detail. `Low` is the historic coarse mesh
+/// (cheapest rebuild, smallest GPU cost), `Medium` the default balance, and
+/// `High` the dense option for rounder hills at a higher rebuild/vertex cost.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerrainDetail {
+    Low,
+    Medium,
+    High,
+}
+
+impl TerrainDetail {
+    /// Short label for the settings menu row.
+    pub fn label(self) -> &'static str {
+        match self {
+            TerrainDetail::Low => "LOW",
+            TerrainDetail::Medium => "MED",
+            TerrainDetail::High => "HIGH",
+        }
     }
+
+    /// Parses a `--terrain-detail` CLI value (case-insensitive).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "low" => Some(TerrainDetail::Low),
+            "med" | "medium" => Some(TerrainDetail::Medium),
+            "high" => Some(TerrainDetail::High),
+            _ => None,
+        }
+    }
+
+    /// Along-road cell size (metres) at this detail.
+    fn step(self) -> f32 {
+        match self {
+            TerrainDetail::Low => 2.0,
+            TerrainDetail::Medium => 1.0,
+            TerrainDetail::High => 0.75,
+        }
+    }
+
+    /// Lateral ribbon edge positions (metres from the road center) at this
+    /// detail: dense near the road where the hills and mountains live, coarser
+    /// far out where the foothills fade into fog.
+    fn lat_edges(self) -> Vec<f32> {
+        let mut edges = match self {
+            TerrainDetail::Low => vec![0.0, 2.0, 4.5, 7.0],
+            TerrainDetail::Medium => vec![0.0, 1.5, 3.0, 4.5, 6.0, 7.0],
+            TerrainDetail::High => vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
+        };
+        let segs: &[(f32, f32, f32)] = match self {
+            TerrainDetail::Low => &[
+                (7.0, 1.0, 20.0),
+                (20.0, 2.0, 45.0),
+                (45.0, 5.0, 120.0),
+                (120.0, 25.0, 600.0),
+            ],
+            TerrainDetail::Medium => &[
+                (7.0, 1.0, 20.0),
+                (20.0, 1.5, 45.0),
+                (45.0, 2.5, 120.0),
+                (120.0, 10.0, 300.0),
+                (300.0, 25.0, 600.0),
+            ],
+            TerrainDetail::High => &[
+                (7.0, 0.75, 20.0),
+                (20.0, 1.5, 45.0),
+                (45.0, 2.0, 120.0),
+                (120.0, 5.0, 300.0),
+                (300.0, 12.5, 600.0),
+            ],
+        };
+        for &(mut d, delta, end) in segs {
+            while d < end {
+                d += delta;
+                edges.push(d);
+            }
+        }
+        if *edges.last().unwrap() != GROUND_HALF_W {
+            edges.push(GROUND_HALF_W);
+        }
+        edges
+    }
+}
+
+/// Smooth per-vertex normal for the terrain heightfield at `(s, lateral)`,
+/// derived from central differences of `terrain_height` and the road tangent.
+/// Points up; on a slope it tilts downhill so the visible face lights smoothly
+/// instead of reading as a flat facet.
+fn terrain_normal(s: f32, lateral: f32) -> [f32; 3] {
+    const E: f32 = 0.5;
+    let hs = (terrain_height(s + E, lateral) - terrain_height(s - E, lateral)) / (2.0 * E);
+    let hl = (terrain_height(s, lateral + E) - terrain_height(s, lateral - E)) / (2.0 * E);
+    // Surface tangents: dP/ds = (road_tangent(s), hs, -1), dP/dl = (1, hl, 0).
+    // The up-facing normal is -(dP/ds x dP/dl) = (-hl, 1, hs - road_tangent(s)*hl).
+    let n = [-hl, 1.0, hs - road_tangent(s) * hl];
     let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
     if len < 1e-6 {
         [0.0, 1.0, 0.0]
@@ -38,48 +118,59 @@ fn flat_normal(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> [f32; 3] {
     }
 }
 
+/// Pushes one terrain cell as two triangles. Each corner gets its own smooth
+/// normal (recovered from its world position via `terrain_normal`), so hills
+/// read as rounded slopes rather than flat-shaded facets.
+#[allow(clippy::too_many_arguments)]
+fn push_terrain_cell(
+    v: &mut Vec<Vertex3d>,
+    i: &mut Vec<u32>,
+    a: [f32; 3],
+    b: [f32; 3],
+    c: [f32; 3],
+    d: [f32; 3],
+    col: [f32; 3],
+    material: f32,
+    scale: f32,
+) {
+    let base = v.len() as u32;
+    let uv = |p: [f32; 3]| [p[0] * scale, p[2] * scale];
+    for p in [a, b, c, d] {
+        v.push(Vertex3d {
+            position: p,
+            normal: terrain_normal(-p[2], p[0] - road_curve(-p[2])),
+            color: col,
+            tex_coord: uv(p),
+            material,
+        });
+    }
+    i.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+}
+
 /// Builds one chunk of the world mesh: the flat ground ribbon and the road
 /// (asphalt, shoulders, verges, edge + center lines), then the roadside objects
 /// (marker posts, street lamps, trees) via `world::build_world_scenery`. Each
 /// object type owns its deterministic placement and geometry in `src/world/`.
-pub fn build_world_chunk(start_s: f32, chunk_len: f32) -> (Vec<Vertex3d>, Vec<u32>) {
+pub fn build_world_chunk(start_s: f32, chunk_len: f32, detail: TerrainDetail) -> (Vec<Vertex3d>, Vec<u32>) {
     let mut v = Vec::new();
     let mut i = Vec::new();
     let half_w = ROAD_HALF;
     let end_s = start_s + chunk_len;
-    let step = 2.0;
+    let step = detail.step();
 
     // Local terrain ribbon around the road (per-chunk). The old single
     // full-width quad was too coarse to displace, so the ribbon is re-tessellated
     // into lateral bands (dense near the road where the hills and mountains
     // live, coarse far out where the foothills fade into fog). Each vertex sits
-    // on the deterministic terrain_height(s, lateral); each cell gets a flat
-    // normal from its corners and the surface material its slope warrants
-    // (grass vs rock). Shared corners land on identical coordinates between
-    // cells, so hills and mountain ridges are seamless within and across chunks.
+    // on the deterministic terrain_height(s, lateral); each cell gets the
+    // surface material its slope warrants (grass vs rock). Shared corners land
+    // on identical coordinates between cells, so hills and mountain ridges are
+    // seamless within and across chunks. The ribbon density follows the
+    // `TerrainDetail` setting so players can trade smoothness against rebuild
+    // cost.
     let ground_color = [0.7, 0.85, 0.6];
     let rock_color = [0.85, 0.85, 0.88];
-    let mut lat_edges = vec![0.0f32, 2.0, 4.5, 7.0];
-    let mut d = 7.0;
-    while d < 20.0 {
-        d += 1.0;
-        lat_edges.push(d);
-    }
-    while d < 45.0 {
-        d += 2.0;
-        lat_edges.push(d);
-    }
-    while d < 120.0 {
-        d += 5.0;
-        lat_edges.push(d);
-    }
-    while d < GROUND_HALF_W {
-        d += 25.0;
-        lat_edges.push(d);
-    }
-    if *lat_edges.last().unwrap() != GROUND_HALF_W {
-        lat_edges.push(GROUND_HALF_W);
-    }
+    let lat_edges = detail.lat_edges();
 
     let mut s_ground = start_s;
     while s_ground < end_s {
@@ -94,8 +185,14 @@ pub fn build_world_chunk(start_s: f32, chunk_len: f32) -> (Vec<Vertex3d>, Vec<u3
             let l0 = w[0];
             let l1 = w[1];
             for side in [-1.0, 1.0] {
-                let la0 = l0 * side;
-                let la1 = l1 * side;
+                // Ascending lateral offset on both sides so mirrored cells keep
+                // the same front-facing winding; otherwise CullMode::Back culls
+                // the left terrain and the golden clear color shows through.
+                let (la0, la1) = if side >= 0.0 {
+                    (l0 * side, l1 * side)
+                } else {
+                    (l1 * side, l0 * side)
+                };
                 let ca = [x0 + la0, terrain_height(s0, la0), z0];
                 let cb = [x0 + la1, terrain_height(s0, la1), z0];
                 let cc = [x1 + la1, terrain_height(s1, la1), z1];
@@ -107,14 +204,13 @@ pub fn build_world_chunk(start_s: f32, chunk_len: f32) -> (Vec<Vertex3d>, Vec<u3
                 } else {
                     ground_color
                 };
-                push_quad(
+                push_terrain_cell(
                     &mut v,
                     &mut i,
                     ca,
                     cb,
                     cc,
                     cd,
-                    flat_normal(ca, cb, cc),
                     col,
                     m.atlas_slot(),
                     m.uv_scale(),
@@ -292,7 +388,7 @@ mod tests {
 
     #[test]
     fn world_chunk_has_open_ground_and_clear_road_corridor() {
-        let (v, _) = build_world_chunk(0.0, 260.0);
+        let (v, _) = build_world_chunk(0.0, 260.0, TerrainDetail::Medium);
         let mut min_x = f32::INFINITY;
         let mut max_x = f32::NEG_INFINITY;
         let mut max_y = 0.0f32;
@@ -337,7 +433,7 @@ mod tests {
 
     #[test]
     fn world_chunk_builds_roadside_scenery() {
-        let (v, _) = build_world_chunk(0.0, 260.0);
+        let (v, _) = build_world_chunk(0.0, 260.0, TerrainDetail::Medium);
         let trees = v
             .iter()
             .filter(|vert| vert.material >= 4.0 && vert.material < 5.0)
@@ -351,6 +447,19 @@ mod tests {
     }
 
     #[test]
+    fn terrain_detail_scales_triangle_density() {
+        let (_, il) = build_world_chunk(0.0, 260.0, TerrainDetail::Low);
+        let (_, im) = build_world_chunk(0.0, 260.0, TerrainDetail::Medium);
+        let (_, ih) = build_world_chunk(0.0, 260.0, TerrainDetail::High);
+        let tris = |i: &[u32]| i.len() / 3;
+        assert!(tris(&il) < tris(&im), "Medium must densify over Low");
+        assert!(tris(&im) < tris(&ih), "High must densify over Medium");
+        // Plausible magnitudes for the 600 m ribbon at the advertised steps.
+        assert!(tris(&il) > 10_000, "Low still tessellates the ribbon");
+        assert!(tris(&ih) < 400_000, "High stays within a rebuild budget");
+    }
+
+    #[test]
     fn world_chunk_terrain_bakes_rock_into_mountain_faces() {
         // Mountain near/far faces are steep enough to cross the rock threshold
         // whenever a deterministic ridge block is active; scan chunks until one
@@ -359,7 +468,7 @@ mod tests {
         let mut s = 0.0;
         let mut found = false;
         while s < 5200.0 {
-            let (v, _) = build_world_chunk(s, 260.0);
+            let (v, _) = build_world_chunk(s, 260.0, TerrainDetail::Medium);
             if v.iter()
                 .any(|vert| vert.material == SurfaceMaterial::Rock.atlas_slot())
             {

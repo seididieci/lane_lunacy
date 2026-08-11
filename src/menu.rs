@@ -4,6 +4,7 @@ use crate::font::{
     ICON_CHIP, ICON_LOGOUT, ICON_PLAY, ICON_SPEEDOMETER, ICON_STEERING, ICON_WEATHER,
 };
 use crate::game::{DifficultyLevel, Weather};
+use crate::mesh::TerrainDetail;
 use crate::ui::{Align, Button, Column, HAlign, Insets, Node, Overlay, Panel, Spacer, Text};
 
 const BACKDROP: [f32; 4] = [0.02, 0.03, 0.05, 0.55];
@@ -70,6 +71,7 @@ impl MenuRow {
 pub enum SettingsRow {
     Gpu,
     Antialias,
+    TerrainDetail,
     Fxaa,
     Bloom,
     Vignette,
@@ -86,7 +88,8 @@ impl SettingsRow {
         match self {
             SettingsRow::Gpu => SettingsRow::Gpu,
             SettingsRow::Antialias => SettingsRow::Gpu,
-            SettingsRow::Fxaa => SettingsRow::Antialias,
+            SettingsRow::TerrainDetail => SettingsRow::Antialias,
+            SettingsRow::Fxaa => SettingsRow::TerrainDetail,
             SettingsRow::Bloom => SettingsRow::Fxaa,
             SettingsRow::Vignette => SettingsRow::Bloom,
             SettingsRow::Grain => SettingsRow::Vignette,
@@ -101,7 +104,8 @@ impl SettingsRow {
     pub fn next(self) -> Self {
         match self {
             SettingsRow::Gpu => SettingsRow::Antialias,
-            SettingsRow::Antialias => SettingsRow::Fxaa,
+            SettingsRow::Antialias => SettingsRow::TerrainDetail,
+            SettingsRow::TerrainDetail => SettingsRow::Fxaa,
             SettingsRow::Fxaa => SettingsRow::Bloom,
             SettingsRow::Bloom => SettingsRow::Vignette,
             SettingsRow::Vignette => SettingsRow::Grain,
@@ -144,6 +148,7 @@ pub struct SettingsState {
     pub weather: Weather,
     /// Index into the capability-gated `AaMode` list.
     pub antialias: usize,
+    pub terrain_detail: TerrainDetail,
     pub fxaa: bool,
     pub bloom: bool,
     pub vignette: bool,
@@ -159,6 +164,7 @@ impl Default for SettingsState {
             difficulty: DifficultyLevel::EasyArcade,
             weather: Weather::Auto,
             antialias: 0,
+            terrain_detail: TerrainDetail::Medium,
             fxaa: false,
             bloom: false,
             vignette: false,
@@ -229,6 +235,20 @@ impl MenuState {
             .unwrap_or(0);
         let next = (cur as i32 + delta).rem_euclid(levels.len() as i32) as usize;
         self.settings.difficulty = levels[next];
+    }
+
+    pub fn cycle_terrain_detail(&mut self, delta: i32) {
+        let levels = [
+            TerrainDetail::Low,
+            TerrainDetail::Medium,
+            TerrainDetail::High,
+        ];
+        let cur = levels
+            .iter()
+            .position(|l| *l == self.settings.terrain_detail)
+            .unwrap_or(1);
+        let next = (cur as i32 + delta).rem_euclid(levels.len() as i32) as usize;
+        self.settings.terrain_detail = levels[next];
     }
 
     pub fn cycle_weather(&mut self, delta: i32) {
@@ -400,6 +420,7 @@ fn build_settings_tree(
         .map(|m| m.label())
         .unwrap_or("OFF");
     let aa_t = format!("ANTIALIASING  {}", aa_label);
+    let terrain_t = format!("TERRAIN DETAIL  {}", s.terrain_detail.label());
     let foot = "UP/DOWN MOVE, LEFT/RIGHT CHANGE, ENTER CONFIRM";
     let apply_color = if dirty { ROW_COLOR } else { DIM_COLOR };
 
@@ -411,11 +432,15 @@ fn build_settings_tree(
                 Button::new(aa_t, ROW_EM, ROW_COLOR, 11).focused(focused(SettingsRow::Antialias)),
             ),
             Node::new(
-                Button::new(format!("FXAA  {}", on_off(s.fxaa)), ROW_EM, ROW_COLOR, 12)
+                Button::new(terrain_t, ROW_EM, ROW_COLOR, 12)
+                    .focused(focused(SettingsRow::TerrainDetail)),
+            ),
+            Node::new(
+                Button::new(format!("FXAA  {}", on_off(s.fxaa)), ROW_EM, ROW_COLOR, 13)
                     .focused(focused(SettingsRow::Fxaa)),
             ),
             Node::new(
-                Button::new(format!("BLOOM  {}", on_off(s.bloom)), ROW_EM, ROW_COLOR, 13)
+                Button::new(format!("BLOOM  {}", on_off(s.bloom)), ROW_EM, ROW_COLOR, 14)
                     .focused(focused(SettingsRow::Bloom)),
             ),
             Node::new(
@@ -423,12 +448,12 @@ fn build_settings_tree(
                     format!("VIGNETTE  {}", on_off(s.vignette)),
                     ROW_EM,
                     ROW_COLOR,
-                    14,
+                    15,
                 )
                 .focused(focused(SettingsRow::Vignette)),
             ),
             Node::new(
-                Button::new(format!("GRAIN  {}", on_off(s.grain)), ROW_EM, ROW_COLOR, 15)
+                Button::new(format!("GRAIN  {}", on_off(s.grain)), ROW_EM, ROW_COLOR, 16)
                     .focused(focused(SettingsRow::Grain)),
             ),
             Node::new(
@@ -436,7 +461,7 @@ fn build_settings_tree(
                     format!("SATURATION  {}", on_off(s.saturation)),
                     ROW_EM,
                     ROW_COLOR,
-                    16,
+                    17,
                 )
                 .focused(focused(SettingsRow::Saturation)),
             ),
@@ -445,15 +470,15 @@ fn build_settings_tree(
                     format!("CHROMATIC  {}", on_off(s.chroma)),
                     ROW_EM,
                     ROW_COLOR,
-                    17,
+                    18,
                 )
                 .focused(focused(SettingsRow::ChromaticAberration)),
             ),
             Node::new(
-                Button::new("APPLY", ROW_EM, apply_color, 18).focused(focused(SettingsRow::Apply)),
+                Button::new("APPLY", ROW_EM, apply_color, 19).focused(focused(SettingsRow::Apply)),
             ),
             Node::new(
-                Button::new("BACK", ROW_EM, ROW_COLOR, 19).focused(focused(SettingsRow::Back)),
+                Button::new("BACK", ROW_EM, ROW_COLOR, 20).focused(focused(SettingsRow::Back)),
             ),
         ],
         ROW_GAP,
@@ -535,7 +560,7 @@ mod tests {
         assert!(!verts.is_empty());
 
         // Every settings row must be present and hit-testable on the center line.
-        for id in 10..=19 {
+        for id in 10..=20 {
             assert!(
                 hit_test_id(&root, &ui, id),
                 "settings row id {id} must be hit-testable"
@@ -622,6 +647,20 @@ mod tests {
         menu.cycle_antialias(1, &supported);
         assert_eq!(menu.settings.antialias, 0);
         assert_eq!(supported[menu.settings.antialias], AaMode::Off);
+    }
+
+    #[test]
+    fn terrain_detail_cycles_through_all_levels() {
+        let mut menu = MenuState::new(0, Weather::Auto);
+        assert_eq!(menu.settings.terrain_detail, TerrainDetail::Medium);
+        menu.cycle_terrain_detail(1);
+        assert_eq!(menu.settings.terrain_detail, TerrainDetail::High);
+        menu.cycle_terrain_detail(1);
+        assert_eq!(menu.settings.terrain_detail, TerrainDetail::Low);
+        menu.cycle_terrain_detail(1);
+        assert_eq!(menu.settings.terrain_detail, TerrainDetail::Medium);
+        menu.cycle_terrain_detail(-1);
+        assert_eq!(menu.settings.terrain_detail, TerrainDetail::Low);
     }
 
     #[test]

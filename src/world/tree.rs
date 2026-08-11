@@ -148,7 +148,7 @@ mod tests {
 
     #[test]
     fn trees_are_generated_off_the_road_deterministically() {
-        let (v, i) = crate::mesh::build_world_chunk(0.0, 260.0);
+        let (v, i) = crate::mesh::build_world_chunk(0.0, 260.0, crate::mesh::TerrainDetail::Medium);
         let is_tree = |vert: &Vertex3d| vert.material >= TREE_MATERIAL && vert.material < 5.0;
         let foliage: Vec<&Vertex3d> = v.iter().filter(|vert| is_tree(vert)).collect();
         assert!(!foliage.is_empty(), "trees should be generated");
@@ -169,7 +169,7 @@ mod tests {
 
         // Deterministic: a second identical build produces identical tree
         // placement (Vertex3d isn't PartialEq, so compare the tree signatures).
-        let (v2, _) = crate::mesh::build_world_chunk(0.0, 260.0);
+        let (v2, _) = crate::mesh::build_world_chunk(0.0, 260.0, crate::mesh::TerrainDetail::Medium);
         let sig = |verts: &[Vertex3d]| -> Vec<[f32; 3]> {
             let mut out: Vec<[f32; 3]> = verts
                 .iter()

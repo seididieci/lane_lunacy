@@ -16,7 +16,7 @@ use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
 use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter};
 
 use crate::game::Game;
-use crate::mesh::build_world_chunk;
+use crate::mesh::{build_world_chunk, TerrainDetail};
 use crate::render::frame::{build_frame, Frame, FrameState};
 use crate::render::scene::SceneResources;
 use crate::render::{WORLD_CHUNKS_AHEAD, WORLD_CHUNKS_BEHIND, WORLD_CHUNK_LEN};
@@ -45,6 +45,9 @@ pub struct FrameBuilder {
     world_chunks: Vec<WorldChunk>,
     world_chunk_indices: Vec<i32>,
     world_anchor_chunk: i32,
+    /// Terrain ribbon density used to build the cached chunks. Changing it
+    /// invalidates the whole cache so the next frame rebuilds every chunk.
+    terrain_detail: TerrainDetail,
     stats: WorldStats,
 }
 
@@ -63,6 +66,7 @@ impl FrameBuilder {
             world_chunks: Vec::new(),
             world_chunk_indices: Vec::new(),
             world_anchor_chunk: i32::MIN,
+            terrain_detail: TerrainDetail::Medium,
             stats: WorldStats::default(),
         }
     }
@@ -75,6 +79,7 @@ impl FrameBuilder {
             world_chunks: Vec::new(),
             world_chunk_indices: Vec::new(),
             world_anchor_chunk: i32::MIN,
+            terrain_detail: TerrainDetail::Medium,
             stats: WorldStats::default(),
         }
     }
@@ -119,6 +124,20 @@ impl FrameBuilder {
         self.stats
     }
 
+    /// Changes the terrain ribbon density. Invalidates the cached chunks so the
+    /// next frame rebuilds the whole window at the new detail (a one-frame
+    /// hitch, like an AA switch). Returns whether the detail actually changed.
+    pub fn set_terrain_detail(&mut self, detail: TerrainDetail) -> bool {
+        if detail == self.terrain_detail {
+            return false;
+        }
+        self.terrain_detail = detail;
+        self.world_chunks.clear();
+        self.world_chunk_indices.clear();
+        self.world_anchor_chunk = i32::MIN;
+        true
+    }
+
     fn ensure_world_chunks(&mut self, scene: &SceneResources, player_distance: f32) {
         let current_chunk = (player_distance / WORLD_CHUNK_LEN).floor() as i32;
         if current_chunk == self.world_anchor_chunk {
@@ -145,7 +164,11 @@ impl FrameBuilder {
             kept_idx.push(self.world_chunk_indices[slot]);
         }
         for new_idx in to_build {
-            let (wv, wi) = build_world_chunk(new_idx as f32 * WORLD_CHUNK_LEN, WORLD_CHUNK_LEN);
+            let (wv, wi) = build_world_chunk(
+                new_idx as f32 * WORLD_CHUNK_LEN,
+                WORLD_CHUNK_LEN,
+                self.terrain_detail,
+            );
             let world_vertices = Buffer::from_iter(
                 scene.memory_allocator.clone(),
                 BufferCreateInfo {

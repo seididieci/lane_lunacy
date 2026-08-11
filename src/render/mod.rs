@@ -237,6 +237,15 @@ impl Renderer {
         );
     }
 
+    /// Changes the terrain ribbon density. The cached world chunks are
+    /// invalidated and rebuilt at the new detail on the next frame. Cheap when
+    /// `detail` already equals the current setting.
+    pub fn set_terrain_detail(&mut self, detail: crate::mesh::TerrainDetail) {
+        if self.frame_builder.set_terrain_detail(detail) {
+            self.wait_idle();
+        }
+    }
+
     fn recreate_swapchain(&mut self) {
         let dims = self.window.inner_size();
         let (new_swapchain, new_images) = self

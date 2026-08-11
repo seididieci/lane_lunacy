@@ -148,7 +148,8 @@ mod tests {
 
     #[test]
     fn chunk_mesh_builds_luminaire_heads_inward_of_the_poles() {
-        let (v, _) = crate::mesh::build_world_chunk(0.0, 260.0);
+        let (v, _) =
+            crate::mesh::build_world_chunk(0.0, 260.0, crate::mesh::TerrainDetail::Medium);
         // Head boxes hang just under the arm (y ≈ 5.30..5.48) and overhang the
         // road edge (lateral ≈ ±(ROAD_HALF + 0.35)), while poles stand at
         // ±LAMP_LATERAL. Check the luminaires exist and sit inward of the poles.

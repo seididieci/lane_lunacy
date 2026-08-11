@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use crate::game::Weather;
+use crate::mesh::TerrainDetail;
 
 /// Options for the headless `--snapshot` mode: render one deterministic frame
 /// offscreen (no window) and write it as a PNG the agent can inspect.
@@ -22,6 +23,8 @@ pub struct SnapshotOptions {
     pub gpu: usize,
     /// Render the F3 debug HUD on top of the scene.
     pub debug: bool,
+    /// Terrain ribbon density used to build the world chunks.
+    pub terrain_detail: TerrainDetail,
 }
 
 /// Which top-level program the CLI selects.
@@ -57,6 +60,7 @@ pub fn parse(args: &[String]) -> RunMode {
     let mut height = 720u32;
     let mut snapshot_debug = false;
     let mut debug = false;
+    let mut terrain_detail = TerrainDetail::Medium;
 
     let mut i = 0;
     while i < args.len() {
@@ -132,6 +136,17 @@ pub fn parse(args: &[String]) -> RunMode {
                 snapshot_debug = true;
                 i += 1;
             }
+            "--terrain-detail" => {
+                if let Some(v) = args.get(i + 1).and_then(|v| TerrainDetail::parse(v)) {
+                    terrain_detail = v;
+                    i += 2;
+                } else {
+                    eprintln!(
+                        "invalid value for --terrain-detail (low|med|high), using default MED"
+                    );
+                    i += 1;
+                }
+            }
             _ => {
                 eprintln!("ignoring unrecognized argument: {arg}");
                 i += 1;
@@ -149,6 +164,7 @@ pub fn parse(args: &[String]) -> RunMode {
             seed: seed.unwrap_or(0),
             gpu,
             debug: snapshot_debug,
+            terrain_detail,
         }),
         None => RunMode::Interactive {
             gpu,
@@ -283,7 +299,25 @@ mod tests {
                 assert_eq!(o.weather, Weather::Auto);
                 assert_eq!(o.gpu, 0);
                 assert!(!o.debug);
+                assert_eq!(o.terrain_detail, TerrainDetail::Medium);
             }
+            _ => panic!("expected snapshot mode"),
+        }
+    }
+
+    #[test]
+    fn snapshot_terrain_detail_flag_is_parsed() {
+        match parse_args(&["--snapshot", "/tmp/f.png", "--terrain-detail", "high"]) {
+            RunMode::Snapshot(o) => assert_eq!(o.terrain_detail, TerrainDetail::High),
+            _ => panic!("expected snapshot mode"),
+        }
+        match parse_args(&["--snapshot", "/tmp/f.png", "--terrain-detail", "low"]) {
+            RunMode::Snapshot(o) => assert_eq!(o.terrain_detail, TerrainDetail::Low),
+            _ => panic!("expected snapshot mode"),
+        }
+        // Invalid value falls back to MED.
+        match parse_args(&["--snapshot", "/tmp/f.png", "--terrain-detail", "bogus"]) {
+            RunMode::Snapshot(o) => assert_eq!(o.terrain_detail, TerrainDetail::Medium),
             _ => panic!("expected snapshot mode"),
         }
     }

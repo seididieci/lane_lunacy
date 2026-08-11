@@ -185,6 +185,8 @@ frame can be rendered **offscreen, without a window or display**:
 # one deterministic frame → PNG (1280x720 unless --size is given)
 cargo run --release -- --snapshot shot.png --size 1280x720 --seed 42 --time 12 --weather clear
 cargo run --release -- --snapshot night.png --size 1280x720 --seed 42 --time 0 --weather rain
+# terrain ribbon density: low|med|high (default MED)
+cargo run --release -- --snapshot rough.png --size 1280x720 --seed 42 --terrain-detail high
 ```
 
 This is the backbone of visual regression checking. Golden baselines (PNG +

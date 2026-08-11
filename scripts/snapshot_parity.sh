@@ -35,7 +35,7 @@ render_scenarios() {
         esac
         echo ">> render $name"
         "$BIN" --snapshot "$out_dir/$name.png" --size "$SIZE" --seed "$SEED" --gpu 0 \
-            "${args[@]}" >"$out_dir/$name.log"
+            --terrain-detail med "${args[@]}" >"$out_dir/$name.log"
     done
 }
 

@@ -130,6 +130,7 @@ pub fn run_snapshot(opts: SnapshotOptions) {
         opts.width,
         opts.height,
         opts.debug,
+        opts.terrain_detail,
     );
 
     // Programmatic eye: derive CPU probes from the frame math and GPU probes
