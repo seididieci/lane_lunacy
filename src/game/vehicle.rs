@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 
 use crate::input::Input;
-use crate::render::WORLD_CHUNK_LEN;
 use crate::road::{road_curve, road_tangent, CAR_HALF_W, ROAD_HALF};
 
 pub struct Vehicle {
@@ -117,8 +116,8 @@ impl Vehicle {
 
         self.distance += travel * cos_h;
         self.offset += travel * (sin_h - tan * cos_h);
-        // Keep the car on the road surface by updating height with road_height
-        self.height = crate::world::terrain::road_height(self.distance);
+        // Keep the car on the road surface by using terrain_height directly
+        self.height = crate::world::terrain::terrain_height(self.distance, 0.0);
         self.offset = self
             .offset
             .clamp(-(ROAD_HALF - CAR_HALF_W), ROAD_HALF - CAR_HALF_W);

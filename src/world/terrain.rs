@@ -87,24 +87,21 @@ pub fn mountain_profile(s: f32, side: f32) -> Option<Mountain> {
     })
 }
 
-/// Terrain elevation at a world point. Inside the flat roadside zone it matches
-/// `road_height(s)` exactly. Beyond that, hills, foothills, and mountains rise
-/// relative to the road surface. The entire terrain is offset by `road_height(s)`,
-/// so the road corridor follows its undulating path. Continuous in `s` and
-/// `lateral` (hills and foothills ramp smoothly, ridges fade across block ends),
-/// so adjacent chunks never show seams.
+/// Terrain elevation at a world point. Inside the flat roadside zone it's at
+/// ground level. Beyond that, hills, foothills, and mountains rise naturally.
+/// The road corridor sits exactly on the terrain surface (ground level), so it
+/// follows hills and valleys naturally, giving a realistic "salita e discesa" feel.
 pub fn terrain_height(s: f32, lateral: f32) -> f32 {
     let d = lateral.abs();
     if d <= RISE_START {
-        return road_height(s);
+        return 0.0;
     }
     let side = if lateral >= 0.0 { 1.0 } else { -1.0 };
     let ramp = smoothstep(RISE_START, RISE_START + RISE_SPAN, d);
     let hills = hills_noise(s, d) * HILL_AMP * ramp;
     let foothill = FOOTHILL_RISE * smoothstep(FOOTHILL_START, FOOTHILL_END, d);
     let ridge = ridge_height(s, side, d);
-    // The road elevation plus the relative terrain profile
-    (hills + foothill).max(ridge).clamp(0.0, MAX_HEIGHT) + road_height(s)
+    (hills + foothill).max(ridge).clamp(0.0, MAX_HEIGHT)
 }
 
 /// Outward terrain slope (rise per metre) on the side of the road the point is
@@ -212,12 +209,10 @@ mod tests {
     #[test]
     fn terrain_is_flat_inside_the_roadside_zone() {
         // Posts (~5.8m), lamp poles (~6.5m) and the whole road corridor sit on
-        // flat ground relative to the road surface, which is now elevated by road_height(s).
+        // flat ground (0.0). The road now follows the terrain naturally, so it's
+        // at ground level inside RISE_START where there are no hills.
         for lateral in [0.0, 3.0, ROAD_HALF + 1.0, ROAD_HALF + 1.7, RISE_START] {
-            assert!(
-                (terrain_height(100.0, lateral) - road_height(100.0)).abs() < 0.001,
-                "lateral {lateral}"
-            );
+            assert_eq!(terrain_height(100.0, lateral), 0.0, "lateral {lateral}");
         }
     }
 

@@ -140,19 +140,34 @@ pub fn build_world_chunk(start_s: f32, chunk_len: f32) -> (Vec<Vertex3d>, Vec<u3
         let z0 = -s0;
         let z1 = -s1;
         // Road elevation at this position
-        let road_y = crate::world::terrain::road_height(s0);
         let asphalt = material_at(s0, 0.0, 0.0);
         let asphalt_slot = asphalt.atlas_slot();
         let asphalt_scale = asphalt.uv_scale();
 
-        // asphalt (at road height)
+        // asphalt (at terrain height)
         push_quad(
             &mut v,
             &mut i,
-            [x0 - half_w, road_y + 0.015, z0],
-            [x0 + half_w, road_y + 0.015, z0],
-            [x1 + half_w, road_y + 0.015, z1],
-            [x1 - half_w, road_y + 0.015, z1],
+            [
+                x0 - half_w,
+                crate::world::terrain::terrain_height(s0, 0.0) + 0.015,
+                z0,
+            ],
+            [
+                x0 + half_w,
+                crate::world::terrain::terrain_height(s0, 0.0) + 0.015,
+                z0,
+            ],
+            [
+                x1 + half_w,
+                crate::world::terrain::terrain_height(s1, 0.0) + 0.015,
+                z1,
+            ],
+            [
+                x1 - half_w,
+                crate::world::terrain::terrain_height(s1, 0.0) + 0.015,
+                z1,
+            ],
             [0.0, 1.0, 0.0],
             road,
             asphalt_slot,
@@ -299,13 +314,13 @@ mod tests {
         for vert in v.iter().filter(|vert| vert.position[1] > 0.05) {
             let lateral = vert.position[0] - road_curve(-vert.position[2]);
             if lateral.abs() < ROAD_HALF {
-                // Inside corridor: should be within ~0.2 of road height for road mesh vertices
+                // Inside corridor: should be within ~0.2 of terrain height for road mesh vertices
                 let s = vert.position[2];
-                let road_y = crate::world::terrain::road_height(s);
+                let terrain_y = crate::world::terrain::terrain_height(s, 0.0);
                 assert!(
-                    (vert.position[1] - road_y).abs() < 1.0,
-                    "road-corridor vertex at s={}{{}} with lateral={}{{}} is {} units from road surface",
-                    s, lateral, vert.position[1] - road_y
+                    (vert.position[1] - terrain_y).abs() < 1.0,
+                    "road-corridor vertex at s={}{{}} with lateral={}{{}} is {} units from terrain surface",
+                    s, lateral, vert.position[1] - terrain_y
                 );
             }
         }

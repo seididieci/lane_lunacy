@@ -39,12 +39,14 @@ impl RoadsideObject for MarkerPost {
     fn push_geometry(&self, v: &mut Vec<Vertex3d>, i: &mut Vec<u32>, p: &Placement) {
         let x = road_curve(p.s) + p.side * p.lateral;
         let z = -p.s;
+        // Posts rise with the terrain height at this position
+        let terrain_y = crate::world::terrain::terrain_height(p.s, p.lateral);
         let (slot, scale) = (ASPHALT_BASE.atlas_slot(), ASPHALT_BASE.uv_scale());
         push_box(
             v,
             i,
-            [x - 0.07, 0.0, z - 0.07],
-            [x + 0.07, 1.05, z + 0.07],
+            [x - 0.07, terrain_y + 0.0, z - 0.07],
+            [x + 0.07, terrain_y + 1.05, z + 0.07],
             [0.93, 0.93, 0.9],
             slot,
             scale,
@@ -52,8 +54,8 @@ impl RoadsideObject for MarkerPost {
         push_box(
             v,
             i,
-            [x - 0.08, 0.62, z - 0.08],
-            [x + 0.08, 0.78, z + 0.08],
+            [x - 0.08, terrain_y + 0.62, z - 0.08],
+            [x + 0.08, terrain_y + 0.78, z + 0.08],
             if p.side < 0.0 {
                 [0.95, 0.3, 0.24]
             } else {
