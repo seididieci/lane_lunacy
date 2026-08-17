@@ -12,7 +12,9 @@ fn main() {
             seed,
             windowed,
             debug,
-        } => lane_lunacy::run(gpu, weather, start_hour, seed, windowed, debug),
+            profile,
+        } => lane_lunacy::run(gpu, weather, start_hour, seed, windowed, debug, profile),
         RunMode::Snapshot(opts) => lane_lunacy::run_snapshot(opts),
+        RunMode::Report(csv) => lane_lunacy::run_report(csv),
     }
 }

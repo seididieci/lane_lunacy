@@ -312,11 +312,14 @@ impl Renderer {
         dt: std::time::Duration,
         hud_verts: &[HudVertex],
         fx: &FxSettings,
+        timings: &mut crate::profiler::FrameTimings,
     ) {
+        let render_started = std::time::Instant::now();
         if self.recreate {
             self.recreate_swapchain();
         }
 
+        let acquire_started = std::time::Instant::now();
         let (image_i, suboptimal, acquire_future) =
             match acquire_next_image(self.swapchain.clone(), None) {
                 Ok(r) => r,
@@ -329,10 +332,14 @@ impl Renderer {
         if suboptimal {
             self.recreate = true;
         }
+        timings.acquire_ms = acquire_started.elapsed().as_secs_f32() * 1000.0;
 
+        let fence_started = std::time::Instant::now();
         if let Some(fence) = &self.fences[image_i as usize] {
             fence.wait(None).unwrap();
         }
+        timings.fence_ms = fence_started.elapsed().as_secs_f32() * 1000.0;
+        timings.gpu_wait_ms = timings.acquire_ms + timings.fence_ms;
 
         let aspect = self.viewport.extent[0] / self.viewport.extent[1];
 
@@ -340,9 +347,14 @@ impl Renderer {
         // camera, day/night lights, sky uniform, headlight projectors,
         // particles, and flare. The same builder drives the headless snapshot
         // path, so windowed and offline renders are pixel-identical.
+        let frame_started = std::time::Instant::now();
         let frame = self
             .frame_builder
             .build(&self.scene, game, dt, aspect, hud_verts.to_vec());
+        timings.frame_ms = frame_started.elapsed().as_secs_f32() * 1000.0;
+        let ws = self.frame_builder.world_stats();
+        timings.rebuild_ms = ws.last_rebuild_ms;
+        timings.chunks_rebuilt = ws.chunks_rebuilt;
 
         let extent = self.viewport.extent;
         let mut flags = 0u32;
@@ -403,6 +415,7 @@ impl Renderer {
         };
         self.post_clock += dt.as_secs_f32();
 
+        let record_started = std::time::Instant::now();
         let command_buffer = record_frame_posted(
             &self.scene,
             &self.post,
@@ -418,8 +431,11 @@ impl Renderer {
             post_depth_view,
             &self.post.bloom_views,
             &post_settings,
+            timings,
         );
+        timings.record_ms = record_started.elapsed().as_secs_f32() * 1000.0;
 
+        let submit_started = std::time::Instant::now();
         let previous_future: Box<dyn GpuFuture> =
             match self.fences[self.previous_fence_i as usize].clone() {
                 Some(f) => f.boxed(),
@@ -453,6 +469,8 @@ impl Renderer {
             }
         };
         self.previous_fence_i = image_i;
+        timings.submit_ms = submit_started.elapsed().as_secs_f32() * 1000.0;
+        timings.render_ms = render_started.elapsed().as_secs_f32() * 1000.0;
     }
 }
 

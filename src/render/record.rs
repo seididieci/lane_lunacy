@@ -113,6 +113,7 @@ pub fn record_frame_posted(
     depth_view: Arc<ImageView>,
     bloom_views: &[Arc<ImageView>],
     settings: &PostSettings,
+    timings: &mut crate::profiler::FrameTimings,
 ) -> Arc<PrimaryAutoCommandBuffer> {
     let mut builder = AutoCommandBufferBuilder::primary(
         scene.command_allocator.clone(),
@@ -125,6 +126,7 @@ pub fn record_frame_posted(
     // One clear value per attachment: the color and depth are `Clear`, the MSAA
     // color resolve and the single-sampled depth resolve targets (present only
     // under 2x/4x) are `DontCare`.
+    let scene_started = std::time::Instant::now();
     let scene_clears = match scene_framebuffer.attachments().len() {
         2 => vec![Some([0.9, 0.7, 0.5, 1.0].into()), Some(1.0f32.into())],
         4 => vec![
@@ -153,8 +155,10 @@ pub fn record_frame_posted(
     builder
         .end_render_pass(SubpassEndInfo::default())
         .expect("end scene render pass");
+    timings.scene_ms = scene_started.elapsed().as_secs_f32() * 1000.0;
 
     // ---- Bloom downsample chain ----
+    let bloom_started = std::time::Instant::now();
     if settings.flags & crate::shaders::POST_BLOOM != 0 {
         for (level, fb) in bloom_fbs.iter().enumerate() {
             let src = if level == 0 {
@@ -232,8 +236,10 @@ pub fn record_frame_posted(
                 .expect("end bloom render pass");
         }
     }
+    timings.bloom_ms = bloom_started.elapsed().as_secs_f32() * 1000.0;
 
     // ---- Post composite into the swapchain ----
+    let post_started = std::time::Instant::now();
     let post_buf = Buffer::from_data(
         scene.memory_allocator.clone(),
         BufferCreateInfo {
@@ -293,11 +299,13 @@ pub fn record_frame_posted(
     builder
         .end_render_pass(SubpassEndInfo::default())
         .expect("end post render pass");
+    timings.post_ms = post_started.elapsed().as_secs_f32() * 1000.0;
 
     // ---- HUD/text flat pass on top of the post output ----
     // `load_op: Load` keeps the post composite already written to the
     // swapchain image; nothing is cleared. Drawn at 1x against the swapchain
     // format so bloom/chroma/FXAA/grain/vignette never touch the text.
+    let hud_started = std::time::Instant::now();
     builder
         .begin_render_pass(
             RenderPassBeginInfo {
@@ -323,6 +331,7 @@ pub fn record_frame_posted(
     builder
         .end_render_pass(SubpassEndInfo::default())
         .expect("end hud render pass");
+    timings.hud_ms = hud_started.elapsed().as_secs_f32() * 1000.0;
     builder.build().expect("build command buffer")
 }
 

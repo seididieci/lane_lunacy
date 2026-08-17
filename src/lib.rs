@@ -13,6 +13,7 @@ pub mod math;
 pub mod menu;
 pub mod mesh;
 pub mod model;
+pub mod profiler;
 pub mod render;
 pub mod road;
 pub mod shaders;
@@ -21,6 +22,7 @@ pub mod ui;
 pub mod vertex;
 pub mod world;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use winit::event_loop::EventLoop;
@@ -70,6 +72,7 @@ pub fn run(
     seed: Option<u64>,
     windowed: bool,
     debug: bool,
+    profile: Option<PathBuf>,
 ) {
     let event_loop = EventLoop::new().expect("failed to create event loop");
     let instance = create_surface_instance(&event_loop);
@@ -84,9 +87,22 @@ pub fn run(
     });
 
     let mut app = app::App::new(
-        instance, gpu_index, weather, start_hour, seed, windowed, debug,
+        instance, gpu_index, weather, start_hour, seed, windowed, debug, profile,
     );
     event_loop.run_app(&mut app).expect("event loop failed");
+}
+
+/// Headless `--report <csv>` entry point: re-read an existing profiling CSV
+/// and regenerate its `report.md`, so a session can be re-analyzed after the
+/// profiler is improved without replaying the game.
+pub fn run_report(csv: PathBuf) {
+    match crate::profiler::SessionProfiler::regenerate_report(&csv) {
+        Ok(report) => println!("wrote report: {}", report.display()),
+        Err(e) => {
+            eprintln!("failed to regenerate report from {}: {e}", csv.display());
+            std::process::exit(1);
+        }
+    }
 }
 
 /// Headless `--snapshot` entry point: boots a surface-less Vulkan context,

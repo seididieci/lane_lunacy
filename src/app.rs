@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -27,6 +28,7 @@ use crate::input::Input;
 use crate::menu::{
     build_menu_tree, AaMode, MenuRow, MenuScreen, MenuState, SettingsRow, SettingsState,
 };
+use crate::profiler::SessionProfiler;
 use crate::render::daynight;
 use crate::render::{FxSettings, Renderer};
 use crate::ui::Ui;
@@ -71,9 +73,17 @@ pub struct App {
     debug: DebugStats,
     /// `false` (default) starts borderless fullscreen; `--windowed` sets this.
     windowed: bool,
+    /// `--profile <path.csv>`: records per-frame timings and writes a Markdown
+    /// report on close. `None` keeps the hot path untouched.
+    profiler: Option<SessionProfiler>,
+    /// Monotonic frame counter for the profiler rows.
+    profile_frame_idx: u64,
+    /// End of the previous `about_to_wait`, for measuring event-loop idle time.
+    profile_frame_end: Option<Instant>,
 }
 
 impl App {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         instance: Arc<Instance>,
         gpu_index: usize,
@@ -83,6 +93,7 @@ impl App {
         windowed: bool,
         // `--debug`: start with the F3 debug HUD enabled.
         debug: bool,
+        profile: Option<PathBuf>,
     ) -> Self {
         let mut game = Game::new();
         game.set_weather(weather);
@@ -126,6 +137,15 @@ impl App {
             debug_visible: debug,
             debug: DebugStats::default(),
             windowed,
+            profiler: profile.and_then(|p| {
+                SessionProfiler::open(&p)
+                    .inspect_err(|e| {
+                        eprintln!("profiler: failed to open {}: {e}", p.display());
+                    })
+                    .ok()
+            }),
+            profile_frame_idx: 0,
+            profile_frame_end: None,
         }
     }
 
@@ -524,17 +544,30 @@ impl ApplicationHandler for App {
             return;
         };
 
+        let frame_started = Instant::now();
         let now = Instant::now();
         let dt = now.duration_since(self.previous);
         self.previous = now;
         self.ui_clock += dt.as_secs_f32();
         self.debug.sample_frame(dt.as_secs_f32());
 
+        let mut timings = crate::profiler::FrameTimings::default();
+        timings.frame_idx = self.profile_frame_idx;
+        timings.elapsed_s = self.ui_clock;
+        timings.dt_ms = dt.as_secs_f32() * 1000.0;
+        timings.idle_ms = self
+            .profile_frame_end
+            .map(|end| now.duration_since(end).as_secs_f32() * 1000.0)
+            .unwrap_or(0.0);
+        self.profile_frame_idx += 1;
+
+        let sim_started = Instant::now();
         if matches!(self.mode, AppMode::Playing) {
             self.game.update(dt, &self.input);
             self.input.gear_up = false;
             self.input.gear_down = false;
         }
+        timings.sim_ms = sim_started.elapsed().as_secs_f32() * 1000.0;
 
         let aspect = self.window.as_ref().map_or(16.0 / 9.0, |w| {
             let size = w.inner_size();
@@ -555,10 +588,12 @@ impl ApplicationHandler for App {
                 build_hud_tree(&self.game, self.debug_visible.then_some(&self.debug))
             }
         };
+        let ui_started = Instant::now();
         let hud_verts = self
             .ui
             .build(&mut root, &self.font_atlas, aspect, self.ui_clock);
         self.debug.hud_verts = hud_verts.len();
+        timings.ui_ms = ui_started.elapsed().as_secs_f32() * 1000.0;
         let fx = FxSettings {
             fxaa: self.applied.fxaa,
             bloom: self.applied.bloom,
@@ -570,7 +605,7 @@ impl ApplicationHandler for App {
             puddle_quality: self.applied.puddles.uniform(),
         };
         let render_started = Instant::now();
-        renderer.render(&self.game, dt, &hud_verts, &fx);
+        renderer.render(&self.game, dt, &hud_verts, &fx, &mut timings);
         self.debug
             .sample_cpu(render_started.elapsed().as_secs_f32() * 1000.0);
 
@@ -585,6 +620,24 @@ impl ApplicationHandler for App {
         self.debug.chunk_index =
             (self.game.vehicle.distance / crate::render::WORLD_CHUNK_LEN).floor() as i32;
         self.debug.terrain_factor = crate::world::terrain::speed_factor(self.game.vehicle.distance);
+
+        timings.total_ms = frame_started.elapsed().as_secs_f32() * 1000.0;
+        self.profile_frame_end = Some(Instant::now());
+        if let Some(profiler) = &mut self.profiler {
+            profiler.push(timings);
+        }
+    }
+
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // Profiling close: flush the CSV, write the Markdown report, and list
+        // the generated files so the terminal shows where the session data is.
+        if let Some(profiler) = self.profiler.take() {
+            let files = profiler.close();
+            println!("profiler session closed; generated:");
+            for f in &files {
+                println!("  {}", f.display());
+            }
+        }
     }
 }
 

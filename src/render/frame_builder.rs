@@ -141,6 +141,11 @@ impl FrameBuilder {
     fn ensure_world_chunks(&mut self, scene: &SceneResources, player_distance: f32) {
         let current_chunk = (player_distance / WORLD_CHUNK_LEN).floor() as i32;
         if current_chunk == self.world_anchor_chunk {
+            // No window movement this frame: the previous rebuild numbers must
+            // not linger, or profiling/HUD attributing the old stutter to the
+            // current frame.
+            self.stats.chunks_rebuilt = 0;
+            self.stats.last_rebuild_ms = 0.0;
             return;
         }
         let started = std::time::Instant::now();

@@ -41,8 +41,15 @@ pub enum RunMode {
         windowed: bool,
         /// `--debug`: start with the F3 debug HUD (FPS etc.) enabled.
         debug: bool,
+        /// `--profile <path.csv>`: record per-frame timings to the CSV and write
+        /// a Markdown analysis report on close.
+        profile: Option<PathBuf>,
     },
     Snapshot(SnapshotOptions),
+    /// `--report <path.csv>`: re-read an existing profiling session and
+    /// regenerate its `report.md` (useful after fixing the profiler) without
+    /// launching the game.
+    Report(PathBuf),
 }
 
 /// Parses the raw command-line arguments (excluding the program name) into a
@@ -54,8 +61,10 @@ pub fn parse(args: &[String]) -> RunMode {
     let mut start_hour: Option<f32> = None;
     let mut seed: Option<u64> = None;
     let mut windowed = false;
+    let mut profile: Option<PathBuf> = None;
 
     let mut snapshot: Option<PathBuf> = None;
+    let mut report: Option<PathBuf> = None;
     let mut width = 1280u32;
     let mut height = 720u32;
     let mut snapshot_debug = false;
@@ -136,6 +145,24 @@ pub fn parse(args: &[String]) -> RunMode {
                 snapshot_debug = true;
                 i += 1;
             }
+            "--profile" => {
+                if let Some(v) = args.get(i + 1).filter(|v| !v.starts_with("--")) {
+                    profile = Some(PathBuf::from(v));
+                    i += 2;
+                } else {
+                    eprintln!("invalid value for --profile (missing output CSV path)");
+                    i += 1;
+                }
+            }
+            "--report" => {
+                if let Some(v) = args.get(i + 1).filter(|v| !v.starts_with("--")) {
+                    report = Some(PathBuf::from(v));
+                    i += 2;
+                } else {
+                    eprintln!("invalid value for --report (missing input CSV path)");
+                    i += 1;
+                }
+            }
             "--terrain-detail" => {
                 if let Some(v) = args.get(i + 1).and_then(|v| TerrainDetail::parse(v)) {
                     terrain_detail = v;
@@ -154,8 +181,8 @@ pub fn parse(args: &[String]) -> RunMode {
         }
     }
 
-    match snapshot {
-        Some(path) => RunMode::Snapshot(SnapshotOptions {
+    match (snapshot, report) {
+        (Some(path), _) => RunMode::Snapshot(SnapshotOptions {
             path,
             time: start_hour,
             weather,
@@ -166,13 +193,15 @@ pub fn parse(args: &[String]) -> RunMode {
             debug: snapshot_debug,
             terrain_detail,
         }),
-        None => RunMode::Interactive {
+        (None, Some(path)) => RunMode::Report(path),
+        (None, None) => RunMode::Interactive {
             gpu,
             weather,
             start_hour,
             seed,
             windowed,
             debug,
+            profile,
         },
     }
 }
@@ -192,6 +221,8 @@ fn parse_size(s: &str) -> Option<(u32, u32)> {
 mod tests {
     use super::*;
 
+    use std::path::Path;
+
     fn parse_args(args: &[&str]) -> RunMode {
         let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
         parse(&owned)
@@ -207,6 +238,7 @@ mod tests {
                 seed,
                 windowed,
                 debug,
+                profile,
             } => {
                 assert_eq!(gpu, 0);
                 assert_eq!(weather, Weather::Auto);
@@ -214,6 +246,7 @@ mod tests {
                 assert_eq!(seed, None);
                 assert!(!windowed);
                 assert!(!debug);
+                assert_eq!(profile, None);
             }
             _ => panic!("expected interactive mode"),
         }
@@ -245,6 +278,40 @@ mod tests {
         match parse_args(&["--debug"]) {
             RunMode::Interactive { debug, .. } => assert!(debug),
             _ => panic!("expected interactive mode"),
+        }
+    }
+
+    #[test]
+    fn profile_flag_records_output_path() {
+        match parse_args(&["--profile", "sess.csv"]) {
+            RunMode::Interactive { profile, .. } => {
+                assert_eq!(profile.as_deref(), Some(Path::new("sess.csv")))
+            }
+            _ => panic!("expected interactive mode"),
+        }
+    }
+
+    #[test]
+    fn profile_flag_without_value_falls_back_to_none() {
+        match parse_args(&["--profile"]) {
+            RunMode::Interactive { profile, .. } => assert_eq!(profile, None),
+            _ => panic!("expected interactive mode"),
+        }
+    }
+
+    #[test]
+    fn report_flag_selects_report_mode() {
+        match parse_args(&["--report", "sess.csv"]) {
+            RunMode::Report(path) => assert_eq!(path, PathBuf::from("sess.csv")),
+            _ => panic!("expected report mode"),
+        }
+    }
+
+    #[test]
+    fn snapshot_takes_precedence_over_report() {
+        match parse_args(&["--snapshot", "a.png", "--report", "sess.csv"]) {
+            RunMode::Snapshot(o) => assert_eq!(o.path, PathBuf::from("a.png")),
+            _ => panic!("expected snapshot mode"),
         }
     }
 
