@@ -30,8 +30,10 @@ use crate::shaders::{
 use crate::vertex::HudVertex;
 
 pub mod camera;
+pub mod chunk_cache;
 pub mod cloud;
 pub mod daynight;
+pub mod drive;
 pub mod flare;
 pub mod frame;
 pub mod frame_builder;
@@ -129,6 +131,7 @@ impl Renderer {
         font_atlas: &FontAtlas,
         seed: u64,
         aa_samples: SampleCount,
+        present_mode: vulkano::swapchain::PresentMode,
     ) -> Self {
         let caps = physical
             .surface_capabilities(&surface, Default::default())
@@ -139,15 +142,46 @@ impl Renderer {
             .surface_formats(&surface, Default::default())
             .expect("surface formats")[0];
 
+        let supported_present_modes = physical
+            .surface_present_modes(&surface, Default::default())
+            .expect("surface present modes");
+        let present_mode = if supported_present_modes.contains(&present_mode) {
+            println!(
+                "present mode: {} (supported: {})",
+                present_mode_name(&present_mode),
+                present_modes_names(&supported_present_modes)
+            );
+            present_mode
+        } else {
+            println!(
+                "present mode {} not supported (supported: {}) — falling back to FIFO",
+                present_mode_name(&present_mode),
+                present_modes_names(&supported_present_modes)
+            );
+            vulkano::swapchain::PresentMode::Fifo
+        };
+
+        // Mailbox only beats Fifo once the presentation engine never blocks
+        // acquisition: with 2 images it behaves exactly like Fifo. Ask for at
+        // least 3 images so there is always a free one to acquire and render.
+        let min_image_count = if present_mode == vulkano::swapchain::PresentMode::Mailbox {
+            caps.min_image_count
+                .max(3)
+                .min(caps.max_image_count.unwrap_or(u32::MAX))
+        } else {
+            caps.min_image_count
+        };
+
         let (swapchain, images) = Swapchain::new(
             device.clone(),
             surface.clone(),
             SwapchainCreateInfo {
-                min_image_count: caps.min_image_count,
+                min_image_count,
                 image_format,
                 image_extent: [window_size.width, window_size.height],
                 image_usage: vulkano::image::ImageUsage::COLOR_ATTACHMENT,
                 composite_alpha,
+                present_mode,
                 ..Default::default()
             },
         )
@@ -472,6 +506,26 @@ impl Renderer {
         timings.submit_ms = submit_started.elapsed().as_secs_f32() * 1000.0;
         timings.render_ms = render_started.elapsed().as_secs_f32() * 1000.0;
     }
+}
+
+/// Lowercase human name for a swapchain present mode, for diagnostics.
+fn present_mode_name(mode: &vulkano::swapchain::PresentMode) -> &'static str {
+    match mode {
+        vulkano::swapchain::PresentMode::Fifo => "fifo",
+        vulkano::swapchain::PresentMode::Mailbox => "mailbox",
+        vulkano::swapchain::PresentMode::Immediate => "immediate",
+        vulkano::swapchain::PresentMode::FifoRelaxed => "relaxed",
+        _ => "unknown",
+    }
+}
+
+/// Comma-joined lowercased present-mode list, e.g. `fifo,mailbox`.
+fn present_modes_names(modes: &[vulkano::swapchain::PresentMode]) -> String {
+    modes
+        .iter()
+        .map(present_mode_name)
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Builds the scene render pass. At 1x the offscreen image is the color

@@ -33,6 +33,10 @@ pub struct DebugStats {
     pub chunk_rebuild_ms: f32,
     /// How many chunks were (re)built in that last rebuild.
     pub chunks_rebuilt: usize,
+    /// Chunk builds queued but not yet committed by the background pool.
+    pub chunks_pending: usize,
+    /// Chunks committed and ready in the background cache, including prefetched.
+    pub chunks_cached: usize,
     /// Particle vertices emitted this frame (rain + dust + mist + flare).
     pub particles: usize,
     /// HUD/UI vertices this frame.

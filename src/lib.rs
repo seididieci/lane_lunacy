@@ -31,7 +31,7 @@ use vulkano::instance::{Instance, InstanceCreateFlags, InstanceCreateInfo};
 use vulkano::swapchain::Surface;
 use vulkano::VulkanLibrary;
 
-use crate::cli::SnapshotOptions;
+use crate::cli::{DriveOptions, SnapshotOptions};
 use crate::game::Weather;
 use crate::gpu::{create_graphics_context_headless, enumerate_devices, select_physical_device};
 
@@ -65,6 +65,7 @@ pub fn create_headless_instance() -> Arc<Instance> {
     .expect("failed to create instance")
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     gpu_index: usize,
     weather: Weather,
@@ -73,6 +74,8 @@ pub fn run(
     windowed: bool,
     debug: bool,
     profile: Option<PathBuf>,
+    present_mode: crate::cli::PresentMode,
+    fps_limit: Option<u32>,
 ) {
     let event_loop = EventLoop::new().expect("failed to create event loop");
     let instance = create_surface_instance(&event_loop);
@@ -87,7 +90,16 @@ pub fn run(
     });
 
     let mut app = app::App::new(
-        instance, gpu_index, weather, start_hour, seed, windowed, debug, profile,
+        instance,
+        gpu_index,
+        weather,
+        start_hour,
+        seed,
+        windowed,
+        debug,
+        profile,
+        present_mode,
+        fps_limit,
     );
     event_loop.run_app(&mut app).expect("event loop failed");
 }
@@ -103,6 +115,13 @@ pub fn run_report(csv: PathBuf) {
             std::process::exit(1);
         }
     }
+}
+
+/// Headless `--drive <csv> <secs>` benchmark: drives the car forward with
+/// scripted input for a fixed number of simulated seconds and records per-frame
+/// timings (including world-chunk rebuild crossings) to a profiler CSV.
+pub fn run_drive(opts: DriveOptions) {
+    crate::render::drive::run_drive(opts);
 }
 
 /// Headless `--snapshot` entry point: boots a surface-less Vulkan context,

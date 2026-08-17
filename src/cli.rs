@@ -27,6 +27,57 @@ pub struct SnapshotOptions {
     pub terrain_detail: TerrainDetail,
 }
 
+/// Options for the headless `--drive` benchmark: boot a surface-less Vulkan
+/// context, drive the car forward with scripted input for `seconds`, and record
+/// per-frame timings (including chunk-rebuild crossings) to a profiler CSV.
+#[derive(Debug, Clone)]
+pub struct DriveOptions {
+    /// Output profiler CSV path (a `report.md` is written next to it on close).
+    pub csv: PathBuf,
+    /// How long to drive, in simulated seconds (the loop runs at a fixed 60 Hz).
+    pub seconds: u32,
+    pub weather: Weather,
+    /// Deterministic scene seed (cloud tiles, weather phase, start hour).
+    pub seed: u64,
+    /// Physical device index to use.
+    pub gpu: usize,
+    /// Terrain ribbon density used to build the world chunks.
+    pub terrain_detail: TerrainDetail,
+}
+
+/// Swapchain present mode for the interactive window (`--present`), mapped to
+/// `vulkano::swapchain::PresentMode`. `Fifo` is the guaranteed vsync default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PresentMode {
+    Fifo,
+    Mailbox,
+    Immediate,
+    Relaxed,
+}
+
+impl PresentMode {
+    /// Parses a `--present` CLI value (case-insensitive).
+    pub fn parse(s: &str) -> Option<PresentMode> {
+        match s.to_ascii_lowercase().as_str() {
+            "fifo" => Some(PresentMode::Fifo),
+            "mailbox" => Some(PresentMode::Mailbox),
+            "immediate" => Some(PresentMode::Immediate),
+            "relaxed" => Some(PresentMode::Relaxed),
+            _ => None,
+        }
+    }
+
+    /// Maps to the vulkano swapchain present mode used at swapchain creation.
+    pub fn to_vulkan(self) -> vulkano::swapchain::PresentMode {
+        match self {
+            PresentMode::Fifo => vulkano::swapchain::PresentMode::Fifo,
+            PresentMode::Mailbox => vulkano::swapchain::PresentMode::Mailbox,
+            PresentMode::Immediate => vulkano::swapchain::PresentMode::Immediate,
+            PresentMode::Relaxed => vulkano::swapchain::PresentMode::FifoRelaxed,
+        }
+    }
+}
+
 /// Which top-level program the CLI selects.
 #[derive(Debug, Clone)]
 pub enum RunMode {
@@ -44,12 +95,19 @@ pub enum RunMode {
         /// `--profile <path.csv>`: record per-frame timings to the CSV and write
         /// a Markdown analysis report on close.
         profile: Option<PathBuf>,
+        /// `--present <fifo|mailbox|immediate|relaxed>`: swapchain present mode,
+        /// `Fifo` (vsync) by default.
+        present_mode: PresentMode,
+        /// `--fps-limit <N>`: cap the frame rate at N via an idle sleep.
+        fps_limit: Option<u32>,
     },
     Snapshot(SnapshotOptions),
     /// `--report <path.csv>`: re-read an existing profiling session and
     /// regenerate its `report.md` (useful after fixing the profiler) without
     /// launching the game.
     Report(PathBuf),
+    /// `--drive <path.csv> <secs>`: headless driving benchmark for chunk-prefetch.
+    Drive(DriveOptions),
 }
 
 /// Parses the raw command-line arguments (excluding the program name) into a
@@ -62,9 +120,12 @@ pub fn parse(args: &[String]) -> RunMode {
     let mut seed: Option<u64> = None;
     let mut windowed = false;
     let mut profile: Option<PathBuf> = None;
+    let mut present_mode = PresentMode::Fifo;
+    let mut fps_limit: Option<u32> = None;
 
     let mut snapshot: Option<PathBuf> = None;
     let mut report: Option<PathBuf> = None;
+    let mut drive: Option<(PathBuf, u32)> = None;
     let mut width = 1280u32;
     let mut height = 720u32;
     let mut snapshot_debug = false;
@@ -154,6 +215,30 @@ pub fn parse(args: &[String]) -> RunMode {
                     i += 1;
                 }
             }
+            "--present" => {
+                if let Some(v) = args.get(i + 1).and_then(|v| PresentMode::parse(v)) {
+                    present_mode = v;
+                    i += 2;
+                } else {
+                    eprintln!(
+                        "invalid value for --present (fifo|mailbox|immediate|relaxed), using default FIFO"
+                    );
+                    i += 1;
+                }
+            }
+            "--fps-limit" => {
+                if let Some(v) = args
+                    .get(i + 1)
+                    .and_then(|v| v.parse::<u32>().ok())
+                    .filter(|&v| v > 0)
+                {
+                    fps_limit = Some(v);
+                    i += 2;
+                } else {
+                    eprintln!("invalid value for --fps-limit (a positive integer), ignored");
+                    i += 1;
+                }
+            }
             "--report" => {
                 if let Some(v) = args.get(i + 1).filter(|v| !v.starts_with("--")) {
                     report = Some(PathBuf::from(v));
@@ -161,6 +246,22 @@ pub fn parse(args: &[String]) -> RunMode {
                 } else {
                     eprintln!("invalid value for --report (missing input CSV path)");
                     i += 1;
+                }
+            }
+            "--drive" => {
+                let csv = args.get(i + 1).filter(|v| !v.starts_with("--"));
+                let secs = args.get(i + 2).and_then(|v| v.parse::<u32>().ok());
+                match (csv, secs) {
+                    (Some(csv), Some(secs)) if secs > 0 => {
+                        drive = Some((PathBuf::from(csv), secs));
+                        i += 3;
+                    }
+                    _ => {
+                        eprintln!(
+                            "invalid value for --drive (missing or bad CSV path / positive seconds)"
+                        );
+                        i += 1;
+                    }
                 }
             }
             "--terrain-detail" => {
@@ -181,8 +282,8 @@ pub fn parse(args: &[String]) -> RunMode {
         }
     }
 
-    match (snapshot, report) {
-        (Some(path), _) => RunMode::Snapshot(SnapshotOptions {
+    match (snapshot, report, drive) {
+        (Some(path), _, _) => RunMode::Snapshot(SnapshotOptions {
             path,
             time: start_hour,
             weather,
@@ -193,8 +294,16 @@ pub fn parse(args: &[String]) -> RunMode {
             debug: snapshot_debug,
             terrain_detail,
         }),
-        (None, Some(path)) => RunMode::Report(path),
-        (None, None) => RunMode::Interactive {
+        (None, Some(path), _) => RunMode::Report(path),
+        (None, None, Some((csv, seconds))) => RunMode::Drive(DriveOptions {
+            csv,
+            seconds,
+            weather,
+            seed: seed.unwrap_or(1),
+            gpu,
+            terrain_detail,
+        }),
+        (None, None, None) => RunMode::Interactive {
             gpu,
             weather,
             start_hour,
@@ -202,6 +311,8 @@ pub fn parse(args: &[String]) -> RunMode {
             windowed,
             debug,
             profile,
+            present_mode,
+            fps_limit,
         },
     }
 }
@@ -239,6 +350,8 @@ mod tests {
                 windowed,
                 debug,
                 profile,
+                present_mode,
+                fps_limit,
             } => {
                 assert_eq!(gpu, 0);
                 assert_eq!(weather, Weather::Auto);
@@ -247,6 +360,8 @@ mod tests {
                 assert!(!windowed);
                 assert!(!debug);
                 assert_eq!(profile, None);
+                assert_eq!(present_mode, PresentMode::Fifo);
+                assert_eq!(fps_limit, None);
             }
             _ => panic!("expected interactive mode"),
         }
@@ -300,6 +415,72 @@ mod tests {
     }
 
     #[test]
+    fn present_flag_is_parsed() {
+        match parse_args(&["--present", "mailbox"]) {
+            RunMode::Interactive { present_mode, .. } => {
+                assert_eq!(present_mode, PresentMode::Mailbox)
+            }
+            _ => panic!("expected interactive mode"),
+        }
+        match parse_args(&["--present", "IMMEDIATE"]) {
+            RunMode::Interactive { present_mode, .. } => {
+                assert_eq!(present_mode, PresentMode::Immediate)
+            }
+            _ => panic!("expected interactive mode"),
+        }
+        match parse_args(&["--present", "relaxed"]) {
+            RunMode::Interactive { present_mode, .. } => {
+                assert_eq!(present_mode, PresentMode::Relaxed)
+            }
+            _ => panic!("expected interactive mode"),
+        }
+    }
+
+    #[test]
+    fn present_flag_without_value_falls_back_to_fifo() {
+        match parse_args(&["--present"]) {
+            RunMode::Interactive { present_mode, .. } => {
+                assert_eq!(present_mode, PresentMode::Fifo)
+            }
+            _ => panic!("expected interactive mode"),
+        }
+    }
+
+    #[test]
+    fn invalid_present_mode_falls_back_to_fifo() {
+        match parse_args(&["--present", "bogus"]) {
+            RunMode::Interactive { present_mode, .. } => {
+                assert_eq!(present_mode, PresentMode::Fifo)
+            }
+            _ => panic!("expected interactive mode"),
+        }
+    }
+
+    #[test]
+    fn fps_limit_flag_is_parsed() {
+        match parse_args(&["--fps-limit", "60"]) {
+            RunMode::Interactive { fps_limit, .. } => assert_eq!(fps_limit, Some(60)),
+            _ => panic!("expected interactive mode"),
+        }
+    }
+
+    #[test]
+    fn fps_limit_without_value_ignored() {
+        match parse_args(&["--fps-limit"]) {
+            RunMode::Interactive { fps_limit, .. } => assert_eq!(fps_limit, None),
+            _ => panic!("expected interactive mode"),
+        }
+    }
+
+    #[test]
+    fn zero_fps_limit_ignored() {
+        match parse_args(&["--fps-limit", "0"]) {
+            RunMode::Interactive { fps_limit, .. } => assert_eq!(fps_limit, None),
+            _ => panic!("expected interactive mode"),
+        }
+    }
+
+    #[test]
     fn report_flag_selects_report_mode() {
         match parse_args(&["--report", "sess.csv"]) {
             RunMode::Report(path) => assert_eq!(path, PathBuf::from("sess.csv")),
@@ -312,6 +493,31 @@ mod tests {
         match parse_args(&["--snapshot", "a.png", "--report", "sess.csv"]) {
             RunMode::Snapshot(o) => assert_eq!(o.path, PathBuf::from("a.png")),
             _ => panic!("expected snapshot mode"),
+        }
+    }
+
+    #[test]
+    fn drive_flag_selects_drive_mode() {
+        match parse_args(&["--drive", "drive.csv", "30", "--seed", "7"]) {
+            RunMode::Drive(o) => {
+                assert_eq!(o.csv, PathBuf::from("drive.csv"));
+                assert_eq!(o.seconds, 30);
+                assert_eq!(o.seed, 7);
+                assert_eq!(o.terrain_detail, TerrainDetail::Medium);
+            }
+            _ => panic!("expected drive mode"),
+        }
+    }
+
+    #[test]
+    fn drive_without_valid_seconds_falls_back_to_interactive() {
+        match parse_args(&["--drive", "drive.csv"]) {
+            RunMode::Interactive { .. } => {}
+            _ => panic!("expected interactive mode"),
+        }
+        match parse_args(&["--drive", "drive.csv", "0"]) {
+            RunMode::Interactive { .. } => {}
+            _ => panic!("expected interactive mode"),
         }
     }
 

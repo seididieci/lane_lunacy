@@ -84,6 +84,14 @@ fn debug_panel(d: &DebugStats) -> Node {
             DIM,
         )),
         Node::new(Text::new(
+            format!(
+                "PREFETCH {}   PENDING {}",
+                d.chunks_cached, d.chunks_pending
+            ),
+            EM_SM,
+            DIM,
+        )),
+        Node::new(Text::new(
             format!("PARTS {}   HUD {}", d.particles, d.hud_verts),
             EM_SM,
             DIM,
@@ -302,6 +310,8 @@ mod tests {
             world_tris: 262_000,
             chunk_rebuild_ms: 41.0,
             chunks_rebuilt: 8,
+            chunks_pending: 2,
+            chunks_cached: 3,
             particles: 1800,
             hud_verts: 8900,
             distance: 1234.5,

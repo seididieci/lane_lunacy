@@ -229,6 +229,8 @@ fn debug_stats_for_snapshot(game: &Game) -> DebugStats {
     stats.world_tris = 46_000;
     stats.chunk_rebuild_ms = 1.4;
     stats.chunks_rebuilt = 1;
+    stats.chunks_pending = 3;
+    stats.chunks_cached = 2;
     stats.particles = 24;
     stats.hud_verts = 512;
     stats.distance = game.vehicle.distance;

@@ -19,6 +19,7 @@ use vulkano::image::{SampleCount, SampleCounts};
 use vulkano::instance::Instance;
 use vulkano::swapchain::Surface;
 
+use crate::cli::PresentMode;
 use crate::debug::DebugStats;
 use crate::font::FontAtlas;
 use crate::game::{Game, Weather};
@@ -76,6 +77,12 @@ pub struct App {
     /// `--profile <path.csv>`: records per-frame timings and writes a Markdown
     /// report on close. `None` keeps the hot path untouched.
     profiler: Option<SessionProfiler>,
+    /// `--present <mode>`: swapchain present mode requested at startup and on
+    /// every GPU switch.
+    present_mode: PresentMode,
+    /// `--fps-limit <N>`: optional frame-rate cap enforced as an idle sleep, so
+    /// the per-frame work (`total_ms`) is measured without the cap wait.
+    fps_limit: Option<u32>,
     /// Monotonic frame counter for the profiler rows.
     profile_frame_idx: u64,
     /// End of the previous `about_to_wait`, for measuring event-loop idle time.
@@ -94,6 +101,8 @@ impl App {
         // `--debug`: start with the F3 debug HUD enabled.
         debug: bool,
         profile: Option<PathBuf>,
+        present_mode: PresentMode,
+        fps_limit: Option<u32>,
     ) -> Self {
         let mut game = Game::new();
         game.set_weather(weather);
@@ -144,6 +153,8 @@ impl App {
                     })
                     .ok()
             }),
+            present_mode,
+            fps_limit,
             profile_frame_idx: 0,
             profile_frame_end: None,
         }
@@ -217,6 +228,7 @@ impl App {
             &self.font_atlas,
             self.seed,
             aa_samples(self.supported_aa[self.applied.antialias]),
+            self.present_mode.to_vulkan(),
         );
 
         self.active_gpu_index = self.menu.settings.gpu_index;
@@ -336,6 +348,7 @@ impl App {
             &self.font_atlas,
             self.seed,
             aa_samples(self.supported_aa[self.menu.settings.antialias]),
+            self.present_mode.to_vulkan(),
         );
         self.active_gpu_index = chosen;
         self.renderer = Some(renderer);
@@ -615,6 +628,8 @@ impl ApplicationHandler for App {
         self.debug.world_tris = ws.world_tris;
         self.debug.chunk_rebuild_ms = ws.last_rebuild_ms;
         self.debug.chunks_rebuilt = ws.chunks_rebuilt;
+        self.debug.chunks_pending = ws.chunks_pending;
+        self.debug.chunks_cached = ws.chunks_cached;
         self.debug.particles = ws.particles;
         self.debug.distance = self.game.vehicle.distance;
         self.debug.chunk_index =
@@ -625,6 +640,17 @@ impl ApplicationHandler for App {
         self.profile_frame_end = Some(Instant::now());
         if let Some(profiler) = &mut self.profiler {
             profiler.push(timings);
+        }
+        // `--fps-limit <N>`: pad the frame to 1/N s with an idle sleep. It runs
+        // after `total_ms` and `profile_frame_end` are recorded, so the cap wait
+        // lands in the next frame's `idle_ms` and the profiler still measures
+        // real work only (`total_ms`/`submit_ms` unchanged).
+        if let Some(limit) = self.fps_limit {
+            let target = std::time::Duration::from_secs_f64(1.0 / limit as f64);
+            let elapsed = frame_started.elapsed();
+            if elapsed < target {
+                std::thread::sleep(target - elapsed);
+            }
         }
     }
 

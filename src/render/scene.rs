@@ -61,6 +61,13 @@ const ASPHALT_WORN_PNG: &[u8] = include_bytes!("../../assets/textures/asphalt_wo
 const ASPHALT_CRACKED_PNG: &[u8] = include_bytes!("../../assets/textures/asphalt_cracked.png");
 const GRASS_PNG: &[u8] = include_bytes!("../../assets/textures/grass.png");
 
+/// Decodes an embedded PNG to RGBA. Runs on a startup worker thread.
+fn decode_png(bytes: &[u8], label: &str) -> image::RgbaImage {
+    image::load_from_memory(bytes)
+        .unwrap_or_else(|e| panic!("failed to decode embedded {label} texture: {e}"))
+        .to_rgba8()
+}
+
 /// One traffic car's mesh: vertex buffer, index buffer, and its lamp anchors.
 pub type TrafficMesh = (Subbuffer<[Vertex3d]>, Subbuffer<[u32]>, CarLightAnchors);
 
@@ -126,6 +133,106 @@ impl SceneResources {
             device.clone(),
             StandardDescriptorSetAllocatorCreateInfo::default(),
         ));
+
+        // Parallel CPU phase: everything independent and pure-CPU (embedded PNG
+        // decodes, procedural tile/sprite/flare generation, sky dome geometry,
+        // glTF model parsing) runs concurrently on every core before any GPU
+        // work starts. This dominates the debug startup time; the uploads,
+        // pipelines and buffers that follow are serialized on this thread.
+        let (
+            asphalt_base,
+            asphalt_worn,
+            asphalt_cracked,
+            grass,
+            colormap,
+            foliage_tile,
+            rock_tile,
+            cloud_a,
+            cloud_b,
+            sprite_atlas,
+            (flare_core, flare_streak, flare_ring),
+            (dome_vertices, dome_indices),
+            (car_vertices, car_indices, player_anchors),
+            (traffic_0, traffic_1, traffic_2, traffic_3),
+        ) = std::thread::scope(|s| {
+            let asphalt_base = s.spawn(|| decode_png(ASPHALT_BASE_PNG, "asphalt_base"));
+            let asphalt_worn = s.spawn(|| decode_png(ASPHALT_WORN_PNG, "asphalt_worn"));
+            let asphalt_cracked = s.spawn(|| decode_png(ASPHALT_CRACKED_PNG, "asphalt_cracked"));
+            let grass = s.spawn(|| decode_png(GRASS_PNG, "grass"));
+            let colormap = s.spawn(|| decode_png(CAR_COLORMAP_PNG, "car colormap"));
+            let foliage = s.spawn(|| generate_foliage_tile(FOLIAGE_TILE, seed));
+            let rock = s.spawn(|| generate_rock_tile(FOLIAGE_TILE, seed ^ 0x0BAD_F00D));
+            let cloud_a = s.spawn(|| generate_cloud_tile(CLOUD_TILE, seed));
+            let cloud_b = s.spawn(|| {
+                generate_cloud_tile(
+                    CLOUD_TILE,
+                    seed.wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407),
+                )
+            });
+            let sprite_atlas = s.spawn(|| {
+                let mut atlas = Vec::with_capacity((512 * 128 * 4) as usize);
+                atlas.extend_from_slice(&generate_soft_sprite(128));
+                for seed in [
+                    0x9E3779B97F4A7C15u64,
+                    0xBF58476D1CE4E5B9u64,
+                    0x94D049BB133111EBu64,
+                ] {
+                    atlas.extend_from_slice(&generate_cloud_sprite(128, seed));
+                }
+                atlas
+            });
+            let flare = s.spawn(|| {
+                (
+                    flare::generate_sun_core(64),
+                    flare::generate_flare_streak(256, 32),
+                    flare::generate_flare_ring(256),
+                )
+            });
+            let dome = s.spawn(|| build_sky_dome(32, 128));
+            let player = s.spawn(|| {
+                load_gltf_mesh_from_bytes(PLAYER_MODEL_GLB, "player_race_future.glb")
+                    .expect("failed to load embedded player model")
+            });
+            let sedan = s.spawn(|| {
+                load_gltf_mesh_from_bytes(TRAFFIC_SEDAN_GLB, "traffic_sedan.glb")
+                    .unwrap_or_else(|e| panic!("failed to load embedded traffic model {e}"))
+            });
+            let suv = s.spawn(|| {
+                load_gltf_mesh_from_bytes(TRAFFIC_SUV_GLB, "traffic_suv.glb")
+                    .unwrap_or_else(|e| panic!("failed to load embedded traffic model {e}"))
+            });
+            let taxi = s.spawn(|| {
+                load_gltf_mesh_from_bytes(TRAFFIC_TAXI_GLB, "traffic_taxi.glb")
+                    .unwrap_or_else(|e| panic!("failed to load embedded traffic model {e}"))
+            });
+            let van = s.spawn(|| {
+                load_gltf_mesh_from_bytes(TRAFFIC_VAN_GLB, "traffic_van.glb")
+                    .unwrap_or_else(|e| panic!("failed to load embedded traffic model {e}"))
+            });
+
+            (
+                asphalt_base.join().expect("startup worker panicked"),
+                asphalt_worn.join().expect("startup worker panicked"),
+                asphalt_cracked.join().expect("startup worker panicked"),
+                grass.join().expect("startup worker panicked"),
+                colormap.join().expect("startup worker panicked"),
+                foliage.join().expect("startup worker panicked"),
+                rock.join().expect("startup worker panicked"),
+                cloud_a.join().expect("startup worker panicked"),
+                cloud_b.join().expect("startup worker panicked"),
+                sprite_atlas.join().expect("startup worker panicked"),
+                flare.join().expect("startup worker panicked"),
+                dome.join().expect("startup worker panicked"),
+                player.join().expect("startup worker panicked"),
+                (
+                    sedan.join().expect("startup worker panicked"),
+                    suv.join().expect("startup worker panicked"),
+                    taxi.join().expect("startup worker panicked"),
+                    van.join().expect("startup worker panicked"),
+                ),
+            )
+        });
 
         let subpass = Subpass::from(render_pass.clone(), 0).unwrap();
         let mesh =
@@ -221,16 +328,6 @@ impl SceneResources {
         // headlights, variant 0); cells 1..=3 = organic cloud shapes for dust.
         let sprite_atlas_w = 512u32;
         let sprite_atlas_h = 128u32;
-        let mut sprite_atlas = Vec::with_capacity((sprite_atlas_w * sprite_atlas_h * 4) as usize);
-        let gaussian = generate_soft_sprite(128);
-        sprite_atlas.extend_from_slice(&gaussian);
-        for seed in [
-            0x9E3779B97F4A7C15u64,
-            0xBF58476D1CE4E5B9u64,
-            0x94D049BB133111EBu64,
-        ] {
-            sprite_atlas.extend_from_slice(&generate_cloud_sprite(128, seed));
-        }
         let particle_sprite_view = upload_rgba8_texture(
             memory_allocator.clone(),
             command_allocator.clone(),
@@ -277,7 +374,7 @@ impl SceneResources {
             queue.clone(),
             64,
             64,
-            flare::generate_sun_core(64),
+            flare_core,
         );
         let (flare_streak_view, flare_streak_mips) = upload_rgba8_texture_mipmapped(
             memory_allocator.clone(),
@@ -285,7 +382,7 @@ impl SceneResources {
             queue.clone(),
             256,
             32,
-            flare::generate_flare_streak(256, 32),
+            flare_streak,
         );
         let (flare_ring_view, flare_ring_mips) = upload_rgba8_texture_mipmapped(
             memory_allocator.clone(),
@@ -293,7 +390,7 @@ impl SceneResources {
             queue.clone(),
             256,
             256,
-            flare::generate_flare_ring(256),
+            flare_ring,
         );
         let flare_sampler = Sampler::new(
             device.clone(),
@@ -403,21 +500,11 @@ impl SceneResources {
         //   slot 0 = asphalt base, slot 1 = asphalt worn, slot 2 = asphalt cracked,
         //   slot 3 = grass, slot 4 = foliage, slot 5 = rock.
         // See mesh.frag.glsl for the material-based atlas offset.
-        let foliage_tile = generate_foliage_tile(FOLIAGE_TILE, seed);
-        let rock_tile = generate_rock_tile(FOLIAGE_TILE, seed ^ 0x0BAD_F00D);
         let slot_textures = [
-            image::load_from_memory(ASPHALT_BASE_PNG)
-                .expect("failed to decode embedded asphalt_base texture")
-                .to_rgba8(),
-            image::load_from_memory(ASPHALT_WORN_PNG)
-                .expect("failed to decode embedded asphalt_worn texture")
-                .to_rgba8(),
-            image::load_from_memory(ASPHALT_CRACKED_PNG)
-                .expect("failed to decode embedded asphalt_cracked texture")
-                .to_rgba8(),
-            image::load_from_memory(GRASS_PNG)
-                .expect("failed to decode embedded grass texture")
-                .to_rgba8(),
+            asphalt_base,
+            asphalt_worn,
+            asphalt_cracked,
+            grass,
             image::RgbaImage::from_raw(FOLIAGE_TILE, FOLIAGE_TILE, foliage_tile)
                 .expect("foliage tile has the right size"),
             image::RgbaImage::from_raw(FOLIAGE_TILE, FOLIAGE_TILE, rock_tile)
@@ -450,9 +537,6 @@ impl SceneResources {
             atlas,
         );
 
-        let colormap = image::load_from_memory(CAR_COLORMAP_PNG)
-            .expect("failed to decode embedded car colormap texture")
-            .to_rgba8();
         let (cmap_w, cmap_h) = colormap.dimensions();
         let car_texture_view = upload_rgba8_texture(
             memory_allocator.clone(),
@@ -467,12 +551,6 @@ impl SceneResources {
         // Two decorrelated seamless tiles cross-faded in the sky shader so the
         // clouds drift and evolve. A fixed scene seed -> the same sky every
         // run; an unpredictable seed (default) -> a different sky each launch.
-        let cloud_a = generate_cloud_tile(CLOUD_TILE, seed);
-        let cloud_b = generate_cloud_tile(
-            CLOUD_TILE,
-            seed.wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407),
-        );
         let cloud_a_view = upload_rgba8_texture(
             memory_allocator.clone(),
             command_allocator.clone(),
@@ -490,26 +568,15 @@ impl SceneResources {
             cloud_b,
         );
 
-        let (dome_vertices, dome_indices) = build_sky_dome(32, 128);
         let (sky_dome_vertices, sky_dome_indices) =
             make_mesh_buffers(memory_allocator.clone(), dome_vertices, dome_indices);
 
-        let (car_vertices, car_indices, player_anchors) =
-            load_gltf_mesh_from_bytes(PLAYER_MODEL_GLB, "player_race_future.glb")
-                .expect("failed to load embedded player model");
         let (car_vertices, car_indices) =
             make_mesh_buffers(memory_allocator.clone(), car_vertices, car_indices);
 
-        let traffic_models = [
-            ("traffic_sedan.glb", TRAFFIC_SEDAN_GLB),
-            ("traffic_suv.glb", TRAFFIC_SUV_GLB),
-            ("traffic_taxi.glb", TRAFFIC_TAXI_GLB),
-            ("traffic_van.glb", TRAFFIC_VAN_GLB),
-        ];
+        let traffic_cpu = [traffic_0, traffic_1, traffic_2, traffic_3];
         let mut traffic_meshes = Vec::new();
-        for (label, bytes) in traffic_models {
-            let (vertices, indices, anchors) = load_gltf_mesh_from_bytes(bytes, label)
-                .unwrap_or_else(|e| panic!("failed to load embedded traffic model {label}: {e}"));
+        for (vertices, indices, anchors) in traffic_cpu {
             let (vertices, indices) =
                 make_mesh_buffers(memory_allocator.clone(), vertices, indices);
             traffic_meshes.push((vertices, indices, anchors));
