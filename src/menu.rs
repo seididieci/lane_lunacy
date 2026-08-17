@@ -78,6 +78,8 @@ pub enum SettingsRow {
     Grain,
     Saturation,
     ChromaticAberration,
+    RainFx,
+    Reflect,
     Apply,
     Back,
 }
@@ -95,7 +97,9 @@ impl SettingsRow {
             SettingsRow::Grain => SettingsRow::Vignette,
             SettingsRow::Saturation => SettingsRow::Grain,
             SettingsRow::ChromaticAberration => SettingsRow::Saturation,
-            SettingsRow::Apply => SettingsRow::ChromaticAberration,
+            SettingsRow::RainFx => SettingsRow::ChromaticAberration,
+            SettingsRow::Reflect => SettingsRow::RainFx,
+            SettingsRow::Apply => SettingsRow::Reflect,
             SettingsRow::Back => SettingsRow::Apply,
         }
     }
@@ -111,7 +115,9 @@ impl SettingsRow {
             SettingsRow::Vignette => SettingsRow::Grain,
             SettingsRow::Grain => SettingsRow::Saturation,
             SettingsRow::Saturation => SettingsRow::ChromaticAberration,
-            SettingsRow::ChromaticAberration => SettingsRow::Apply,
+            SettingsRow::ChromaticAberration => SettingsRow::RainFx,
+            SettingsRow::RainFx => SettingsRow::Reflect,
+            SettingsRow::Reflect => SettingsRow::Apply,
             SettingsRow::Apply => SettingsRow::Back,
             SettingsRow::Back => SettingsRow::Back,
         }
@@ -138,6 +144,35 @@ impl AaMode {
     }
 }
 
+/// Puddle-reflection quality levels offered by the PUDDLES row. `Off` skips the
+/// screen-space reflection pass entirely (cheapest, for GPUs that can't keep
+/// up); `Low`/`High` trade reflection ray steps and noise octaves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PuddleQuality {
+    Off,
+    Low,
+    High,
+}
+
+impl PuddleQuality {
+    pub fn label(self) -> &'static str {
+        match self {
+            PuddleQuality::Off => "OFF",
+            PuddleQuality::Low => "LOW",
+            PuddleQuality::High => "HIGH",
+        }
+    }
+
+    /// Uniform value shipped to the post shader (0 = off, 1 = low, 2 = high).
+    pub fn uniform(self) -> f32 {
+        match self {
+            PuddleQuality::Off => 0.0,
+            PuddleQuality::Low => 1.0,
+            PuddleQuality::High => 2.0,
+        }
+    }
+}
+
 /// The ten user-adjustable settings. Staged in the menu, committed in one shot
 /// by the APPLY row; `PartialEq` lets the app show the APPLY row as enabled only
 /// when the staged values differ from what is in effect.
@@ -155,6 +190,11 @@ pub struct SettingsState {
     pub grain: bool,
     pub saturation: bool,
     pub chroma: bool,
+    /// Wet-lens rain droplets on the camera (on by default).
+    pub rain_fx: bool,
+    /// Screen-space puddle reflections on the wet asphalt (high quality by
+    /// default; can be lowered or disabled for weaker GPUs).
+    pub puddles: PuddleQuality,
 }
 
 impl Default for SettingsState {
@@ -171,6 +211,8 @@ impl Default for SettingsState {
             grain: false,
             saturation: false,
             chroma: false,
+            rain_fx: true,
+            puddles: PuddleQuality::High,
         }
     }
 }
@@ -302,8 +344,20 @@ impl MenuState {
             SettingsRow::Grain => self.settings.grain = !self.settings.grain,
             SettingsRow::Saturation => self.settings.saturation = !self.settings.saturation,
             SettingsRow::ChromaticAberration => self.settings.chroma = !self.settings.chroma,
+            SettingsRow::RainFx => self.settings.rain_fx = !self.settings.rain_fx,
             _ => {}
         }
+    }
+
+    /// Cycles the PUDDLES row over OFF/LOW/HIGH.
+    pub fn cycle_puddles(&mut self, delta: i32) {
+        let levels = [PuddleQuality::Off, PuddleQuality::Low, PuddleQuality::High];
+        let cur = levels
+            .iter()
+            .position(|l| *l == self.settings.puddles)
+            .unwrap_or(0);
+        let next = (cur as i32 + delta).rem_euclid(levels.len() as i32) as usize;
+        self.settings.puddles = levels[next];
     }
 }
 
@@ -475,10 +529,28 @@ fn build_settings_tree(
                 .focused(focused(SettingsRow::ChromaticAberration)),
             ),
             Node::new(
-                Button::new("APPLY", ROW_EM, apply_color, 19).focused(focused(SettingsRow::Apply)),
+                Button::new(
+                    format!("RAIN FX  {}", on_off(s.rain_fx)),
+                    ROW_EM,
+                    ROW_COLOR,
+                    19,
+                )
+                .focused(focused(SettingsRow::RainFx)),
             ),
             Node::new(
-                Button::new("BACK", ROW_EM, ROW_COLOR, 20).focused(focused(SettingsRow::Back)),
+                Button::new(
+                    format!("PUDDLES  {}", s.puddles.label()),
+                    ROW_EM,
+                    ROW_COLOR,
+                    20,
+                )
+                .focused(focused(SettingsRow::Reflect)),
+            ),
+            Node::new(
+                Button::new("APPLY", ROW_EM, apply_color, 21).focused(focused(SettingsRow::Apply)),
+            ),
+            Node::new(
+                Button::new("BACK", ROW_EM, ROW_COLOR, 22).focused(focused(SettingsRow::Back)),
             ),
         ],
         ROW_GAP,
@@ -560,7 +632,7 @@ mod tests {
         assert!(!verts.is_empty());
 
         // Every settings row must be present and hit-testable on the center line.
-        for id in 10..=20 {
+        for id in 10..=22 {
             assert!(
                 hit_test_id(&root, &ui, id),
                 "settings row id {id} must be hit-testable"
@@ -669,6 +741,23 @@ mod tests {
         menu.settings.antialias = 2;
         menu.clamp_antialias(&[AaMode::Off]);
         assert_eq!(menu.settings.antialias, 0);
+    }
+
+    #[test]
+    fn puddles_cycles_through_all_levels() {
+        let mut menu = MenuState::new(0, Weather::Auto);
+        assert_eq!(menu.settings.puddles, PuddleQuality::High);
+        menu.cycle_puddles(1);
+        assert_eq!(menu.settings.puddles, PuddleQuality::Off);
+        menu.cycle_puddles(1);
+        assert_eq!(menu.settings.puddles, PuddleQuality::Low);
+        menu.cycle_puddles(1);
+        assert_eq!(menu.settings.puddles, PuddleQuality::High);
+        menu.cycle_puddles(-1);
+        assert_eq!(menu.settings.puddles, PuddleQuality::Low);
+        assert_eq!(PuddleQuality::Off.uniform(), 0.0);
+        assert_eq!(PuddleQuality::Low.uniform(), 1.0);
+        assert_eq!(PuddleQuality::High.uniform(), 2.0);
     }
 
     #[test]

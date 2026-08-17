@@ -19,6 +19,7 @@ layout(set = 0, binding = 0) uniform MVP {
     mat4 projection;
     vec4 light_dir;
     vec4 fog_color;
+    vec4 camera_pos;
     vec4 light_state;
     vec4 headlight_pos;
     vec4 headlight_dir;

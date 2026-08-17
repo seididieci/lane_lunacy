@@ -74,8 +74,7 @@ mod tests {
 
     #[test]
     fn marker_posts_remain_on_both_sides() {
-        let (v, _) =
-            crate::mesh::build_world_chunk(0.0, 260.0, crate::mesh::TerrainDetail::Medium);
+        let (v, _) = crate::mesh::build_world_chunk(0.0, 260.0, crate::mesh::TerrainDetail::Medium);
         let posts = v.iter().filter(|vert| vert.position[1] > 1.0).count();
         assert!(posts > 0, "marker posts should still exist");
     }

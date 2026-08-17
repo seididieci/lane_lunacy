@@ -412,7 +412,9 @@ impl App {
             | SettingsRow::Vignette
             | SettingsRow::Grain
             | SettingsRow::Saturation
-            | SettingsRow::ChromaticAberration => self.menu.toggle_fx(self.menu.settings_cursor),
+            | SettingsRow::ChromaticAberration
+            | SettingsRow::RainFx => self.menu.toggle_fx(self.menu.settings_cursor),
+            SettingsRow::Reflect => self.menu.cycle_puddles(delta),
             SettingsRow::Apply | SettingsRow::Back => {}
         }
     }
@@ -564,6 +566,8 @@ impl ApplicationHandler for App {
             grain: self.applied.grain,
             saturation: self.applied.saturation,
             chroma: self.applied.chroma,
+            rain_fx: self.applied.rain_fx,
+            puddle_quality: self.applied.puddles.uniform(),
         };
         let render_started = Instant::now();
         renderer.render(&self.game, dt, &hud_verts, &fx);

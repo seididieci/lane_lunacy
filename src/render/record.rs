@@ -110,6 +110,7 @@ pub fn record_frame_posted(
     bloom_fbs: &[Arc<Framebuffer>],
     viewport: &Viewport,
     offscreen_view: Arc<ImageView>,
+    depth_view: Arc<ImageView>,
     bloom_views: &[Arc<ImageView>],
     settings: &PostSettings,
 ) -> Arc<PrimaryAutoCommandBuffer> {
@@ -121,12 +122,18 @@ pub fn record_frame_posted(
     .expect("command buffer builder");
 
     // ---- Scene into offscreen ----
-    // One clear value per attachment: color (and depth) are `Clear`, the MSAA
-    // resolve attachment (present only under 2x/4x) is `DontCare`.
-    let scene_clears = if scene_framebuffer.attachments().len() == 3 {
-        vec![Some([0.9, 0.7, 0.5, 1.0].into()), None, Some(1.0f32.into())]
-    } else {
-        vec![Some([0.9, 0.7, 0.5, 1.0].into()), Some(1.0f32.into())]
+    // One clear value per attachment: the color and depth are `Clear`, the MSAA
+    // color resolve and the single-sampled depth resolve targets (present only
+    // under 2x/4x) are `DontCare`.
+    let scene_clears = match scene_framebuffer.attachments().len() {
+        2 => vec![Some([0.9, 0.7, 0.5, 1.0].into()), Some(1.0f32.into())],
+        4 => vec![
+            Some([0.9, 0.7, 0.5, 1.0].into()),
+            None,
+            Some(1.0f32.into()),
+            None,
+        ],
+        n => unreachable!("unexpected scene framebuffer attachment count: {n}"),
     };
     builder
         .begin_render_pass(
@@ -252,6 +259,7 @@ pub fn record_frame_posted(
                 bloom_views.last().cloned().expect("bloom views"),
                 post.sampler.clone(),
             ),
+            WriteDescriptorSet::image_view_sampler(3, depth_view, post.sampler.clone()),
         ],
         [],
     )

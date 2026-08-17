@@ -151,7 +151,11 @@ fn push_terrain_cell(
 /// (asphalt, shoulders, verges, edge + center lines), then the roadside objects
 /// (marker posts, street lamps, trees) via `world::build_world_scenery`. Each
 /// object type owns its deterministic placement and geometry in `src/world/`.
-pub fn build_world_chunk(start_s: f32, chunk_len: f32, detail: TerrainDetail) -> (Vec<Vertex3d>, Vec<u32>) {
+pub fn build_world_chunk(
+    start_s: f32,
+    chunk_len: f32,
+    detail: TerrainDetail,
+) -> (Vec<Vertex3d>, Vec<u32>) {
     let mut v = Vec::new();
     let mut i = Vec::new();
     let half_w = ROAD_HALF;

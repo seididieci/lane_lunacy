@@ -14,6 +14,7 @@ layout(set = 0, binding = 0) uniform MVP {
     mat4 projection;
     vec4 light_dir;
     vec4 fog_color;
+    vec4 camera_pos;
     vec4 light_state;
     vec4 headlight_pos;
     vec4 headlight_dir;
@@ -69,6 +70,31 @@ void main() {
         albedo *= terrain_state.xyz;
     }
     vec3 lit = albedo * (ambient + diff * sun_intensity * 0.85);
+
+    // Wet asphalt: darken the tarmac and add a glossy sun/moon specular with a
+    // broad low-exponent sheen, so rain-soaked asphalt glints under any light.
+    // Only the asphalt slots (0..2, including the shoulders) pick this up.
+    float wet_look = 0.0;
+    if (v_material >= 0.0 && v_material < 3.0) {
+        wet_look = wet_cine;
+    }
+    if (wet_look > 0.0) {
+        lit *= mix(1.0, 0.82, wet_look);
+        vec3 V = normalize(camera_pos.xyz - v_world_pos);
+        vec3 L = normalize(light_dir.xyz);
+        vec3 H = normalize(L + V);
+        float ndoth = max(dot(n, H), 0.0);
+        float spec_hi = pow(ndoth, 128.0);
+        float spec_lo = pow(ndoth, 24.0);
+        // Fresnel-ish pickup at grazing angles (how the road reads from the
+        // chase camera), so the sheen is strongest just ahead of the car.
+        float grazing = pow(1.0 - max(dot(n, V), 0.0), 2.0);
+        lit += vec3(1.0)
+            * (spec_hi * 0.5 + spec_lo * 0.35)
+            * sun_intensity
+            * wet_look
+            * (0.4 + 0.6 * grazing);
+    }
 
     // Headlight cone cast from the player car, scaled with night darkness so
     // only the harder difficulties actually need to switch them on.

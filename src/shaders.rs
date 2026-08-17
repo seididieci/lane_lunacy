@@ -33,6 +33,10 @@ pub struct MVP {
     pub projection: [[f32; 4]; 4],
     pub light_dir: [f32; 4],
     pub fog_color: [f32; 4],
+    /// Camera eye position in world space (wet-road specular in `mesh.frag`).
+    /// Kept after `fog_color` so the particle shaders' shorter MVP block (which
+    /// reads only up to `fog_color`) keeps its offsets.
+    pub camera_pos: [f32; 4],
     pub light_state: [f32; 4],
     pub headlight_pos: [f32; 4],
     pub headlight_dir: [f32; 4],
@@ -72,10 +76,20 @@ pub const POST_VIGNETTE: u32 = 1 << 2;
 pub const POST_GRAIN: u32 = 1 << 3;
 pub const POST_SATURATION: u32 = 1 << 4;
 pub const POST_CHROMA: u32 = 1 << 5;
+/// Camera rain-droplet lens effect (wet lens), gated by `wet_fac`.
+pub const POST_RAINDROPS: u32 = 1 << 6;
+/// Screen-space puddle reflections on the wet asphalt, gated by `wet_fac`.
+pub const POST_REFLECT: u32 = 1 << 7;
 
 /// UBO for the post-processing pass. `flags` gates each effect; the float
 /// factors are the fixed per-effect intensities; `texel_x/y` are the inverse
-/// framebuffer size (for FXAA/chroma); `time` drives the animated grain.
+/// framebuffer size (for FXAA/chroma); `time` drives the animated grain and
+/// the rain droplets; `wet_fac` drives the wet-lens droplets and the puddle
+/// reflections. `inv_view_proj`, `eye` and `fog_color` feed the screen-space
+/// reflection pass (world-position reconstruction from the depth attachment).
+///
+/// Layout must mirror the `PostSettings` block in `post.frag.glsl` exactly
+/// (std140): the scalar fields pad to the 16-byte alignment the `mat4` needs.
 #[derive(BufferContents, Clone, Copy, Debug)]
 #[repr(C)]
 pub struct PostSettings {
@@ -88,7 +102,19 @@ pub struct PostSettings {
     pub chroma_strength: f32,
     pub texel_x: f32,
     pub texel_y: f32,
-    pub _pad: [f32; 3],
+    pub wet_fac: f32,
+    /// Puddle-reflection quality uniform: 0 = off, 1 = low, 2 = high. Lives in
+    /// what used to be padding, so the std140 layout is unchanged.
+    pub puddle_quality: f32,
+    pub _pad: [f32; 5],
+    /// Inverse of (projection * view): maps a depth sample back to world space.
+    pub inv_view_proj: [[f32; 4]; 4],
+    /// (projection * view): projects SSR ray samples back to screen space.
+    pub view_proj: [[f32; 4]; 4],
+    /// Camera eye position in world space (ray origin for reflections).
+    pub eye: [f32; 4],
+    /// Horizon fog color (SSR miss fallback and far-fade tint).
+    pub fog_color: [f32; 4],
 }
 
 /// Linear-HDR luminance gate for the bloom downsample pass. `threshold`/`knee`

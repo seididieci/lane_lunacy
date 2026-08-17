@@ -563,6 +563,7 @@ impl SceneResources {
             lights,
             wet_fac,
             fog_color,
+            eye,
         } = *uniforms;
         let Headlights {
             pos: headlight_pos,
@@ -580,6 +581,7 @@ impl SceneResources {
             projection: proj.to_cols_array_2d(),
             light_dir: lights.light_dir,
             fog_color,
+            camera_pos: [eye.x, eye.y, eye.z, 1.0],
             light_state: [
                 lights.ambient,
                 lights.sun_intensity,

@@ -24,7 +24,8 @@ use crate::render::post::PostResources;
 use crate::render::record::record_frame_posted;
 use crate::render::scene::SceneResources;
 use crate::shaders::{
-    PostSettings, POST_BLOOM, POST_CHROMA, POST_FXAA, POST_GRAIN, POST_SATURATION, POST_VIGNETTE,
+    PostSettings, POST_BLOOM, POST_CHROMA, POST_FXAA, POST_GRAIN, POST_RAINDROPS, POST_REFLECT,
+    POST_SATURATION, POST_VIGNETTE,
 };
 use crate::vertex::HudVertex;
 
@@ -56,6 +57,11 @@ pub struct FxSettings {
     pub grain: bool,
     pub saturation: bool,
     pub chroma: bool,
+    /// Wet-lens rain droplets (visible only when the weather is wet).
+    pub rain_fx: bool,
+    /// Puddle-reflection quality as a uniform value: 0 = off, 1 = low,
+    /// 2 = high. 0 also skips the SSR pass entirely.
+    pub puddle_quality: f32,
 }
 
 /// An in-flight present future, pinned per swapchain image so we can wait on
@@ -79,6 +85,10 @@ pub struct Renderer {
     msaa_color_view: Option<Arc<ImageView>>,
     /// Depth attachment, at `aa_samples` samples.
     depth_view: Arc<ImageView>,
+    /// Single-sampled depth target: the depth resolve attachment under MSAA, so
+    /// the composite pass can sample a readable depth buffer for the puddle
+    /// reflections. Under 1x the composite samples `depth_view` directly.
+    depth_resolve_view: Arc<ImageView>,
     /// Single scene framebuffer (independent of the swapchain images: the
     /// resolve target is the shared offscreen image, not the swapchain).
     scene_framebuffer: Arc<Framebuffer>,
@@ -166,11 +176,13 @@ impl Renderer {
         let offscreen_view = create_offscreen_view(&scene.memory_allocator, extent);
         let msaa_color_view = create_msaa_color_view(&scene.memory_allocator, extent, aa_samples);
         let depth_view = create_depth_view(&scene.memory_allocator, extent, aa_samples);
+        let depth_resolve_view = create_depth_resolve_view(&scene.memory_allocator, extent);
         let scene_framebuffer = create_scene_framebuffer(
             &scene_render_pass,
             &offscreen_view,
             &depth_view,
             msaa_color_view.as_ref(),
+            Some(&depth_resolve_view),
         );
         let post = PostResources::new(
             &device,
@@ -191,6 +203,7 @@ impl Renderer {
             offscreen_view,
             msaa_color_view,
             depth_view,
+            depth_resolve_view,
             scene_framebuffer,
             post_framebuffers,
             hud_framebuffers,
@@ -221,6 +234,7 @@ impl Renderer {
         self.scene_render_pass = build_scene_render_pass(&self.device, aa);
         self.msaa_color_view = create_msaa_color_view(&self.scene.memory_allocator, extent, aa);
         self.depth_view = create_depth_view(&self.scene.memory_allocator, extent, aa);
+        self.depth_resolve_view = create_depth_resolve_view(&self.scene.memory_allocator, extent);
         self.scene = SceneResources::new(
             self.device.clone(),
             self.queue.clone(),
@@ -234,6 +248,7 @@ impl Renderer {
             &self.offscreen_view,
             &self.depth_view,
             self.msaa_color_view.as_ref(),
+            Some(&self.depth_resolve_view),
         );
     }
 
@@ -261,11 +276,13 @@ impl Renderer {
         self.offscreen_view = create_offscreen_view(&self.scene.memory_allocator, extent);
         self.msaa_color_view = create_msaa_color_view(&self.scene.memory_allocator, extent, aa);
         self.depth_view = create_depth_view(&self.scene.memory_allocator, extent, aa);
+        self.depth_resolve_view = create_depth_resolve_view(&self.scene.memory_allocator, extent);
         self.scene_framebuffer = create_scene_framebuffer(
             &self.scene_render_pass,
             &self.offscreen_view,
             &self.depth_view,
             self.msaa_color_view.as_ref(),
+            Some(&self.depth_resolve_view),
         );
         self.post_framebuffers = create_post_framebuffers(&self.post.pass, &new_images);
         self.hud_framebuffers = create_post_framebuffers(&self.post.hud_pass, &new_images);
@@ -347,6 +364,20 @@ impl Renderer {
         if fx.chroma {
             flags |= POST_CHROMA;
         }
+        if fx.rain_fx {
+            flags |= POST_RAINDROPS;
+        }
+        if fx.puddle_quality > 0.5 {
+            flags |= POST_REFLECT;
+        }
+        // The composite samples a readable 1x depth buffer: `depth_resolve_view`
+        // under MSAA (resolved in-subpass), the plain depth attachment at 1x.
+        let post_depth_view = if self.aa_samples == SampleCount::Sample1 {
+            self.depth_view.clone()
+        } else {
+            self.depth_resolve_view.clone()
+        };
+        let view_proj = frame.uniforms.proj * frame.uniforms.view;
         let post_settings = PostSettings {
             flags,
             time: self.post_clock,
@@ -357,7 +388,18 @@ impl Renderer {
             chroma_strength: 0.0015,
             texel_x: 1.0 / extent[0],
             texel_y: 1.0 / extent[1],
-            _pad: [0.0; 3],
+            wet_fac: frame.uniforms.wet_fac,
+            puddle_quality: fx.puddle_quality,
+            _pad: [0.0; 5],
+            inv_view_proj: view_proj.inverse().to_cols_array_2d(),
+            view_proj: view_proj.to_cols_array_2d(),
+            eye: [
+                frame.uniforms.eye.x,
+                frame.uniforms.eye.y,
+                frame.uniforms.eye.z,
+                1.0,
+            ],
+            fog_color: frame.uniforms.fog_color,
         };
         self.post_clock += dt.as_secs_f32();
 
@@ -373,6 +415,7 @@ impl Renderer {
             &self.post.bloom_fbs,
             &self.viewport,
             self.offscreen_view.clone(),
+            post_depth_view,
             &self.post.bloom_views,
             &post_settings,
         );
@@ -414,8 +457,12 @@ impl Renderer {
 }
 
 /// Builds the scene render pass. At 1x the offscreen image is the color
-/// attachment; at 2x/4x it becomes the resolve target of an MSAA color
-/// attachment, with a matching sample-count depth attachment.
+/// attachment and the depth attachment is sampled directly by the composite;
+/// at 2x/4x the offscreen image becomes the resolve target of an MSAA color
+/// attachment, and the MSAA depth is resolved in-subpass into a single-sampled
+/// depth target (the only way to get a readable depth buffer: Vulkan's
+/// `vkCmdResolveImage` cannot resolve depth, only the subpass
+/// `depth_stencil_resolve` can).
 fn build_scene_render_pass(device: &Arc<Device>, aa: SampleCount) -> Arc<RenderPass> {
     if aa == SampleCount::Sample1 {
         vulkano::single_pass_renderpass!(
@@ -431,7 +478,7 @@ fn build_scene_render_pass(device: &Arc<Device>, aa: SampleCount) -> Arc<RenderP
                     format: Format::D32_SFLOAT,
                     samples: 1,
                     load_op: Clear,
-                    store_op: DontCare,
+                    store_op: Store,
                 },
             },
             pass: {
@@ -463,11 +510,20 @@ fn build_scene_render_pass(device: &Arc<Device>, aa: SampleCount) -> Arc<RenderP
                     load_op: Clear,
                     store_op: DontCare,
                 },
+                depth_resolve: {
+                    format: Format::D32_SFLOAT,
+                    samples: 1,
+                    load_op: DontCare,
+                    store_op: Store,
+                },
             },
             pass: {
                 color: [color],
                 color_resolve: [resolve],
                 depth_stencil: { depth },
+                depth_stencil_resolve: { depth_resolve },
+                depth_resolve_mode: SampleZero,
+                stencil_resolve_mode: SampleZero,
             }
         )
         .expect("scene render pass")
@@ -538,7 +594,7 @@ fn create_depth_view(
                 format: Format::D32_SFLOAT,
                 extent: [extent[0], extent[1], 1],
                 samples: aa,
-                usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT,
+                usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::SAMPLED,
                 ..Default::default()
             },
             AllocationCreateInfo::default(),
@@ -548,23 +604,57 @@ fn create_depth_view(
     .expect("depth view")
 }
 
+/// Single-sampled depth image the composite pass samples for the puddle
+/// reflections. Under MSAA it is the subpass depth resolve target; the MSAA
+/// depth attachment is resolved into it in-pass, so no extra copy pass is
+/// needed.
+fn create_depth_resolve_view(
+    allocator: &Arc<StandardMemoryAllocator>,
+    extent: [u32; 2],
+) -> Arc<ImageView> {
+    ImageView::new_default(
+        Image::new(
+            allocator.clone(),
+            ImageCreateInfo {
+                image_type: ImageType::Dim2d,
+                format: Format::D32_SFLOAT,
+                extent: [extent[0], extent[1], 1],
+                usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT
+                    | ImageUsage::SAMPLED
+                    | ImageUsage::TRANSFER_DST,
+                ..Default::default()
+            },
+            AllocationCreateInfo::default(),
+        )
+        .expect("depth resolve image"),
+    )
+    .expect("depth resolve view")
+}
+
 /// Scene framebuffer. Attachment order must match the render pass: at 1x
-/// `[color, depth]`, under MSAA `[color, resolve, depth]`.
+/// `[color, depth]`, under MSAA `[color, resolve, depth, depth_resolve]`.
 fn create_scene_framebuffer(
     render_pass: &Arc<RenderPass>,
     offscreen: &Arc<ImageView>,
     depth: &Arc<ImageView>,
     msaa_color: Option<&Arc<ImageView>>,
+    depth_resolve: Option<&Arc<ImageView>>,
 ) -> Arc<Framebuffer> {
     let mut attachments = Vec::new();
     match msaa_color {
         Some(color) => {
             attachments.push(color.clone());
             attachments.push(offscreen.clone());
+            attachments.push(depth.clone());
+            if let Some(resolve) = depth_resolve {
+                attachments.push(resolve.clone());
+            }
         }
-        None => attachments.push(offscreen.clone()),
+        None => {
+            attachments.push(offscreen.clone());
+            attachments.push(depth.clone());
+        }
     }
-    attachments.push(depth.clone());
     Framebuffer::new(
         render_pass.clone(),
         FramebufferCreateInfo {
@@ -593,4 +683,42 @@ fn create_post_framebuffers(
             .unwrap()
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The MSAA depth resolve (subpass `depth_stencil_resolve`) is the only way
+    /// to get a readable single-sampled depth buffer for the SSR pass, so the
+    /// render pass + resolved depth target must build on the local device at
+    /// every supported sample count. Runs the real headless device creation.
+    #[test]
+    fn msaa_scene_render_pass_resolves_depth() {
+        let instance = crate::create_headless_instance();
+        let devices = crate::gpu::enumerate_devices(&instance);
+        let physical = crate::gpu::select_physical_device(&devices, 0);
+        let (device, _) = crate::gpu::create_graphics_context_headless(&physical);
+        for aa in [SampleCount::Sample2, SampleCount::Sample4] {
+            let render_pass = build_scene_render_pass(&device, aa);
+            let allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
+            let offscreen = create_offscreen_view(&allocator, [64, 64]);
+            let msaa_color = create_msaa_color_view(&allocator, [64, 64], aa)
+                .expect("msaa color view must exist under MSAA");
+            let depth = create_depth_view(&allocator, [64, 64], aa);
+            let depth_resolve = create_depth_resolve_view(&allocator, [64, 64]);
+            let framebuffer = create_scene_framebuffer(
+                &render_pass,
+                &offscreen,
+                &depth,
+                Some(&msaa_color),
+                Some(&depth_resolve),
+            );
+            assert_eq!(
+                framebuffer.attachments().len(),
+                4,
+                "MSAA framebuffer must carry color, resolve, depth and depth_resolve"
+            );
+        }
+    }
 }

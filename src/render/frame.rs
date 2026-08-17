@@ -45,6 +45,9 @@ pub struct FrameUniforms {
     pub lights: Lights,
     pub wet_fac: f32,
     pub fog_color: [f32; 4],
+    /// Camera eye position in world space (drives the wet-road specular in the
+    /// mesh shader and the post-pass puddle reflections).
+    pub eye: Vec3,
 }
 
 /// Headlight projector payload for one frame: the player's cone plus the
@@ -457,6 +460,7 @@ pub fn build_frame(
             lights,
             wet_fac,
             fog_color,
+            eye,
         },
         eye,
         cam_forward,

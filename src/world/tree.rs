@@ -169,7 +169,8 @@ mod tests {
 
         // Deterministic: a second identical build produces identical tree
         // placement (Vertex3d isn't PartialEq, so compare the tree signatures).
-        let (v2, _) = crate::mesh::build_world_chunk(0.0, 260.0, crate::mesh::TerrainDetail::Medium);
+        let (v2, _) =
+            crate::mesh::build_world_chunk(0.0, 260.0, crate::mesh::TerrainDetail::Medium);
         let sig = |verts: &[Vertex3d]| -> Vec<[f32; 3]> {
             let mut out: Vec<[f32; 3]> = verts
                 .iter()
