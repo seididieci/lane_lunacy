@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 //! Planar road reflections: a mirrored-camera pass that renders the scene
-//! (sky + world chunks + cars) into a half-resolution color target, plus the
+//! (sky + world chunks + cars) into a scaled color target, plus the
 //! reflection backend selector.
 //!
 //! The composite pass then samples that target for wet-asphalt puddles, so the
@@ -79,7 +79,7 @@ pub fn reflected_view(view: Mat4, plane_y: f32) -> Mat4 {
 /// and rebuilt via [`ReflectionResources::resize`].
 pub struct ReflectionResources {
     /// Reflection render pass: one RGBA16F color + one D32 depth attachment,
-    /// always single-sampled (the mirrored pass runs at half resolution).
+    /// always single-sampled (the mirrored pass runs at quality-selected scale).
     pub pass: Arc<RenderPass>,
     /// Sky dome pipeline bound to the reflection pass (depth off, like the
     /// scene sky pipeline).
@@ -90,12 +90,15 @@ pub struct ReflectionResources {
     /// Linear/clamped sampler for sampling the reflection target in the
     /// composite pass.
     pub sampler: Arc<Sampler>,
-    /// Reflection color target (half resolution).
+    /// Reflection color target (quality-selected resolution).
     pub color_view: Arc<ImageView>,
-    /// Reflection depth target (half resolution).
+    /// Reflection depth target (quality-selected resolution).
     pub depth_view: Arc<ImageView>,
     /// Framebuffer over the color+depth targets.
     pub framebuffer: Arc<Framebuffer>,
+    /// Reflection resolution divisor vs swapchain extent (1=full, 2=half,
+    /// 4=quarter).
+    pub scale_div: u32,
 }
 
 impl ReflectionResources {
@@ -103,6 +106,7 @@ impl ReflectionResources {
         device: &Arc<Device>,
         memory_allocator: &Arc<StandardMemoryAllocator>,
         extent: [u32; 2],
+        scale_div: u32,
     ) -> Self {
         let pass = vulkano::single_pass_renderpass!(
             device.clone(),
@@ -175,7 +179,7 @@ impl ReflectionResources {
         .expect("reflection sampler");
 
         let (color_view, depth_view, framebuffer) =
-            create_reflection_targets(&pass, memory_allocator, extent);
+            create_reflection_targets(&pass, memory_allocator, extent, scale_div);
 
         ReflectionResources {
             pass,
@@ -185,28 +189,37 @@ impl ReflectionResources {
             color_view,
             depth_view,
             framebuffer,
+            scale_div,
         }
     }
 
     /// Rebuilds the extent-dependent color/depth images and framebuffer
-    /// (window resize). The mirror pass runs at half the target resolution.
-    pub fn resize(&mut self, memory_allocator: &Arc<StandardMemoryAllocator>, extent: [u32; 2]) {
+    /// (window resize / quality change).
+    pub fn resize(
+        &mut self,
+        memory_allocator: &Arc<StandardMemoryAllocator>,
+        extent: [u32; 2],
+        scale_div: u32,
+    ) {
         let (color_view, depth_view, framebuffer) =
-            create_reflection_targets(&self.pass, memory_allocator, extent);
+            create_reflection_targets(&self.pass, memory_allocator, extent, scale_div);
         self.color_view = color_view;
         self.depth_view = depth_view;
         self.framebuffer = framebuffer;
+        self.scale_div = scale_div.max(1);
     }
 }
 
-/// Builds the color/depth targets and framebuffer for the reflection pass at
-/// half the target resolution.
+/// Builds the color/depth targets and framebuffer for the reflection pass at a
+/// quality-selected scale of the target resolution.
 fn create_reflection_targets(
     pass: &Arc<RenderPass>,
     memory_allocator: &Arc<StandardMemoryAllocator>,
     extent: [u32; 2],
+    scale_div: u32,
 ) -> (Arc<ImageView>, Arc<ImageView>, Arc<Framebuffer>) {
-    let refl_extent = [(extent[0] / 2).max(1), (extent[1] / 2).max(1)];
+    let div = scale_div.max(1);
+    let refl_extent = [(extent[0] / div).max(1), (extent[1] / div).max(1)];
     let color = Image::new(
         memory_allocator.clone(),
         ImageCreateInfo {

@@ -51,6 +51,10 @@ pub struct PostResources {
     pub hud_pipeline: Arc<GraphicsPipeline>,
     /// Linear/clamped sampler shared by the post and bloom passes.
     pub sampler: Arc<Sampler>,
+    /// Nearest/clamped sampler for the depth attachment: interpolated depth
+    /// values corrupt the world-position reconstruction (and thus the puddle
+    /// mask/planar UVs), so the depth sample must pick exact texels.
+    pub depth_sampler: Arc<Sampler>,
     /// Bloom chain images, level 0 = half res down to level 2 = eighth res.
     pub bloom_views: Vec<Arc<ImageView>>,
     /// One framebuffer per bloom level.
@@ -179,6 +183,18 @@ impl PostResources {
         )
         .expect("post sampler");
 
+        let depth_sampler = Sampler::new(
+            device.clone(),
+            SamplerCreateInfo {
+                mag_filter: Filter::Nearest,
+                min_filter: Filter::Nearest,
+                address_mode: [SamplerAddressMode::ClampToEdge; 3],
+                lod: 0.0..=0.0,
+                ..Default::default()
+            },
+        )
+        .expect("post depth sampler");
+
         let mut post = PostResources {
             pass,
             pipeline,
@@ -187,6 +203,7 @@ impl PostResources {
             hud_pass,
             hud_pipeline,
             sampler,
+            depth_sampler,
             bloom_views: Vec::new(),
             bloom_fbs: Vec::new(),
         };

@@ -17,6 +17,8 @@ pub const FLARE_FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spv/
 pub const POST_VERT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spv/post.vert.spv"));
 pub const POST_FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spv/post.frag.spv"));
 pub const BLOOM_FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spv/bloom.frag.spv"));
+pub const PUDDLE_MASK_FRAG_SPV: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/spv/puddle_mask.frag.spv"));
 
 pub fn spv_words(bytes: &[u8]) -> Vec<u32> {
     bytes
@@ -127,7 +129,8 @@ pub struct PostSettings {
     pub texel_x: f32,
     pub texel_y: f32,
     pub wet_fac: f32,
-    /// Puddle-reflection quality uniform: 0 = off, 1 = low, 2 = high. Lives in
+    /// Puddle-reflection quality uniform:
+    /// 0 = off, 1 = low, 2 = medium, 3 = high. Lives in
     /// what used to be padding, so the std140 layout is unchanged.
     pub puddle_quality: f32,
     /// Reflection backend selector (`REFLECT_OFF`/`REFLECT_PLANAR`/`REFLECT_SSR`).

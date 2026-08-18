@@ -145,13 +145,13 @@ impl AaMode {
 }
 
 /// Puddle-reflection quality levels offered by the PUDDLES row. `Off` skips the
-/// reflection pass entirely (cheapest, for GPUs that can't keep up); `Low`/
-/// `High` currently share the planar backend (the quality split returns when a
-/// second method lands).
+/// reflection pass entirely; `Low`/`Medium`/`High` map to progressively heavier
+/// planar-reflection cost tiers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PuddleQuality {
     Off,
     Low,
+    Medium,
     High,
 }
 
@@ -160,16 +160,19 @@ impl PuddleQuality {
         match self {
             PuddleQuality::Off => "OFF",
             PuddleQuality::Low => "LOW",
+            PuddleQuality::Medium => "MED",
             PuddleQuality::High => "HIGH",
         }
     }
 
-    /// Uniform value shipped to the post shader (0 = off, 1 = low, 2 = high).
+    /// Uniform value shipped to the post shader:
+    /// 0 = off, 1 = low, 2 = medium, 3 = high.
     pub fn uniform(self) -> f32 {
         match self {
             PuddleQuality::Off => 0.0,
             PuddleQuality::Low => 1.0,
-            PuddleQuality::High => 2.0,
+            PuddleQuality::Medium => 2.0,
+            PuddleQuality::High => 3.0,
         }
     }
 }
@@ -350,9 +353,14 @@ impl MenuState {
         }
     }
 
-    /// Cycles the PUDDLES row over OFF/LOW/HIGH.
+    /// Cycles the PUDDLES row over OFF/LOW/MED/HIGH.
     pub fn cycle_puddles(&mut self, delta: i32) {
-        let levels = [PuddleQuality::Off, PuddleQuality::Low, PuddleQuality::High];
+        let levels = [
+            PuddleQuality::Off,
+            PuddleQuality::Low,
+            PuddleQuality::Medium,
+            PuddleQuality::High,
+        ];
         let cur = levels
             .iter()
             .position(|l| *l == self.settings.puddles)
@@ -753,12 +761,17 @@ mod tests {
         menu.cycle_puddles(1);
         assert_eq!(menu.settings.puddles, PuddleQuality::Low);
         menu.cycle_puddles(1);
+        assert_eq!(menu.settings.puddles, PuddleQuality::Medium);
+        menu.cycle_puddles(1);
         assert_eq!(menu.settings.puddles, PuddleQuality::High);
+        menu.cycle_puddles(-1);
+        assert_eq!(menu.settings.puddles, PuddleQuality::Medium);
         menu.cycle_puddles(-1);
         assert_eq!(menu.settings.puddles, PuddleQuality::Low);
         assert_eq!(PuddleQuality::Off.uniform(), 0.0);
         assert_eq!(PuddleQuality::Low.uniform(), 1.0);
-        assert_eq!(PuddleQuality::High.uniform(), 2.0);
+        assert_eq!(PuddleQuality::Medium.uniform(), 2.0);
+        assert_eq!(PuddleQuality::High.uniform(), 3.0);
     }
 
     #[test]

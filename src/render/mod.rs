@@ -28,6 +28,7 @@ use crate::font::FontAtlas;
 use crate::game::Game;
 use crate::render::frame_builder::FrameBuilder;
 use crate::render::post::PostResources;
+use crate::render::puddle_mask::PuddleMaskResources;
 use crate::render::record::record_frame_posted;
 use crate::render::reflection::{reflected_view, ReflectionResources, REFLECTION_PLANE_Y};
 use crate::render::scene::SceneResources;
@@ -50,6 +51,7 @@ pub mod particles;
 pub mod pipeline;
 pub mod post;
 pub mod probe;
+pub mod puddle_mask;
 pub mod record;
 pub mod reflection;
 pub mod scene;
@@ -71,9 +73,47 @@ pub struct FxSettings {
     pub chroma: bool,
     /// Wet-lens rain droplets (visible only when the weather is wet).
     pub rain_fx: bool,
-    /// Puddle-reflection quality as a uniform value: 0 = off, 1 = low,
-    /// 2 = high. 0 also skips the SSR pass entirely.
+    /// Puddle-reflection quality uniform:
+    /// 0 = off, 1 = low, 2 = medium, 3 = high.
     pub puddle_quality: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PuddleQualityProfile {
+    enabled: bool,
+    reflection_scale_div: u32,
+    reflection_cadence: u32,
+}
+
+fn puddle_quality_profile(q: f32) -> PuddleQualityProfile {
+    if q < 0.5 {
+        PuddleQualityProfile {
+            enabled: false,
+            reflection_scale_div: 1,
+            reflection_cadence: 1,
+        }
+    } else if q < 1.5 {
+        // LOW: quarter-res reflection, updated every 2 frames.
+        PuddleQualityProfile {
+            enabled: true,
+            reflection_scale_div: 4,
+            reflection_cadence: 2,
+        }
+    } else if q < 2.5 {
+        // MED: half-res reflection, updated every frame.
+        PuddleQualityProfile {
+            enabled: true,
+            reflection_scale_div: 2,
+            reflection_cadence: 1,
+        }
+    } else {
+        // HIGH: full-res reflection, updated every frame.
+        PuddleQualityProfile {
+            enabled: true,
+            reflection_scale_div: 1,
+            reflection_cadence: 1,
+        }
+    }
 }
 
 /// Temporary post-composite diagnostics selected by `LANE_DEBUG_POST`.
@@ -139,6 +179,9 @@ pub struct Renderer {
     post: PostResources,
     /// Planar road-reflection pass: mirrored-camera target + pipelines.
     reflection: ReflectionResources,
+    /// Dedicated puddle-mask pass: renders a stable asphalt mask texture from
+    /// the main camera without relying on post depth reconstruction.
+    puddle_mask: PuddleMaskResources,
     /// Mutable per-frame state (particles, camera smoothing, world chunks).
     /// Math lives in `FrameBuilder`; this struct only feeds it the swapchain.
     frame_builder: FrameBuilder,
@@ -154,6 +197,8 @@ pub struct Renderer {
     fences: Vec<Option<FrameFence>>,
     previous_fence_i: u32,
     capture_request: Option<PathBuf>,
+    reflection_scale_div: u32,
+    reflection_cadence_flip: bool,
 }
 
 impl Renderer {
@@ -268,7 +313,14 @@ impl Renderer {
             &scene.memory_allocator,
             extent,
         );
-        let reflection = ReflectionResources::new(&device, &scene.memory_allocator, extent);
+        let reflection_scale_div = 1;
+        let reflection = ReflectionResources::new(
+            &device,
+            &scene.memory_allocator,
+            extent,
+            reflection_scale_div,
+        );
+        let puddle_mask = PuddleMaskResources::new(&device, &scene.memory_allocator, extent);
         let post_framebuffers = create_post_framebuffers(&post.pass, &images);
         let hud_framebuffers = create_post_framebuffers(&post.hud_pass, &images);
         let frame_count = post_framebuffers.len();
@@ -292,6 +344,7 @@ impl Renderer {
             scene,
             post,
             reflection,
+            puddle_mask,
             frame_builder: FrameBuilder::new(),
             font_atlas: font_atlas.clone(),
             seed,
@@ -302,6 +355,8 @@ impl Renderer {
             fences: vec![None; frame_count],
             previous_fence_i: 0,
             capture_request: None,
+            reflection_scale_div,
+            reflection_cadence_flip: false,
         }
     }
 
@@ -379,6 +434,8 @@ impl Renderer {
         self.post
             .create_bloom_images(&self.scene.memory_allocator, extent);
         self.reflection
+            .resize(&self.scene.memory_allocator, extent, self.reflection_scale_div);
+        self.puddle_mask
             .resize(&self.scene.memory_allocator, extent);
         self.viewport.extent = [dims.width as f32, dims.height as f32];
         self.recreate = false;
@@ -449,6 +506,16 @@ impl Renderer {
         timings.chunks_rebuilt = ws.chunks_rebuilt;
 
         let extent = self.viewport.extent;
+        let puddle_profile = puddle_quality_profile(fx.puddle_quality);
+        if puddle_profile.enabled && self.reflection_scale_div != puddle_profile.reflection_scale_div {
+            self.wait_idle();
+            self.reflection.resize(
+                &self.scene.memory_allocator,
+                [extent[0] as u32, extent[1] as u32],
+                puddle_profile.reflection_scale_div,
+            );
+            self.reflection_scale_div = puddle_profile.reflection_scale_div;
+        }
         let mut flags = 0u32;
         if fx.fxaa {
             flags |= POST_FXAA;
@@ -471,7 +538,7 @@ impl Renderer {
         if fx.rain_fx {
             flags |= POST_RAINDROPS;
         }
-        if fx.puddle_quality > 0.5 {
+        if puddle_profile.enabled {
             flags |= POST_REFLECT;
         }
         // Temporary diagnostics: LANE_DEBUG_POST=mask|planar visualizes the
@@ -492,10 +559,22 @@ impl Renderer {
         let view_proj = frame.uniforms.proj * frame.uniforms.view;
         // Planar reflections mirror the camera across the road plane; the
         // composite projects a road point through this to sample the target.
-        let reflection_method = if fx.puddle_quality > 0.5 {
+        let reflection_method = if puddle_profile.enabled {
             REFLECT_PLANAR
         } else {
             REFLECT_OFF
+        };
+        let should_record_reflection = if puddle_profile.enabled && frame.uniforms.wet_fac > 0.001 {
+            if puddle_profile.reflection_cadence <= 1 {
+                self.reflection_cadence_flip = false;
+                true
+            } else {
+                self.reflection_cadence_flip = !self.reflection_cadence_flip;
+                self.reflection_cadence_flip
+            }
+        } else {
+            self.reflection_cadence_flip = false;
+            false
         };
         let planar_view_proj = frame.uniforms.proj * reflected_view(frame.uniforms.view, REFLECTION_PLANE_Y);
         let post_settings = PostSettings {
@@ -531,6 +610,8 @@ impl Renderer {
             &self.scene,
             &self.post,
             &self.reflection,
+            &self.puddle_mask,
+            should_record_reflection,
             game,
             &frame,
             self.frame_builder.world_chunks(),

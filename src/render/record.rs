@@ -31,6 +31,7 @@ use crate::game::Game;
 use crate::render::frame::{traffic_rotation, Frame, SKY_RADIUS};
 use crate::render::frame_builder::WorldChunk;
 use crate::render::post::PostResources;
+use crate::render::puddle_mask::PuddleMaskResources;
 use crate::render::reflection::{reflected_view, ReflectionResources, REFLECTION_CLIP_Y};
 use crate::render::scene::SceneResources;
 use crate::road::road_curve;
@@ -103,6 +104,8 @@ pub fn record_frame_posted(
     scene: &SceneResources,
     post: &PostResources,
     reflection: &ReflectionResources,
+    puddle_mask: &PuddleMaskResources,
+    should_record_reflection: bool,
     game: &Game,
     frame: &Frame,
     world_chunks: &[WorldChunk],
@@ -160,27 +163,46 @@ pub fn record_frame_posted(
     timings.scene_ms = scene_started.elapsed().as_secs_f32() * 1000.0;
 
     // ---- Planar road reflections ----
-    // Mirrored-camera pass into a half-resolution target sampled by the
+    // Mirrored-camera pass into a quality-scaled target sampled by the
     // composite for wet-asphalt puddles. Runs whenever reflections are enabled;
     // when the flag is off the composite never samples the stale target.
     if settings.flags & crate::shaders::POST_REFLECT != 0 && settings.wet_fac > 0.001 {
-        let [rw, rh] = reflection.framebuffer.extent();
-        let reflection_viewport = Viewport {
+        let [mw, mh] = puddle_mask.framebuffer.extent();
+        let mask_viewport = Viewport {
             offset: [0.0, 0.0],
-            extent: [rw as f32, rh as f32],
+            extent: [mw as f32, mh as f32],
             depth_range: 0.0..=1.0,
         };
-        record_reflection(
+        record_puddle_mask(
             &mut builder,
             scene,
-            reflection,
+            puddle_mask,
             game,
             frame,
             world_chunks,
-            reflection.framebuffer.clone(),
-            &reflection_viewport,
-            settings.planar_plane_y,
+            puddle_mask.framebuffer.clone(),
+            &mask_viewport,
         );
+
+        if should_record_reflection {
+            let [rw, rh] = reflection.framebuffer.extent();
+            let reflection_viewport = Viewport {
+                offset: [0.0, 0.0],
+                extent: [rw as f32, rh as f32],
+                depth_range: 0.0..=1.0,
+            };
+            record_reflection(
+                &mut builder,
+                scene,
+                reflection,
+                game,
+                frame,
+                world_chunks,
+                reflection.framebuffer.clone(),
+                &reflection_viewport,
+                settings.planar_plane_y,
+            );
+        }
     }
 
     // ---- Bloom downsample chain ----
@@ -294,12 +316,17 @@ pub fn record_frame_posted(
             WriteDescriptorSet::image_view_sampler(
                 3,
                 depth_view,
-                post.sampler.clone(),
+                post.depth_sampler.clone(),
             ),
             WriteDescriptorSet::image_view_sampler(
                 4,
                 reflection.color_view.clone(),
                 reflection.sampler.clone(),
+            ),
+            WriteDescriptorSet::image_view_sampler(
+                5,
+                puddle_mask.mask_view.clone(),
+                puddle_mask.sampler.clone(),
             ),
         ],
         [],
@@ -821,6 +848,114 @@ fn record_reflection(
     builder
         .end_render_pass(SubpassEndInfo::default())
         .expect("end reflection render pass");
+}
+
+/// Records a dedicated puddle-mask pass from the main camera. The pass writes
+/// an asphalt-only static puddle mask into an R8 texture sampled by post.
+#[allow(clippy::too_many_arguments)]
+fn record_puddle_mask(
+    builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+    scene: &SceneResources,
+    puddle_mask: &PuddleMaskResources,
+    game: &Game,
+    frame: &Frame,
+    world_chunks: &[WorldChunk],
+    framebuffer: Arc<Framebuffer>,
+    viewport: &Viewport,
+) {
+    builder
+        .begin_render_pass(
+            RenderPassBeginInfo {
+                clear_values: vec![Some([0.0, 0.0, 0.0, 1.0].into()), Some(1.0f32.into())],
+                ..RenderPassBeginInfo::framebuffer(framebuffer)
+            },
+            SubpassBeginInfo {
+                contents: SubpassContents::Inline,
+                ..Default::default()
+            },
+        )
+        .expect("begin puddle-mask render pass")
+        .set_viewport(0, [viewport.clone()].into_iter().collect())
+        .expect("set puddle-mask viewport")
+        .bind_pipeline_graphics(puddle_mask.pipeline.clone())
+        .expect("bind puddle-mask pipeline");
+
+    let draw = |builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+                vertices: Subbuffer<[Vertex3d]>,
+                indices: Subbuffer<[u32]>,
+                model: Mat4| {
+        let index_count = indices.len() as u32;
+        let mvp = scene.mvp_buffer(
+            model,
+            &frame.uniforms,
+            &frame.headlights,
+            [0.0, 0.0, 0.0, -1.0],
+        );
+        let set_layout = puddle_mask.pipeline.layout().set_layouts()[0].clone();
+        let set = DescriptorSet::new(
+            scene.descriptor_set_allocator.clone(),
+            set_layout,
+            [WriteDescriptorSet::buffer(0, mvp)],
+            [],
+        )
+        .expect("puddle-mask descriptor set");
+        builder
+            .bind_descriptor_sets(
+                PipelineBindPoint::Graphics,
+                puddle_mask.pipeline.layout().clone(),
+                0,
+                set,
+            )
+            .expect("bind puddle-mask descriptor sets")
+            .bind_vertex_buffers(0, vertices)
+            .expect("bind puddle-mask vertex buffers")
+            .bind_index_buffer(indices)
+            .expect("bind puddle-mask index buffer");
+        unsafe {
+            builder
+                .draw_indexed(index_count, 1, 0, 0, 0)
+                .expect("draw puddle-mask indexed");
+        }
+    };
+
+    for (world_vertices, world_indices) in world_chunks {
+        draw(
+            builder,
+            world_vertices.clone(),
+            world_indices.clone(),
+            Mat4::IDENTITY,
+        );
+    }
+    draw(
+        builder,
+        scene.car_vertices.clone(),
+        scene.car_indices.clone(),
+        Mat4::from_scale_rotation_translation(
+            Vec3::ONE,
+            glam::Quat::from_rotation_y(-game.vehicle.heading),
+            Vec3::new(game.player_world_x(), 0.03, game.player_world_z()),
+        ),
+    );
+    for (idx, t) in game.traffic.iter().enumerate() {
+        let tvx = road_curve(t.distance) + t.lane;
+        let traffic_rot = traffic_rotation(t.lane, t.distance);
+        let (traffic_vertices, traffic_indices, _anchors) =
+            &scene.traffic_meshes[idx % scene.traffic_meshes.len()];
+        draw(
+            builder,
+            traffic_vertices.clone(),
+            traffic_indices.clone(),
+            Mat4::from_scale_rotation_translation(
+                Vec3::ONE,
+                traffic_rot,
+                Vec3::new(tvx, 0.35, -t.distance),
+            ),
+        );
+    }
+
+    builder
+        .end_render_pass(SubpassEndInfo::default())
+        .expect("end puddle-mask render pass");
 }
 
 /// Records the HUD/text draw: binds `hud_pipeline` (either the scene pass's

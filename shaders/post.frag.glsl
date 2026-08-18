@@ -20,8 +20,9 @@ layout(set = 0, binding = 0) uniform PostSettings {
     float texel_x;
     float texel_y;
     float wet_fac;
-    // Puddle-reflection quality: 0 = off (skip reflections entirely), 1 = low,
-    // 2 = high. Lives where the old padding began, so std140 layout is stable.
+    // Puddle-reflection quality:
+    // 0 = off, 1 = low, 2 = medium, 3 = high.
+    // Lives where the old padding began, so std140 layout is stable.
     float puddle_quality;
     // Reflection backend selector: 0 = off, 1 = planar, 2 = SSR. Planar is the
     // current default backend; SSR is kept as an alternative implementation.
@@ -43,6 +44,7 @@ layout(set = 0, binding = 1) uniform sampler2D scene;
 layout(set = 0, binding = 2) uniform sampler2D bloom;
 layout(set = 0, binding = 3) uniform sampler2D depth;
 layout(set = 0, binding = 4) uniform sampler2D planar_refl;
+layout(set = 0, binding = 5) uniform sampler2D puddle_mask_tex;
 
 const uint FLAG_FXAA = 1u << 0;
 const uint FLAG_BLOOM = 1u << 1;
@@ -114,7 +116,7 @@ vec3 fxaa(vec3 color, vec2 uv) {
 }
 
 // Reconstructs the world-space position of the surface seen at `uv`, given the
-// depth attachment value `d` (Vulkan clip-space z, y-down framebuffer UVs).
+// depth attachment value `d` (Vulkan clip-space z in [0, 1], framebuffer UVs).
 vec3 reconstruct_world(vec2 uv, float d) {
     vec4 clip = vec4(uv * 2.0 - 1.0, d, 1.0);
     vec4 w = inv_view_proj * clip;
@@ -353,37 +355,51 @@ void main() {
         color = vec3(r, color.g, bl);
     }
 
-    // Puddle reflections: reconstruct the surface and blend the reflection
-    // backend's output (planar texture by default, SSR as the alternative)
-    // into the wet asphalt. Runs before FXAA/bloom so the reflections are
-    // antialiased and get the same glow treatment as the rest of the frame.
+    // Puddle reflections: sample a dedicated puddle-mask pass rendered from the
+    // main camera, then blend the selected reflection backend into the wet
+    // asphalt. Runs before FXAA/bloom so reflections are antialiased and glow
+    // consistently with the rest of the frame.
     float dbg_mask = 0.0;
     vec3 dbg_planar = vec3(0.0);
     bool dbg_planar_valid = false;
     if ((flags & FLAG_REFLECT) != 0u && wet_fac > 0.001) {
-        float d = texture(depth, uv).r;
-        if (d < 1.0) {
-            vec3 world_pos = reconstruct_world(uv, d);
-            float pm = puddle_mask(world_pos, wet_fac, puddle_quality);
-            dbg_mask = pm;
-            if (pm > 0.001) {
-                vec3 view_dir = normalize(world_pos - eye.xyz);
-                vec3 refl = vec3(0.0);
-                if (reflection_method >= REFLECT_SSR) {
+        vec2 depth_uv = gl_FragCoord.xy * vec2(texel_x, texel_y);
+        float pm = texture(puddle_mask_tex, uv).r * wet_fac;
+        dbg_mask = pm;
+        if (pm > 0.001) {
+            vec3 refl = vec3(0.0);
+            bool refl_valid = true;
+            if (reflection_method >= REFLECT_SSR) {
+                float d = texture(depth, depth_uv).r;
+                if (d < 1.0) {
+                    vec3 world_pos = reconstruct_world(depth_uv, d);
+                    vec3 view_dir = normalize(world_pos - eye.xyz);
                     refl = ssr_reflection(world_pos, view_dir, puddle_quality);
-                } else if (reflection_method >= REFLECT_PLANAR) {
-                    vec4 clip = planar_view_proj * vec4(world_pos, 1.0);
-                    dbg_planar_valid = clip.w > 0.0;
-                    vec2 puv = clip.w > 0.0 ? clip.xy / clip.w * 0.5 + 0.5 : vec2(-1.0);
-                    dbg_planar_valid =
-                        dbg_planar_valid && puv.x >= 0.0 && puv.x <= 1.0 && puv.y >= 0.0 && puv.y <= 1.0;
-                    refl = texture(planar_refl, clamp(puv, 0.0, 1.0)).rgb;
-                    dbg_planar = refl;
+                } else {
+                    refl_valid = false;
                 }
-                // Fresnel-ish pickup: puddles reflect most at grazing angles
-                // (exactly how a chase camera sees the road ahead).
-                float fres = pow(1.0 - max(dot(normalize(view_dir), vec3(0.0, 1.0, 0.0)), 0.0), 3.0);
-                float blend = pm * (0.35 + 0.65 * fres);
+            } else if (reflection_method >= REFLECT_PLANAR) {
+                // For planar reflections, the mirrored camera shares the same
+                // screen projection on the road plane, so a road pixel at `uv`
+                // samples its reflection at the same `uv`.
+                if (puddle_quality < 1.5) {
+                    // LOW quality: quarter-res reflection target + cheap blur
+                    // to hide aliasing and temporal stepping.
+                    vec2 r = vec2(texel_x, texel_y) * 2.0;
+                    vec3 c = texture(planar_refl, uv).rgb * 0.4;
+                    c += texture(planar_refl, uv + vec2(r.x, 0.0)).rgb * 0.15;
+                    c += texture(planar_refl, uv + vec2(-r.x, 0.0)).rgb * 0.15;
+                    c += texture(planar_refl, uv + vec2(0.0, r.y)).rgb * 0.15;
+                    c += texture(planar_refl, uv + vec2(0.0, -r.y)).rgb * 0.15;
+                    refl = c;
+                } else {
+                    refl = texture(planar_refl, uv).rgb;
+                }
+                dbg_planar = refl;
+                dbg_planar_valid = true;
+            }
+            if (refl_valid) {
+                float blend = pm * 0.72;
                 color = mix(color, refl, clamp(blend, 0.0, 1.0));
                 color *= 1.0 - 0.22 * clamp(blend, 0.0, 1.0);
             }
