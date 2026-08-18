@@ -965,6 +965,7 @@ dependencies = [
  "half",
  "image",
  "shaderc",
+ "smallvec",
  "vulkano",
  "winit",
 ]

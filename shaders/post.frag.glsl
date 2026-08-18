@@ -62,6 +62,7 @@ const uint FLAG_DEBUG_REFLTEX = 1u << 10;
 const float REFLECT_OFF = 0.0;
 const float REFLECT_PLANAR = 1.0;
 const float REFLECT_SSR = 2.0;
+const float REFLECT_RT = 3.0;
 
 const vec3 LUMA = vec3(0.299, 0.587, 0.114);
 

@@ -32,7 +32,10 @@ use crate::render::frame::{traffic_rotation, Frame, SKY_RADIUS};
 use crate::render::frame_builder::WorldChunk;
 use crate::render::post::PostResources;
 use crate::render::puddle_mask::PuddleMaskResources;
-use crate::render::reflection::{reflected_view, ReflectionResources, REFLECTION_CLIP_Y};
+use crate::render::raytrace::RayTraceResources;
+use crate::render::reflection::{
+    reflected_view, ReflectionBackend, ReflectionResources, REFLECTION_CLIP_Y,
+};
 use crate::render::scene::SceneResources;
 use crate::road::road_curve;
 use crate::shaders::{BloomParams, PostSettings};
@@ -105,10 +108,12 @@ pub fn record_frame_posted(
     post: &PostResources,
     reflection: &ReflectionResources,
     puddle_mask: &PuddleMaskResources,
+    mut raytrace: Option<&mut RayTraceResources>,
     should_record_reflection: bool,
     game: &Game,
     frame: &Frame,
     world_chunks: &[WorldChunk],
+    chunk_indices: &[i32],
     scene_framebuffer: Arc<Framebuffer>,
     post_framebuffer: Arc<Framebuffer>,
     hud_framebuffer: Arc<Framebuffer>,
@@ -118,6 +123,7 @@ pub fn record_frame_posted(
     depth_view: Arc<ImageView>,
     bloom_views: &[Arc<ImageView>],
     settings: &PostSettings,
+    image_i: usize,
     timings: &mut crate::profiler::FrameTimings,
 ) -> Arc<PrimaryAutoCommandBuffer> {
     let mut builder = AutoCommandBufferBuilder::primary(
@@ -128,45 +134,70 @@ pub fn record_frame_posted(
     .expect("command buffer builder");
 
     // ---- Scene into offscreen ----
-    // One clear value per attachment: the color and depth are `Clear`, the MSAA
-    // color resolve and the single-sampled depth resolve targets (present only
-    // under 2x/4x) are `DontCare`.
+    // Under ray tracing the backend replaces the raster scene (and the puddle
+    // mask / planar-reflection passes below) by writing the offscreen directly,
+    // so bloom + post + HUD keep reading the same images as the raster path.
     let scene_started = std::time::Instant::now();
-    let scene_clears = match scene_framebuffer.attachments().len() {
-        2 => vec![Some([0.9, 0.7, 0.5, 1.0].into()), Some(1.0f32.into())],
-        4 => vec![
-            Some([0.9, 0.7, 0.5, 1.0].into()),
-            None,
-            Some(1.0f32.into()),
-            None,
-        ],
-        n => unreachable!("unexpected scene framebuffer attachment count: {n}"),
-    };
-    builder
-        .begin_render_pass(
-            RenderPassBeginInfo {
-                clear_values: scene_clears,
-                ..RenderPassBeginInfo::framebuffer(scene_framebuffer)
-            },
-            SubpassBeginInfo {
-                contents: SubpassContents::Inline,
-                ..Default::default()
-            },
-        )
-        .expect("begin scene render pass")
-        .set_viewport(0, [viewport.clone()].into_iter().collect())
-        .expect("set viewport");
-    record_scene_contents(&mut builder, scene, game, frame, world_chunks);
-    builder
-        .end_render_pass(SubpassEndInfo::default())
-        .expect("end scene render pass");
+    match raytrace.as_deref_mut() {
+        Some(rt) => {
+            let [w, h] = viewport.extent;
+            rt.record(
+                &mut builder,
+                scene,
+                game,
+                frame,
+                world_chunks,
+                chunk_indices,
+                image_i,
+                offscreen_view.clone(),
+                [w as u32, h as u32],
+            );
+        }
+        None => {
+            // One clear value per attachment: the color and depth are `Clear`,
+            // the MSAA color resolve and the single-sampled depth resolve
+            // targets (present only under 2x/4x) are `DontCare`.
+            let scene_clears = match scene_framebuffer.attachments().len() {
+                2 => vec![Some([0.9, 0.7, 0.5, 1.0].into()), Some(1.0f32.into())],
+                4 => vec![
+                    Some([0.9, 0.7, 0.5, 1.0].into()),
+                    None,
+                    Some(1.0f32.into()),
+                    None,
+                ],
+                n => unreachable!("unexpected scene framebuffer attachment count: {n}"),
+            };
+            builder
+                .begin_render_pass(
+                    RenderPassBeginInfo {
+                        clear_values: scene_clears,
+                        ..RenderPassBeginInfo::framebuffer(scene_framebuffer)
+                    },
+                    SubpassBeginInfo {
+                        contents: SubpassContents::Inline,
+                        ..Default::default()
+                    },
+                )
+                .expect("begin scene render pass")
+                .set_viewport(0, [viewport.clone()].into_iter().collect())
+                .expect("set viewport");
+            record_scene_contents(&mut builder, scene, game, frame, world_chunks);
+            builder
+                .end_render_pass(SubpassEndInfo::default())
+                .expect("end scene render pass");
+        }
+    }
     timings.scene_ms = scene_started.elapsed().as_secs_f32() * 1000.0;
 
     // ---- Planar road reflections ----
     // Mirrored-camera pass into a quality-scaled target sampled by the
     // composite for wet-asphalt puddles. Runs whenever reflections are enabled;
-    // when the flag is off the composite never samples the stale target.
-    if settings.flags & crate::shaders::POST_REFLECT != 0 && settings.wet_fac > 0.001 {
+    // when the flag is off the composite never samples the stale target. The
+    // ray-traced backend replaces this pass, so it is skipped here too.
+    if raytrace.is_none()
+        && settings.flags & crate::shaders::POST_REFLECT != 0
+        && settings.wet_fac > 0.001
+    {
         let [mw, mh] = puddle_mask.framebuffer.extent();
         let mask_viewport = Viewport {
             offset: [0.0, 0.0],
@@ -320,8 +351,8 @@ pub fn record_frame_posted(
             ),
             WriteDescriptorSet::image_view_sampler(
                 4,
-                reflection.color_view.clone(),
-                reflection.sampler.clone(),
+                reflection.color_view().clone(),
+                reflection.sampler().clone(),
             ),
             WriteDescriptorSet::image_view_sampler(
                 5,

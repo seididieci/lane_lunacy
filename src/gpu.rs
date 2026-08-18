@@ -4,10 +4,43 @@ use std::sync::Arc;
 
 use vulkano::device::physical::{PhysicalDevice, PhysicalDeviceType};
 use vulkano::device::{
-    Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo, QueueFlags,
+    Device, DeviceCreateInfo, DeviceExtensions, DeviceFeatures, Queue, QueueCreateInfo,
+    QueueFlags,
 };
 use vulkano::instance::Instance;
 use vulkano::swapchain::Surface;
+
+/// Whether the physical device can run the ray-tracing backend: it needs the
+/// acceleration-structure, ray-tracing-pipeline and deferred-host-operations
+/// extensions plus buffer device addresses for BLAS/TLAS references.
+pub fn ray_tracing_supported(physical: &Arc<PhysicalDevice>) -> bool {
+    let ext = physical.supported_extensions();
+    ext.khr_acceleration_structure
+        && ext.khr_ray_tracing_pipeline
+        && ext.khr_deferred_host_operations
+        && ext.khr_buffer_device_address
+}
+
+/// Extensions to enable on the device when the GPU supports ray tracing.
+fn raytrace_extensions() -> DeviceExtensions {
+    DeviceExtensions {
+        khr_acceleration_structure: true,
+        khr_ray_tracing_pipeline: true,
+        khr_deferred_host_operations: true,
+        khr_buffer_device_address: true,
+        ..DeviceExtensions::empty()
+    }
+}
+
+/// Features to enable on the device when the GPU supports ray tracing.
+fn raytrace_features() -> DeviceFeatures {
+    DeviceFeatures {
+        acceleration_structure: true,
+        ray_tracing_pipeline: true,
+        buffer_device_address: true,
+        ..DeviceFeatures::default()
+    }
+}
 
 pub fn enumerate_devices(instance: &Arc<Instance>) -> Vec<Arc<PhysicalDevice>> {
     let all: Vec<Arc<_>> = instance
@@ -38,11 +71,13 @@ pub fn select_physical_device(
     index: usize,
 ) -> Arc<PhysicalDevice> {
     let chosen = index.min(devices.len().saturating_sub(1));
+    let rt = ray_tracing_supported(&devices[chosen]);
     println!(
-        "Using GPU [{}]: {}  ({:?})",
+        "Using GPU [{}]: {}  ({:?})  ray tracing: {}",
         chosen,
         devices[chosen].properties().device_name,
-        devices[chosen].properties().device_type
+        devices[chosen].properties().device_type,
+        if rt { "supported" } else { "unavailable" }
     );
     devices[chosen].clone()
 }
@@ -64,6 +99,15 @@ pub fn create_graphics_context(
         .map(|(i, _)| i as u32)
         .expect("no queue family with graphics + present support");
 
+    let rt_supported = ray_tracing_supported(physical);
+    let (mut enabled_extensions, mut enabled_features) =
+        (DeviceExtensions::empty(), DeviceFeatures::default());
+    if rt_supported {
+        enabled_extensions = raytrace_extensions();
+        enabled_features = raytrace_features();
+    }
+    enabled_extensions.khr_swapchain = true;
+
     let (device, mut queues) = Device::new(
         physical.clone(),
         DeviceCreateInfo {
@@ -71,10 +115,8 @@ pub fn create_graphics_context(
                 queue_family_index,
                 ..Default::default()
             }],
-            enabled_extensions: DeviceExtensions {
-                khr_swapchain: true,
-                ..DeviceExtensions::empty()
-            },
+            enabled_extensions,
+            enabled_features,
             ..Default::default()
         },
     )
@@ -98,6 +140,14 @@ pub fn create_graphics_context_headless(
         .map(|(i, _)| i as u32)
         .expect("no queue family with graphics support");
 
+    let rt_supported = ray_tracing_supported(physical);
+    let (enabled_extensions, enabled_features) =
+        if rt_supported {
+            (raytrace_extensions(), raytrace_features())
+        } else {
+            (DeviceExtensions::empty(), DeviceFeatures::default())
+        };
+
     let (device, mut queues) = Device::new(
         physical.clone(),
         DeviceCreateInfo {
@@ -105,6 +155,8 @@ pub fn create_graphics_context_headless(
                 queue_family_index,
                 ..Default::default()
             }],
+            enabled_extensions,
+            enabled_features,
             ..Default::default()
         },
     )

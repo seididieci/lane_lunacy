@@ -29,12 +29,13 @@ use crate::game::Game;
 use crate::render::frame_builder::FrameBuilder;
 use crate::render::post::PostResources;
 use crate::render::puddle_mask::PuddleMaskResources;
+use crate::render::raytrace::RayTraceResources;
 use crate::render::record::record_frame_posted;
 use crate::render::reflection::{reflected_view, ReflectionResources, REFLECTION_PLANE_Y};
 use crate::render::scene::SceneResources;
 use crate::shaders::{
     PostSettings, POST_BLOOM, POST_CHROMA, POST_DEBUG_MASK, POST_DEBUG_PLANAR, POST_DEBUG_REFLTEX,
-    POST_FXAA, POST_GRAIN, POST_RAINDROPS, REFLECT_OFF, REFLECT_PLANAR, POST_REFLECT,
+    POST_FXAA, POST_GRAIN, POST_RAINDROPS, REFLECT_OFF, REFLECT_PLANAR, REFLECT_RT, POST_REFLECT,
     POST_SATURATION, POST_VIGNETTE,
 };
 use crate::vertex::HudVertex;
@@ -52,6 +53,7 @@ pub mod pipeline;
 pub mod post;
 pub mod probe;
 pub mod puddle_mask;
+pub mod raytrace;
 pub mod record;
 pub mod reflection;
 pub mod scene;
@@ -76,6 +78,10 @@ pub struct FxSettings {
     /// Puddle-reflection quality uniform:
     /// 0 = off, 1 = low, 2 = medium, 3 = high.
     pub puddle_quality: f32,
+    /// Ray-traced lighting + reflections: replaces the raster scene, the
+    /// puddle mask and the planar-reflection pass. Requires a device with the
+    /// ray-tracing extensions (see `gpu::ray_tracing_supported`).
+    pub raytrace: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -182,6 +188,11 @@ pub struct Renderer {
     /// Dedicated puddle-mask pass: renders a stable asphalt mask texture from
     /// the main camera without relying on post depth reconstruction.
     puddle_mask: PuddleMaskResources,
+    /// Ray-traced backend, created lazily on the first frame it is enabled.
+    /// Only present when the device supports the ray-tracing extensions.
+    raytrace: Option<Arc<RayTraceResources>>,
+    /// Whether the physical device can run the ray-traced backend.
+    ray_tracing_supported: bool,
     /// Mutable per-frame state (particles, camera smoothing, world chunks).
     /// Math lives in `FrameBuilder`; this struct only feeds it the swapchain.
     frame_builder: FrameBuilder,
@@ -345,6 +356,8 @@ impl Renderer {
             post,
             reflection,
             puddle_mask,
+            raytrace: None,
+            ray_tracing_supported: crate::gpu::ray_tracing_supported(physical),
             frame_builder: FrameBuilder::new(),
             font_atlas: font_atlas.clone(),
             seed,
@@ -506,8 +519,22 @@ impl Renderer {
         timings.chunks_rebuilt = ws.chunks_rebuilt;
 
         let extent = self.viewport.extent;
+        // Ray tracing replaces the raster scene, puddle mask and planar
+        // reflections, so nothing below (bloom, post, HUD) needs to know. The
+        // backend is created lazily the first frame it is toggled on.
+        let rt_on = fx.raytrace && self.ray_tracing_supported;
+        if rt_on && self.raytrace.is_none() {
+            self.raytrace = Some(RayTraceResources::new(
+                self.device.clone(),
+                &self.scene,
+                self.swapchain_images.len(),
+            ));
+        }
         let puddle_profile = puddle_quality_profile(fx.puddle_quality);
-        if puddle_profile.enabled && self.reflection_scale_div != puddle_profile.reflection_scale_div {
+        if puddle_profile.enabled
+            && !rt_on
+            && self.reflection_scale_div != puddle_profile.reflection_scale_div
+        {
             self.wait_idle();
             self.reflection.resize(
                 &self.scene.memory_allocator,
@@ -538,7 +565,7 @@ impl Renderer {
         if fx.rain_fx {
             flags |= POST_RAINDROPS;
         }
-        if puddle_profile.enabled {
+        if puddle_profile.enabled && !rt_on {
             flags |= POST_REFLECT;
         }
         // Temporary diagnostics: LANE_DEBUG_POST=mask|planar visualizes the
@@ -559,12 +586,18 @@ impl Renderer {
         let view_proj = frame.uniforms.proj * frame.uniforms.view;
         // Planar reflections mirror the camera across the road plane; the
         // composite projects a road point through this to sample the target.
-        let reflection_method = if puddle_profile.enabled {
+        // Under ray tracing the reflections are baked into the offscreen, so
+        // the composite skips the puddle blend entirely (REFLECT_RT).
+        let reflection_method = if rt_on {
+            REFLECT_RT
+        } else if puddle_profile.enabled {
             REFLECT_PLANAR
         } else {
             REFLECT_OFF
         };
-        let should_record_reflection = if puddle_profile.enabled && frame.uniforms.wet_fac > 0.001 {
+        let should_record_reflection = if rt_on {
+            false
+        } else if puddle_profile.enabled && frame.uniforms.wet_fac > 0.001 {
             if puddle_profile.reflection_cadence <= 1 {
                 self.reflection_cadence_flip = false;
                 true
@@ -611,10 +644,12 @@ impl Renderer {
             &self.post,
             &self.reflection,
             &self.puddle_mask,
+            self.raytrace.as_mut().and_then(Arc::get_mut),
             should_record_reflection,
             game,
             &frame,
             self.frame_builder.world_chunks(),
+            self.frame_builder.world_chunk_indices(),
             self.scene_framebuffer.clone(),
             self.post_framebuffers[image_i as usize].clone(),
             self.hud_framebuffers[image_i as usize].clone(),
@@ -624,6 +659,7 @@ impl Renderer {
             post_depth_view,
             &self.post.bloom_views,
             &post_settings,
+            image_i as usize,
             timings,
         );
         timings.record_ms = record_started.elapsed().as_secs_f32() * 1000.0;

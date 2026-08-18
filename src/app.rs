@@ -104,6 +104,8 @@ impl App {
         windowed: bool,
         // `--debug`: start with the F3 debug HUD enabled.
         debug: bool,
+        // `--raytrace`: start with the ray-traced backend enabled.
+        raytrace: bool,
         profile: Option<PathBuf>,
         present_mode: PresentMode,
         fps_limit: Option<u32>,
@@ -137,11 +139,18 @@ impl App {
             applied: SettingsState {
                 gpu_index,
                 weather,
+                raytrace,
                 ..SettingsState::default()
             },
             supported_aa: vec![AaMode::Off],
             seed,
-            menu: MenuState::new(gpu_index, weather),
+            menu: MenuState {
+                settings: SettingsState {
+                    raytrace,
+                    ..SettingsState::default()
+                },
+                ..MenuState::new(gpu_index, weather)
+            },
             mode: AppMode::Menu,
             game,
             input: Input::default(),
@@ -463,7 +472,8 @@ impl App {
             | SettingsRow::Grain
             | SettingsRow::Saturation
             | SettingsRow::ChromaticAberration
-            | SettingsRow::RainFx => self.menu.toggle_fx(self.menu.settings_cursor),
+            | SettingsRow::RainFx
+            | SettingsRow::Raytrace => self.menu.toggle_fx(self.menu.settings_cursor),
             SettingsRow::Reflect => self.menu.cycle_puddles(delta),
             SettingsRow::Apply | SettingsRow::Back => {}
         }
@@ -636,6 +646,7 @@ impl ApplicationHandler for App {
             chroma: self.applied.chroma,
             rain_fx: self.applied.rain_fx,
             puddle_quality: self.applied.puddles.uniform(),
+            raytrace: self.applied.raytrace,
         };
         let render_started = Instant::now();
         let capture_done = renderer.render(&self.game, dt, &hud_verts, &fx, &mut timings);

@@ -80,6 +80,7 @@ pub enum SettingsRow {
     ChromaticAberration,
     RainFx,
     Reflect,
+    Raytrace,
     Apply,
     Back,
 }
@@ -99,7 +100,8 @@ impl SettingsRow {
             SettingsRow::ChromaticAberration => SettingsRow::Saturation,
             SettingsRow::RainFx => SettingsRow::ChromaticAberration,
             SettingsRow::Reflect => SettingsRow::RainFx,
-            SettingsRow::Apply => SettingsRow::Reflect,
+            SettingsRow::Raytrace => SettingsRow::Reflect,
+            SettingsRow::Apply => SettingsRow::Raytrace,
             SettingsRow::Back => SettingsRow::Apply,
         }
     }
@@ -117,7 +119,8 @@ impl SettingsRow {
             SettingsRow::Saturation => SettingsRow::ChromaticAberration,
             SettingsRow::ChromaticAberration => SettingsRow::RainFx,
             SettingsRow::RainFx => SettingsRow::Reflect,
-            SettingsRow::Reflect => SettingsRow::Apply,
+            SettingsRow::Reflect => SettingsRow::Raytrace,
+            SettingsRow::Raytrace => SettingsRow::Apply,
             SettingsRow::Apply => SettingsRow::Back,
             SettingsRow::Back => SettingsRow::Back,
         }
@@ -199,6 +202,9 @@ pub struct SettingsState {
     /// Planar puddle reflections on the wet asphalt (high quality by default;
     /// can be lowered or disabled for weaker GPUs).
     pub puddles: PuddleQuality,
+    /// Full ray-traced lighting + reflections (only on GPUs with the
+    /// ray-tracing extensions).
+    pub raytrace: bool,
 }
 
 impl Default for SettingsState {
@@ -217,6 +223,7 @@ impl Default for SettingsState {
             chroma: false,
             rain_fx: true,
             puddles: PuddleQuality::High,
+            raytrace: false,
         }
     }
 }
@@ -349,6 +356,7 @@ impl MenuState {
             SettingsRow::Saturation => self.settings.saturation = !self.settings.saturation,
             SettingsRow::ChromaticAberration => self.settings.chroma = !self.settings.chroma,
             SettingsRow::RainFx => self.settings.rain_fx = !self.settings.rain_fx,
+            SettingsRow::Raytrace => self.settings.raytrace = !self.settings.raytrace,
             _ => {}
         }
     }
@@ -556,10 +564,19 @@ fn build_settings_tree(
                 .focused(focused(SettingsRow::Reflect)),
             ),
             Node::new(
-                Button::new("APPLY", ROW_EM, apply_color, 21).focused(focused(SettingsRow::Apply)),
+                Button::new(
+                    format!("RAYTRACING  {}", on_off(s.raytrace)),
+                    ROW_EM,
+                    ROW_COLOR,
+                    21,
+                )
+                .focused(focused(SettingsRow::Raytrace)),
             ),
             Node::new(
-                Button::new("BACK", ROW_EM, ROW_COLOR, 22).focused(focused(SettingsRow::Back)),
+                Button::new("APPLY", ROW_EM, apply_color, 22).focused(focused(SettingsRow::Apply)),
+            ),
+            Node::new(
+                Button::new("BACK", ROW_EM, ROW_COLOR, 23).focused(focused(SettingsRow::Back)),
             ),
         ],
         ROW_GAP,
@@ -641,7 +658,7 @@ mod tests {
         assert!(!verts.is_empty());
 
         // Every settings row must be present and hit-testable on the center line.
-        for id in 10..=22 {
+        for id in 10..=23 {
             assert!(
                 hit_test_id(&root, &ui, id),
                 "settings row id {id} must be hit-testable"

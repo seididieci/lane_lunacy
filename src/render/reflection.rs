@@ -41,11 +41,15 @@ pub const REFLECTION_PLANE_Y: f32 = 0.02;
 pub const REFLECTION_CLIP_Y: f32 = 0.03;
 
 /// Reflection backend selector. This is the seam a future RT/SSR backend slots
-/// into; `Planar` is the only implemented method right now.
+/// into; `Planar` is the only implemented method right now. `RayTraced` is the
+/// value shipped to the post shader when the scene is rendered entirely by the
+/// ray-tracing backend (reflections are baked into the offscreen image, so the
+/// composite never samples a separate reflection target).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReflectionMethod {
     Off,
     Planar,
+    RayTraced,
 }
 
 impl ReflectionMethod {
@@ -54,8 +58,21 @@ impl ReflectionMethod {
         match self {
             ReflectionMethod::Off => crate::shaders::REFLECT_OFF,
             ReflectionMethod::Planar => crate::shaders::REFLECT_PLANAR,
+            ReflectionMethod::RayTraced => crate::shaders::REFLECT_RT,
         }
     }
+}
+
+/// Any object that can supply the reflection source sampled by the post
+/// composite. The planar pass and the ray-tracing backend both provide a color
+/// target plus a sampler, so `record_frame_posted` can consume either without
+/// depending on the concrete type.
+pub trait ReflectionBackend {
+    /// Color target holding the reflection source (planar mirror render or the
+    /// ray-traced offscreen image).
+    fn color_view(&self) -> &Arc<ImageView>;
+    /// Sampler used to read the reflection source in the composite.
+    fn sampler(&self) -> &Arc<Sampler>;
 }
 
 /// Reflection matrix across the horizontal plane `y = plane_y`. Reflects a
@@ -207,6 +224,16 @@ impl ReflectionResources {
         self.depth_view = depth_view;
         self.framebuffer = framebuffer;
         self.scale_div = scale_div.max(1);
+    }
+}
+
+impl ReflectionBackend for ReflectionResources {
+    fn color_view(&self) -> &Arc<ImageView> {
+        &self.color_view
+    }
+
+    fn sampler(&self) -> &Arc<Sampler> {
+        &self.sampler
     }
 }
 

@@ -19,6 +19,12 @@ pub const POST_FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spv/p
 pub const BLOOM_FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spv/bloom.frag.spv"));
 pub const PUDDLE_MASK_FRAG_SPV: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/spv/puddle_mask.frag.spv"));
+pub const RAYTRACE_RGEN_SPV: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/spv/raytrace.rgen.spv"));
+pub const RAYTRACE_RCHIT_SPV: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/spv/raytrace.rchit.spv"));
+pub const RAYTRACE_RMISS_SPV: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/spv/raytrace.rmiss.spv"));
 
 pub fn spv_words(bytes: &[u8]) -> Vec<u32> {
     bytes
@@ -76,6 +82,37 @@ pub struct SkyUniform {
     pub sun_state: [f32; 4],
 }
 
+/// UBO for the ray-traced pass (`raytrace.rgen.glsl` binding 0). Carries the
+/// camera unprojection and the sky palette so the raygen can shoot primary rays
+/// and the miss shader can reproduce the sky dome exactly. The actual surface
+/// lighting reads the ordinary [`MVP`] block (binding 1), so the RT render and
+/// the raster scene can never drift apart.
+///
+/// Layout must mirror the `RtUniforms` block in `raytrace.rgen.glsl` exactly
+/// (std140): the scalar `cloud_amount`/`time` fields pad to the 16-byte
+/// alignment the `mat4`/`vec4` members need.
+#[derive(BufferContents, Clone, Copy, Debug)]
+#[repr(C)]
+pub struct RtUniforms {
+    /// Inverse of (projection * view): unprojects NDC -> world for the primary
+    /// rays.
+    pub inv_view_proj: [[f32; 4]; 4],
+    /// Camera eye position in world space (ray origin).
+    pub eye: [f32; 4],
+    /// Horizon fog color (final fog blend for hit surfaces).
+    pub fog_color: [f32; 4],
+    pub zenith: [f32; 4],
+    pub horizon: [f32; 4],
+    pub cloud_tint: [f32; 4],
+    pub light_dir: [f32; 4],
+    pub cloud_amount: f32,
+    pub _pad: [f32; 3],
+    pub sun_state: [f32; 4],
+    /// Sky clock (star twinkle + cloud drift in the miss shader).
+    pub time: f32,
+    pub _pad2: [f32; 3],
+}
+
 /// Per-FX bits for [`PostSettings::flags`]. Mirrors the `FLAG_*` consts in
 /// `post.frag.glsl`.
 pub const POST_FXAA: u32 = 1 << 0;
@@ -102,6 +139,9 @@ pub const POST_DEBUG_REFLTEX: u32 = 1 << 10;
 pub const REFLECT_OFF: f32 = 0.0;
 pub const REFLECT_PLANAR: f32 = 1.0;
 pub const REFLECT_SSR: f32 = 2.0;
+/// Ray-traced backend: reflections are baked into the offscreen image, so the
+/// composite never samples a separate reflection target.
+pub const REFLECT_RT: f32 = 3.0;
 
 /// UBO for the post-processing pass. `flags` gates each effect; the float
 /// factors are the fixed per-effect intensities; `texel_x/y` are the inverse

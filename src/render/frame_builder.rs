@@ -132,6 +132,13 @@ impl FrameBuilder {
         &self.world_chunks
     }
 
+    /// Chunk index of each entry in [`Self::world_chunks`], in the same order.
+    /// The ray-traced backend uses this to detect when the window moved and a
+    /// BLAS rebuild is required.
+    pub fn world_chunk_indices(&self) -> &[i32] {
+        &self.world_chunk_indices
+    }
+
     /// Volume and timing of the cached world meshes (debug HUD).
     pub fn world_stats(&self) -> WorldStats {
         let mut stats = WorldStats::default();

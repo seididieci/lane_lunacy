@@ -92,6 +92,9 @@ pub enum RunMode {
         windowed: bool,
         /// `--debug`: start with the F3 debug HUD (FPS etc.) enabled.
         debug: bool,
+        /// `--raytrace`: start with ray-traced lighting + reflections enabled
+        /// (only effective on GPUs with the ray-tracing extensions).
+        raytrace: bool,
         /// `--profile <path.csv>`: record per-frame timings to the CSV and write
         /// a Markdown analysis report on close.
         profile: Option<PathBuf>,
@@ -125,6 +128,7 @@ pub fn parse(args: &[String]) -> RunMode {
     let mut seed: Option<u64> = None;
     let mut windowed = false;
     let mut profile: Option<PathBuf> = None;
+    let mut raytrace = false;
     let mut present_mode = PresentMode::Fifo;
     let mut fps_limit: Option<u32> = None;
     let mut window_capture: Option<PathBuf> = None;
@@ -206,6 +210,10 @@ pub fn parse(args: &[String]) -> RunMode {
             }
             "--windowed" => {
                 windowed = true;
+                i += 1;
+            }
+            "--raytrace" => {
+                raytrace = true;
                 i += 1;
             }
             "--debug" => {
@@ -335,6 +343,7 @@ pub fn parse(args: &[String]) -> RunMode {
             seed,
             windowed,
             debug,
+            raytrace,
             profile,
             present_mode,
             fps_limit,
@@ -376,6 +385,7 @@ mod tests {
                 seed,
                 windowed,
                 debug,
+                raytrace,
                 profile,
                 present_mode,
                 fps_limit,
@@ -388,6 +398,7 @@ mod tests {
                 assert_eq!(seed, None);
                 assert!(!windowed);
                 assert!(!debug);
+                assert!(!raytrace);
                 assert_eq!(profile, None);
                 assert_eq!(present_mode, PresentMode::Fifo);
                 assert_eq!(fps_limit, None);
