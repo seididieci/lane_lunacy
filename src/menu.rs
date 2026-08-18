@@ -145,8 +145,9 @@ impl AaMode {
 }
 
 /// Puddle-reflection quality levels offered by the PUDDLES row. `Off` skips the
-/// screen-space reflection pass entirely (cheapest, for GPUs that can't keep
-/// up); `Low`/`High` trade reflection ray steps and noise octaves.
+/// reflection pass entirely (cheapest, for GPUs that can't keep up); `Low`/
+/// `High` currently share the planar backend (the quality split returns when a
+/// second method lands).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PuddleQuality {
     Off,
@@ -192,8 +193,8 @@ pub struct SettingsState {
     pub chroma: bool,
     /// Wet-lens rain droplets on the camera (on by default).
     pub rain_fx: bool,
-    /// Screen-space puddle reflections on the wet asphalt (high quality by
-    /// default; can be lowered or disabled for weaker GPUs).
+    /// Planar puddle reflections on the wet asphalt (high quality by default;
+    /// can be lowered or disabled for weaker GPUs).
     pub puddles: PuddleQuality,
 }
 

@@ -15,6 +15,8 @@ fn main() {
             profile,
             present_mode,
             fps_limit,
+            window_capture,
+            capture_dir,
         } => lane_lunacy::run(
             gpu,
             weather,
@@ -25,6 +27,8 @@ fn main() {
             profile,
             present_mode,
             fps_limit,
+            window_capture,
+            capture_dir,
         ),
         RunMode::Snapshot(opts) => lane_lunacy::run_snapshot(opts),
         RunMode::Report(csv) => lane_lunacy::run_report(csv),

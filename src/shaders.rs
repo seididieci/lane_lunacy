@@ -50,6 +50,12 @@ pub struct MVP {
     pub lamp_state: [[f32; 4]; 16],
     /// Terrain (grass/verge) day/night tint: [tint.rgb, unused].
     pub terrain_state: [f32; 4],
+    /// World-space clip plane `(n, d)` for the planar-reflection pass: fragments
+    /// with `dot(world_pos_h, clip_plane) > 0` are discarded. `(0,0,0,-1)`
+    /// disables clipping (never positive), so the shared MVP block stays
+    /// correct for the ordinary scene and particle passes. Appended after
+    /// `terrain_state` so the shorter particle MVP block is unaffected.
+    pub clip_plane: [f32; 4],
 }
 
 #[derive(BufferContents, Clone, Copy, Debug)]
@@ -78,15 +84,33 @@ pub const POST_SATURATION: u32 = 1 << 4;
 pub const POST_CHROMA: u32 = 1 << 5;
 /// Camera rain-droplet lens effect (wet lens), gated by `wet_fac`.
 pub const POST_RAINDROPS: u32 = 1 << 6;
-/// Screen-space puddle reflections on the wet asphalt, gated by `wet_fac`.
+/// Puddle reflections on the wet asphalt, gated by `wet_fac` and dispatched by
+/// `reflection_method`.
 pub const POST_REFLECT: u32 = 1 << 7;
+/// Temporary diagnostics (LANE_DEBUG_POST env): visualize the puddle mask.
+pub const POST_DEBUG_MASK: u32 = 1 << 8;
+/// Temporary diagnostics (LANE_DEBUG_POST env): visualize the planar sample.
+pub const POST_DEBUG_PLANAR: u32 = 1 << 9;
+/// Temporary diagnostics (LANE_DEBUG_POST env): dump the planar texture.
+pub const POST_DEBUG_REFLTEX: u32 = 1 << 10;
+
+/// Reflection backend selector shipped to the post shader. Mirrors the
+/// `REFLECT_*` consts in `post.frag.glsl`. `Off` also skips the planar
+/// reflection pass entirely (no second render).
+pub const REFLECT_OFF: f32 = 0.0;
+pub const REFLECT_PLANAR: f32 = 1.0;
+pub const REFLECT_SSR: f32 = 2.0;
 
 /// UBO for the post-processing pass. `flags` gates each effect; the float
 /// factors are the fixed per-effect intensities; `texel_x/y` are the inverse
 /// framebuffer size (for FXAA/chroma); `time` drives the animated grain and
 /// the rain droplets; `wet_fac` drives the wet-lens droplets and the puddle
-/// reflections. `inv_view_proj`, `eye` and `fog_color` feed the screen-space
-/// reflection pass (world-position reconstruction from the depth attachment).
+/// reflections. `reflection_method` selects the reflection backend (off /
+/// planar / SSR); `planar_plane_y` is the world-space road plane the planar
+/// camera mirrors across; `planar_view_proj` projects a road point into the
+/// planar reflection texture. `inv_view_proj`, `eye` and `fog_color` feed the
+/// screen-space reflection fallback (world-position reconstruction from the
+/// depth attachment).
 ///
 /// Layout must mirror the `PostSettings` block in `post.frag.glsl` exactly
 /// (std140): the scalar fields pad to the 16-byte alignment the `mat4` needs.
@@ -106,11 +130,18 @@ pub struct PostSettings {
     /// Puddle-reflection quality uniform: 0 = off, 1 = low, 2 = high. Lives in
     /// what used to be padding, so the std140 layout is unchanged.
     pub puddle_quality: f32,
-    pub _pad: [f32; 5],
+    /// Reflection backend selector (`REFLECT_OFF`/`REFLECT_PLANAR`/`REFLECT_SSR`).
+    pub reflection_method: f32,
+    /// World-space height of the road plane the planar camera mirrors across.
+    pub planar_plane_y: f32,
+    pub _pad: [f32; 2],
     /// Inverse of (projection * view): maps a depth sample back to world space.
     pub inv_view_proj: [[f32; 4]; 4],
     /// (projection * view): projects SSR ray samples back to screen space.
     pub view_proj: [[f32; 4]; 4],
+    /// (projection * mirrored view): projects a road point into the planar
+    /// reflection texture.
+    pub planar_view_proj: [[f32; 4]; 4],
     /// Camera eye position in world space (ray origin for reflections).
     pub eye: [f32; 4],
     /// Horizon fog color (SSR miss fallback and far-fade tint).

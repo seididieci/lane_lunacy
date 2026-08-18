@@ -83,6 +83,10 @@ pub struct App {
     /// `--fps-limit <N>`: optional frame-rate cap enforced as an idle sleep, so
     /// the per-frame work (`total_ms`) is measured without the cap wait.
     fps_limit: Option<u32>,
+    window_capture: Option<PathBuf>,
+    window_capture_armed: bool,
+    capture_dir: Option<PathBuf>,
+    capture_seq: u64,
     /// Monotonic frame counter for the profiler rows.
     profile_frame_idx: u64,
     /// End of the previous `about_to_wait`, for measuring event-loop idle time.
@@ -103,6 +107,8 @@ impl App {
         profile: Option<PathBuf>,
         present_mode: PresentMode,
         fps_limit: Option<u32>,
+        window_capture: Option<PathBuf>,
+        capture_dir: Option<PathBuf>,
     ) -> Self {
         let mut game = Game::new();
         game.set_weather(weather);
@@ -155,6 +161,10 @@ impl App {
             }),
             present_mode,
             fps_limit,
+            window_capture,
+            window_capture_armed: false,
+            capture_dir,
+            capture_seq: 0,
             profile_frame_idx: 0,
             profile_frame_end: None,
         }
@@ -233,13 +243,20 @@ impl App {
 
         self.active_gpu_index = self.menu.settings.gpu_index;
         self.renderer = Some(renderer);
+        if let (Some(renderer), Some(path)) = (&mut self.renderer, self.window_capture.clone()) {
+            renderer.request_window_capture(path);
+            self.window_capture_armed = true;
+        }
         self.surface = Some(surface);
         self.window = Some(window);
         self.previous = Instant::now();
 
         println!(
-            "Controls: W / Up = throttle | S / Down = brake | A / Left & D / Right = steer | E = gear up | Q = gear down | R = restart | F3 / F4 = debug HUD | F11 = fullscreen | ESC = pause menu"
+            "Controls: W / Up = throttle | S / Down = brake | A / Left & D / Right = steer | E = gear up | Q = gear down | R = restart | F3 / F4 = debug HUD | F10 = capture frame | F11 = fullscreen | ESC = pause menu"
         );
+        if let Some(dir) = &self.capture_dir {
+            println!("runtime capture enabled: F10 -> {}/shot_*.png", dir.display());
+        }
     }
 
     fn toggle_menu(&mut self) {
@@ -495,6 +512,9 @@ impl ApplicationHandler for App {
                         }
                     }
                     PhysicalKey::Code(KeyCode::F11) if press => self.toggle_fullscreen(),
+                    PhysicalKey::Code(KeyCode::F10) if press => {
+                        self.request_runtime_capture();
+                    }
                     PhysicalKey::Code(KeyCode::F4) if press => {
                         self.debug_visible = !self.debug_visible;
                         println!(
@@ -618,7 +638,12 @@ impl ApplicationHandler for App {
             puddle_quality: self.applied.puddles.uniform(),
         };
         let render_started = Instant::now();
-        renderer.render(&self.game, dt, &hud_verts, &fx, &mut timings);
+        let capture_done = renderer.render(&self.game, dt, &hud_verts, &fx, &mut timings);
+        if self.window_capture_armed && capture_done {
+            println!("window capture completed; exiting");
+            self.window_capture_armed = false;
+            _event_loop.exit();
+        }
         self.debug
             .sample_cpu(render_started.elapsed().as_secs_f32() * 1000.0);
 
@@ -664,6 +689,24 @@ impl ApplicationHandler for App {
                 println!("  {}", f.display());
             }
         }
+    }
+}
+
+impl App {
+    fn request_runtime_capture(&mut self) {
+        let Some(dir) = &self.capture_dir else {
+            println!("capture disabled: start with --capture-dir <dir>");
+            return;
+        };
+        let Some(renderer) = &mut self.renderer else {
+            return;
+        };
+        self.capture_seq = self.capture_seq.saturating_add(1);
+        let stamp = (self.ui_clock.max(0.0) * 1000.0).round() as u64;
+        let file = format!("shot_{:04}_t{:08}ms.png", self.capture_seq, stamp);
+        let path = dir.join(file);
+        renderer.request_window_capture(path.clone());
+        println!("capture requested: {}", path.display());
     }
 }
 

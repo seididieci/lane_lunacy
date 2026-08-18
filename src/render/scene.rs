@@ -617,12 +617,15 @@ impl SceneResources {
     }
 
     /// Uploads the per-draw uniform block for the mesh shader (also used by
-    /// the particle pipeline via the same UBO layout).
+    /// the particle pipeline via the same UBO layout). `clip_plane` is the
+    /// world-space `(n, d)` clip plane; the ordinary scene passes pass the
+    /// disabled sentinel `(0,0,0,-1)`.
     pub fn mvp_buffer(
         &self,
         model: Mat4,
         uniforms: &FrameUniforms,
         headlights: &Headlights,
+        clip_plane: [f32; 4],
     ) -> Subbuffer<MVP> {
         let FrameUniforms {
             view,
@@ -669,6 +672,7 @@ impl SceneResources {
                 lights.terrain_tint[2],
                 0.0,
             ],
+            clip_plane,
         };
         Buffer::from_data(
             self.memory_allocator.clone(),
@@ -699,7 +703,7 @@ impl SceneResources {
             return;
         }
         let particle_count = verts.len() as u32;
-        let mvp = self.mvp_buffer(Mat4::IDENTITY, uniforms, headlights);
+        let mvp = self.mvp_buffer(Mat4::IDENTITY, uniforms, headlights, [0.0, 0.0, 0.0, -1.0]);
         let set_layout = pipeline.layout().set_layouts()[0].clone();
         let set = DescriptorSet::new(
             self.descriptor_set_allocator.clone(),

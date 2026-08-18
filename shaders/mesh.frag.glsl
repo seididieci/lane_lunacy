@@ -25,11 +25,19 @@ layout(set = 0, binding = 0) uniform MVP {
     vec4 lamp_dir[16];
     vec4 lamp_state[16];
     vec4 terrain_state;
+    vec4 clip_plane;
 };
 
 layout(set = 0, binding = 1) uniform sampler2D tex;
 
 void main() {
+    // Planar-reflection clip plane (world space): discard fragments strictly
+    // below the road surface so the mirrored camera (positioned under the road)
+    // never draws the ground into the reflection. The ordinary scene passes
+    // keep `clip_plane = (0,0,0,-1)`, which never triggers.
+    if (dot(vec4(v_world_pos, 1.0), clip_plane) > 0.0) {
+        discard;
+    }
     vec3 n = normalize(v_normal);
     float diff = max(dot(n, normalize(light_dir.xyz)), 0.0);
     float ambient = light_state.x;

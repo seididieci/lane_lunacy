@@ -100,6 +100,11 @@ pub enum RunMode {
         present_mode: PresentMode,
         /// `--fps-limit <N>`: cap the frame rate at N via an idle sleep.
         fps_limit: Option<u32>,
+        /// `--window-capture <path.png>`: capture one PNG from the windowed
+        /// post-processing path (after post+HUD), then exit.
+        window_capture: Option<PathBuf>,
+        /// `--capture-dir <dir>`: enable in-run captures (F10) while driving.
+        capture_dir: Option<PathBuf>,
     },
     Snapshot(SnapshotOptions),
     /// `--report <path.csv>`: re-read an existing profiling session and
@@ -122,6 +127,8 @@ pub fn parse(args: &[String]) -> RunMode {
     let mut profile: Option<PathBuf> = None;
     let mut present_mode = PresentMode::Fifo;
     let mut fps_limit: Option<u32> = None;
+    let mut window_capture: Option<PathBuf> = None;
+    let mut capture_dir: Option<PathBuf> = None;
 
     let mut snapshot: Option<PathBuf> = None;
     let mut report: Option<PathBuf> = None;
@@ -239,6 +246,24 @@ pub fn parse(args: &[String]) -> RunMode {
                     i += 1;
                 }
             }
+            "--window-capture" => {
+                if let Some(v) = args.get(i + 1).filter(|v| !v.starts_with("--")) {
+                    window_capture = Some(PathBuf::from(v));
+                    i += 2;
+                } else {
+                    eprintln!("invalid value for --window-capture (missing output PNG path)");
+                    i += 1;
+                }
+            }
+            "--capture-dir" => {
+                if let Some(v) = args.get(i + 1).filter(|v| !v.starts_with("--")) {
+                    capture_dir = Some(PathBuf::from(v));
+                    i += 2;
+                } else {
+                    eprintln!("invalid value for --capture-dir (missing directory path)");
+                    i += 1;
+                }
+            }
             "--report" => {
                 if let Some(v) = args.get(i + 1).filter(|v| !v.starts_with("--")) {
                     report = Some(PathBuf::from(v));
@@ -313,6 +338,8 @@ pub fn parse(args: &[String]) -> RunMode {
             profile,
             present_mode,
             fps_limit,
+            window_capture,
+            capture_dir,
         },
     }
 }
@@ -352,6 +379,8 @@ mod tests {
                 profile,
                 present_mode,
                 fps_limit,
+                window_capture,
+                capture_dir,
             } => {
                 assert_eq!(gpu, 0);
                 assert_eq!(weather, Weather::Auto);
@@ -362,6 +391,8 @@ mod tests {
                 assert_eq!(profile, None);
                 assert_eq!(present_mode, PresentMode::Fifo);
                 assert_eq!(fps_limit, None);
+                assert_eq!(window_capture, None);
+                assert_eq!(capture_dir, None);
             }
             _ => panic!("expected interactive mode"),
         }
@@ -468,6 +499,42 @@ mod tests {
     fn fps_limit_without_value_ignored() {
         match parse_args(&["--fps-limit"]) {
             RunMode::Interactive { fps_limit, .. } => assert_eq!(fps_limit, None),
+            _ => panic!("expected interactive mode"),
+        }
+    }
+
+    #[test]
+    fn window_capture_flag_is_parsed() {
+        match parse_args(&["--window-capture", "shot.png"]) {
+            RunMode::Interactive { window_capture, .. } => {
+                assert_eq!(window_capture.as_deref(), Some(Path::new("shot.png")))
+            }
+            _ => panic!("expected interactive mode"),
+        }
+    }
+
+    #[test]
+    fn window_capture_without_value_is_ignored() {
+        match parse_args(&["--window-capture"]) {
+            RunMode::Interactive { window_capture, .. } => assert_eq!(window_capture, None),
+            _ => panic!("expected interactive mode"),
+        }
+    }
+
+    #[test]
+    fn capture_dir_flag_is_parsed() {
+        match parse_args(&["--capture-dir", "shots"]) {
+            RunMode::Interactive { capture_dir, .. } => {
+                assert_eq!(capture_dir.as_deref(), Some(Path::new("shots")))
+            }
+            _ => panic!("expected interactive mode"),
+        }
+    }
+
+    #[test]
+    fn capture_dir_without_value_is_ignored() {
+        match parse_args(&["--capture-dir"]) {
+            RunMode::Interactive { capture_dir, .. } => assert_eq!(capture_dir, None),
             _ => panic!("expected interactive mode"),
         }
     }

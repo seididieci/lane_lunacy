@@ -89,6 +89,7 @@ chosen GPU supports.
 | `E`            | Gear up                             |
 | `Q`            | Gear down                           |
 | `R`            | Restart run                         |
+| `F10`          | Save a runtime screenshot (if enabled) |
 | `F11`          | Toggle windowed / fullscreen        |
 | `Esc`          | Pause menu                          |
 
@@ -156,6 +157,12 @@ cargo run --release -- --weather rain
 
 # start in a floating 90%-FHD window instead of fullscreen
 cargo run --release -- --windowed
+
+# enable runtime captures while driving (press F10 to save each frame)
+cargo run --release -- --windowed --weather rain --capture-dir snapshots/current
+
+# one-shot capture from the full windowed post path, then auto-exit
+cargo run --release -- --windowed --weather rain --window-capture snapshots/current/shot_once.png
 ```
 
 Rain renders in the **RAIN** sky state (full downpour) and periodically in

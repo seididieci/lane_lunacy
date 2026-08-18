@@ -1,13 +1,20 @@
 // SPDX-License-Identifier: MIT
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use winit::window::Window;
 
+use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
+use vulkano::command_buffer::{
+    AutoCommandBufferBuilder, CommandBufferUsage, CopyImageToBufferInfo,
+};
 use vulkano::device::{Device, Queue};
 use vulkano::format::Format;
 use vulkano::image::view::ImageView;
 use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage, SampleCount};
-use vulkano::memory::allocator::{AllocationCreateInfo, StandardMemoryAllocator};
+use vulkano::memory::allocator::{
+    AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator,
+};
 use vulkano::pipeline::graphics::viewport::Viewport;
 use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass};
 use vulkano::swapchain::{
@@ -22,9 +29,11 @@ use crate::game::Game;
 use crate::render::frame_builder::FrameBuilder;
 use crate::render::post::PostResources;
 use crate::render::record::record_frame_posted;
+use crate::render::reflection::{reflected_view, ReflectionResources, REFLECTION_PLANE_Y};
 use crate::render::scene::SceneResources;
 use crate::shaders::{
-    PostSettings, POST_BLOOM, POST_CHROMA, POST_FXAA, POST_GRAIN, POST_RAINDROPS, POST_REFLECT,
+    PostSettings, POST_BLOOM, POST_CHROMA, POST_DEBUG_MASK, POST_DEBUG_PLANAR, POST_DEBUG_REFLTEX,
+    POST_FXAA, POST_GRAIN, POST_RAINDROPS, REFLECT_OFF, REFLECT_PLANAR, POST_REFLECT,
     POST_SATURATION, POST_VIGNETTE,
 };
 use crate::vertex::HudVertex;
@@ -42,6 +51,7 @@ pub mod pipeline;
 pub mod post;
 pub mod probe;
 pub mod record;
+pub mod reflection;
 pub mod scene;
 pub mod snapshot;
 pub mod texture;
@@ -66,6 +76,27 @@ pub struct FxSettings {
     pub puddle_quality: f32,
 }
 
+/// Temporary post-composite diagnostics selected by `LANE_DEBUG_POST`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DebugPostMode {
+    None,
+    Mask,
+    Planar,
+    ReflTex,
+}
+
+/// Reads the `LANE_DEBUG_POST` env var (cached) into a [`DebugPostMode`].
+pub fn debug_post_mode() -> DebugPostMode {
+    use std::sync::OnceLock;
+    static MODE: OnceLock<DebugPostMode> = OnceLock::new();
+    *MODE.get_or_init(|| match std::env::var("LANE_DEBUG_POST").as_deref() {
+        Ok("mask") => DebugPostMode::Mask,
+        Ok("planar") => DebugPostMode::Planar,
+        Ok("refltex") => DebugPostMode::ReflTex,
+        _ => DebugPostMode::None,
+    })
+}
+
 /// An in-flight present future, pinned per swapchain image so we can wait on
 /// the oldest one before re-using the image. Stored as `Arc` because vulkano's
 /// `FenceSignalFuture` implements `GpuFuture` only behind an `Arc` (see
@@ -77,6 +108,8 @@ pub struct Renderer {
     queue: Arc<Queue>,
     window: Arc<Window>,
     swapchain: Arc<Swapchain>,
+    swapchain_images: Vec<Arc<Image>>,
+    swapchain_can_transfer_src: bool,
     /// Scene render pass: one offscreen color attachment (+ optional MSAA
     /// resolve) plus one depth attachment, sample count == `aa_samples`.
     scene_render_pass: Arc<RenderPass>,
@@ -104,6 +137,8 @@ pub struct Renderer {
     scene: SceneResources,
     /// Bloom chain + composite pass/pipeline/sampler.
     post: PostResources,
+    /// Planar road-reflection pass: mirrored-camera target + pipelines.
+    reflection: ReflectionResources,
     /// Mutable per-frame state (particles, camera smoothing, world chunks).
     /// Math lives in `FrameBuilder`; this struct only feeds it the swapchain.
     frame_builder: FrameBuilder,
@@ -118,6 +153,7 @@ pub struct Renderer {
     pub recreate: bool,
     fences: Vec<Option<FrameFence>>,
     previous_fence_i: u32,
+    capture_request: Option<PathBuf>,
 }
 
 impl Renderer {
@@ -172,6 +208,14 @@ impl Renderer {
             caps.min_image_count
         };
 
+        let mut swapchain_usage = vulkano::image::ImageUsage::COLOR_ATTACHMENT;
+        if caps
+            .supported_usage_flags
+            .intersects(vulkano::image::ImageUsage::TRANSFER_SRC)
+        {
+            swapchain_usage |= vulkano::image::ImageUsage::TRANSFER_SRC;
+        }
+
         let (swapchain, images) = Swapchain::new(
             device.clone(),
             surface.clone(),
@@ -179,7 +223,7 @@ impl Renderer {
                 min_image_count,
                 image_format,
                 image_extent: [window_size.width, window_size.height],
-                image_usage: vulkano::image::ImageUsage::COLOR_ATTACHMENT,
+                image_usage: swapchain_usage,
                 composite_alpha,
                 present_mode,
                 ..Default::default()
@@ -224,6 +268,7 @@ impl Renderer {
             &scene.memory_allocator,
             extent,
         );
+        let reflection = ReflectionResources::new(&device, &scene.memory_allocator, extent);
         let post_framebuffers = create_post_framebuffers(&post.pass, &images);
         let hud_framebuffers = create_post_framebuffers(&post.hud_pass, &images);
         let frame_count = post_framebuffers.len();
@@ -233,6 +278,9 @@ impl Renderer {
             queue,
             window,
             swapchain,
+            swapchain_images: images,
+            swapchain_can_transfer_src: swapchain_usage
+                .intersects(vulkano::image::ImageUsage::TRANSFER_SRC),
             scene_render_pass,
             offscreen_view,
             msaa_color_view,
@@ -243,6 +291,7 @@ impl Renderer {
             hud_framebuffers,
             scene,
             post,
+            reflection,
             frame_builder: FrameBuilder::new(),
             font_atlas: font_atlas.clone(),
             seed,
@@ -252,7 +301,13 @@ impl Renderer {
             recreate: false,
             fences: vec![None; frame_count],
             previous_fence_i: 0,
+            capture_request: None,
         }
+    }
+
+    /// Request a one-shot PNG capture from the windowed renderer path.
+    pub fn request_window_capture(&mut self, path: PathBuf) {
+        self.capture_request = Some(path);
     }
 
     /// Rebuilds everything that depends on the sample count: the scene render
@@ -305,6 +360,7 @@ impl Renderer {
             })
             .expect("recreate swapchain");
         self.swapchain = new_swapchain;
+        self.swapchain_images = new_images.clone();
         let extent = self.swapchain.image_extent();
         let aa = self.aa_samples;
         self.offscreen_view = create_offscreen_view(&self.scene.memory_allocator, extent);
@@ -322,6 +378,8 @@ impl Renderer {
         self.hud_framebuffers = create_post_framebuffers(&self.post.hud_pass, &new_images);
         self.post
             .create_bloom_images(&self.scene.memory_allocator, extent);
+        self.reflection
+            .resize(&self.scene.memory_allocator, extent);
         self.viewport.extent = [dims.width as f32, dims.height as f32];
         self.recreate = false;
     }
@@ -347,7 +405,7 @@ impl Renderer {
         hud_verts: &[HudVertex],
         fx: &FxSettings,
         timings: &mut crate::profiler::FrameTimings,
-    ) {
+    ) -> bool {
         let render_started = std::time::Instant::now();
         if self.recreate {
             self.recreate_swapchain();
@@ -359,7 +417,7 @@ impl Renderer {
                 Ok(r) => r,
                 Err(Validated::Error(VulkanError::OutOfDate)) => {
                     self.recreate = true;
-                    return;
+                    return false;
                 }
                 Err(e) => panic!("failed to acquire next image: {:?}", e),
             };
@@ -416,6 +474,14 @@ impl Renderer {
         if fx.puddle_quality > 0.5 {
             flags |= POST_REFLECT;
         }
+        // Temporary diagnostics: LANE_DEBUG_POST=mask|planar visualizes the
+        // puddle mask or the planar reflection sample in the composite.
+        match crate::render::debug_post_mode() {
+            crate::render::DebugPostMode::Mask => flags |= POST_DEBUG_MASK,
+            crate::render::DebugPostMode::Planar => flags |= POST_DEBUG_PLANAR,
+            crate::render::DebugPostMode::ReflTex => flags |= POST_DEBUG_REFLTEX,
+            crate::render::DebugPostMode::None => {}
+        }
         // The composite samples a readable 1x depth buffer: `depth_resolve_view`
         // under MSAA (resolved in-subpass), the plain depth attachment at 1x.
         let post_depth_view = if self.aa_samples == SampleCount::Sample1 {
@@ -424,6 +490,14 @@ impl Renderer {
             self.depth_resolve_view.clone()
         };
         let view_proj = frame.uniforms.proj * frame.uniforms.view;
+        // Planar reflections mirror the camera across the road plane; the
+        // composite projects a road point through this to sample the target.
+        let reflection_method = if fx.puddle_quality > 0.5 {
+            REFLECT_PLANAR
+        } else {
+            REFLECT_OFF
+        };
+        let planar_view_proj = frame.uniforms.proj * reflected_view(frame.uniforms.view, REFLECTION_PLANE_Y);
         let post_settings = PostSettings {
             flags,
             time: self.post_clock,
@@ -436,9 +510,12 @@ impl Renderer {
             texel_y: 1.0 / extent[1],
             wet_fac: frame.uniforms.wet_fac,
             puddle_quality: fx.puddle_quality,
-            _pad: [0.0; 5],
+            reflection_method,
+            planar_plane_y: REFLECTION_PLANE_Y,
+            _pad: [0.0; 2],
             inv_view_proj: view_proj.inverse().to_cols_array_2d(),
             view_proj: view_proj.to_cols_array_2d(),
+            planar_view_proj: planar_view_proj.to_cols_array_2d(),
             eye: [
                 frame.uniforms.eye.x,
                 frame.uniforms.eye.y,
@@ -453,6 +530,7 @@ impl Renderer {
         let command_buffer = record_frame_posted(
             &self.scene,
             &self.post,
+            &self.reflection,
             game,
             &frame,
             self.frame_builder.world_chunks(),
@@ -470,6 +548,67 @@ impl Renderer {
         timings.record_ms = record_started.elapsed().as_secs_f32() * 1000.0;
 
         let submit_started = std::time::Instant::now();
+
+        let capture_path = self.capture_request.take();
+        let mut capture_readback: Option<Subbuffer<[u8]>> = None;
+        if capture_path.is_some() && !self.swapchain_can_transfer_src {
+            if let Some(path) = capture_path.as_ref() {
+                println!(
+                    "window capture failed ({}): swapchain image doesn't support TRANSFER_SRC",
+                    path.display()
+                );
+            }
+            timings.submit_ms = submit_started.elapsed().as_secs_f32() * 1000.0;
+            timings.render_ms = render_started.elapsed().as_secs_f32() * 1000.0;
+            return true;
+        }
+        let capture_bpp = capture_bytes_per_pixel(self.swapchain.image_format());
+        if capture_path.is_some() && capture_bpp.is_none() {
+            if let Some(path) = capture_path.as_ref() {
+                println!(
+                    "window capture failed ({}): unsupported swapchain format {:?}",
+                    path.display(),
+                    self.swapchain.image_format()
+                );
+            }
+            timings.submit_ms = submit_started.elapsed().as_secs_f32() * 1000.0;
+            timings.render_ms = render_started.elapsed().as_secs_f32() * 1000.0;
+            return true;
+        }
+        let capture_copy_cb = if capture_path.is_some() {
+            let extent = self.swapchain.image_extent();
+            let pixel_count = (extent[0] as u64) * (extent[1] as u64);
+            let bpp = capture_bpp.expect("capture format checked");
+            let readback = Buffer::new_slice::<u8>(
+                self.scene.memory_allocator.clone(),
+                BufferCreateInfo {
+                    usage: BufferUsage::TRANSFER_DST,
+                    ..Default::default()
+                },
+                AllocationCreateInfo {
+                    memory_type_filter: MemoryTypeFilter::HOST_RANDOM_ACCESS,
+                    ..Default::default()
+                },
+                pixel_count * bpp,
+            )
+            .expect("window capture readback");
+            let mut copy_builder = AutoCommandBufferBuilder::primary(
+                self.scene.command_allocator.clone(),
+                self.scene.queue_family_index,
+                CommandBufferUsage::OneTimeSubmit,
+            )
+            .expect("window capture builder");
+            copy_builder
+                .copy_image_to_buffer(CopyImageToBufferInfo::image_buffer(
+                    self.swapchain_images[image_i as usize].clone(),
+                    readback.clone(),
+                ))
+                .expect("copy swapchain image for capture");
+            capture_readback = Some(readback);
+            Some(copy_builder.build().expect("build window capture command buffer"))
+        } else {
+            None
+        };
         let previous_future: Box<dyn GpuFuture> =
             match self.fences[self.previous_fence_i as usize].clone() {
                 Some(f) => f.boxed(),
@@ -480,10 +619,24 @@ impl Renderer {
                 }
             };
 
-        let future = previous_future
+        let render_future = previous_future
             .join(acquire_future)
             .then_execute(self.queue.clone(), command_buffer)
             .unwrap()
+            .then_signal_semaphore_and_flush()
+            .expect("flush render before capture/present")
+            .boxed();
+
+        let after_copy: Box<dyn GpuFuture> = if let Some(copy_cb) = capture_copy_cb {
+            render_future
+                .then_execute(self.queue.clone(), copy_cb)
+                .unwrap()
+                .boxed()
+        } else {
+            render_future
+        };
+
+        let future = after_copy
             .then_swapchain_present(
                 self.queue.clone(),
                 SwapchainPresentInfo::swapchain_image_index(self.swapchain.clone(), image_i),
@@ -503,9 +656,96 @@ impl Renderer {
             }
         };
         self.previous_fence_i = image_i;
+
+        let capture_done = if let (Some(path), Some(readback)) = (capture_path, capture_readback) {
+            if let Some(fence) = &self.fences[image_i as usize] {
+                let saved = fence
+                    .wait(None)
+                    .map_err(|e| format!("capture wait failed: {e}"))
+                    .and_then(|_| {
+                        write_capture_png(
+                            &readback,
+                            self.swapchain.image_format(),
+                            self.swapchain.image_extent(),
+                            &path,
+                        )
+                    });
+                match saved {
+                    Ok(()) => println!("wrote window capture: {}", path.display()),
+                    Err(e) => println!("window capture failed ({}): {e}", path.display()),
+                }
+            }
+            true
+        } else {
+            false
+        };
+
         timings.submit_ms = submit_started.elapsed().as_secs_f32() * 1000.0;
         timings.render_ms = render_started.elapsed().as_secs_f32() * 1000.0;
+        capture_done
     }
+}
+
+fn write_capture_png(
+    readback: &Subbuffer<[u8]>,
+    format: Format,
+    extent: [u32; 2],
+    path: &std::path::Path,
+) -> Result<(), String> {
+    let guard = readback
+        .read()
+        .map_err(|e| format!("readback mapping failed: {e}"))?;
+    let mut out = Vec::with_capacity((extent[0] * extent[1] * 4) as usize);
+    match format {
+        Format::B8G8R8A8_UNORM | Format::B8G8R8A8_SRGB => {
+            for px in guard.chunks_exact(4) {
+                out.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
+            }
+        }
+        Format::R8G8B8A8_UNORM | Format::R8G8B8A8_SRGB => out.extend_from_slice(&guard),
+        Format::R16G16B16A16_SFLOAT => {
+            for px in guard.chunks_exact(8) {
+                let r = half::f16::from_bits(u16::from_le_bytes([px[0], px[1]])).to_f32();
+                let g = half::f16::from_bits(u16::from_le_bytes([px[2], px[3]])).to_f32();
+                let b = half::f16::from_bits(u16::from_le_bytes([px[4], px[5]])).to_f32();
+                out.push(linear_to_srgb_u8(r));
+                out.push(linear_to_srgb_u8(g));
+                out.push(linear_to_srgb_u8(b));
+                out.push(255);
+            }
+        }
+        other => {
+            return Err(format!(
+                "unsupported swapchain format for capture: {other:?}"
+            ));
+        }
+    }
+    let image = image::RgbaImage::from_raw(extent[0], extent[1], out)
+        .ok_or_else(|| "invalid capture image size".to_string())?;
+    image
+        .save_with_format(path, image::ImageFormat::Png)
+        .map_err(|e| format!("png write failed: {e}"))
+}
+
+fn capture_bytes_per_pixel(format: Format) -> Option<u64> {
+    match format {
+        Format::B8G8R8A8_UNORM
+        | Format::B8G8R8A8_SRGB
+        | Format::R8G8B8A8_UNORM
+        | Format::R8G8B8A8_SRGB => Some(4),
+        Format::R16G16B16A16_SFLOAT => Some(8),
+        _ => None,
+    }
+}
+
+fn linear_to_srgb_u8(linear: f32) -> u8 {
+    let c = linear.clamp(0.0, 1.0);
+    let s = if c <= 0.0031308 {
+        12.92 * c
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    };
+    (s * 255.0).round() as u8
 }
 
 /// Lowercase human name for a swapchain present mode, for diagnostics.

@@ -28,9 +28,10 @@ use vulkano::pipeline::{GraphicsPipeline, Pipeline, PipelineBindPoint};
 use vulkano::render_pass::Framebuffer;
 
 use crate::game::Game;
-use crate::render::frame::{traffic_rotation, Frame};
+use crate::render::frame::{traffic_rotation, Frame, SKY_RADIUS};
 use crate::render::frame_builder::WorldChunk;
 use crate::render::post::PostResources;
+use crate::render::reflection::{reflected_view, ReflectionResources, REFLECTION_CLIP_Y};
 use crate::render::scene::SceneResources;
 use crate::road::road_curve;
 use crate::shaders::{BloomParams, PostSettings};
@@ -101,6 +102,7 @@ pub fn record_frame(
 pub fn record_frame_posted(
     scene: &SceneResources,
     post: &PostResources,
+    reflection: &ReflectionResources,
     game: &Game,
     frame: &Frame,
     world_chunks: &[WorldChunk],
@@ -156,6 +158,30 @@ pub fn record_frame_posted(
         .end_render_pass(SubpassEndInfo::default())
         .expect("end scene render pass");
     timings.scene_ms = scene_started.elapsed().as_secs_f32() * 1000.0;
+
+    // ---- Planar road reflections ----
+    // Mirrored-camera pass into a half-resolution target sampled by the
+    // composite for wet-asphalt puddles. Runs whenever reflections are enabled;
+    // when the flag is off the composite never samples the stale target.
+    if settings.flags & crate::shaders::POST_REFLECT != 0 && settings.wet_fac > 0.001 {
+        let [rw, rh] = reflection.framebuffer.extent();
+        let reflection_viewport = Viewport {
+            offset: [0.0, 0.0],
+            extent: [rw as f32, rh as f32],
+            depth_range: 0.0..=1.0,
+        };
+        record_reflection(
+            &mut builder,
+            scene,
+            reflection,
+            game,
+            frame,
+            world_chunks,
+            reflection.framebuffer.clone(),
+            &reflection_viewport,
+            settings.planar_plane_y,
+        );
+    }
 
     // ---- Bloom downsample chain ----
     let bloom_started = std::time::Instant::now();
@@ -265,7 +291,16 @@ pub fn record_frame_posted(
                 bloom_views.last().cloned().expect("bloom views"),
                 post.sampler.clone(),
             ),
-            WriteDescriptorSet::image_view_sampler(3, depth_view, post.sampler.clone()),
+            WriteDescriptorSet::image_view_sampler(
+                3,
+                depth_view,
+                post.sampler.clone(),
+            ),
+            WriteDescriptorSet::image_view_sampler(
+                4,
+                reflection.color_view.clone(),
+                reflection.sampler.clone(),
+            ),
         ],
         [],
     )
@@ -426,7 +461,7 @@ fn record_scene_contents(
                 texture: Arc<ImageView>,
                 model: Mat4| {
         let index_count = indices.len() as u32;
-        let mvp = scene.mvp_buffer(model, uniforms, headlights);
+        let mvp = scene.mvp_buffer(model, uniforms, headlights, [0.0, 0.0, 0.0, -1.0]);
         let set_layout = scene.mesh_pipeline.layout().set_layouts()[0].clone();
         let set = DescriptorSet::new(
             scene.descriptor_set_allocator.clone(),
@@ -590,6 +625,202 @@ fn record_scene_contents(
                 .expect("draw flare");
         }
     }
+}
+
+/// Records the mirrored-camera planar reflection pass: sky dome + world
+/// chunks + player + traffic into the reflection target, with geometry below
+/// the road plane clipped out and culling disabled (mirroring flips winding).
+/// Particles and the lens flare are intentionally omitted — the flare is a
+/// screen-space artifact and rain/mist would render inconsistently from the
+/// mirrored camera.
+#[allow(clippy::too_many_arguments)]
+fn record_reflection(
+    builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+    scene: &SceneResources,
+    reflection: &ReflectionResources,
+    game: &Game,
+    frame: &Frame,
+    world_chunks: &[WorldChunk],
+    framebuffer: Arc<Framebuffer>,
+    viewport: &Viewport,
+    plane_y: f32,
+) {
+    let reflect_view = reflected_view(frame.uniforms.view, plane_y);
+    let mut uniforms = frame.uniforms;
+    uniforms.view = reflect_view;
+
+    // Mirror the sky dome around the road plane too, so it centers on the
+    // mirrored camera and the reflection shows a seamless sky.
+    let eye = frame.uniforms.eye;
+    let mirrored_eye = Vec3::new(eye.x, 2.0 * plane_y - eye.y, eye.z);
+    let mut sky_uniform = frame.sky_uniform;
+    sky_uniform.model = Mat4::from_scale_rotation_translation(
+        Vec3::splat(SKY_RADIUS),
+        glam::Quat::IDENTITY,
+        mirrored_eye,
+    )
+    .to_cols_array_2d();
+    sky_uniform.view = reflect_view.to_cols_array_2d();
+    sky_uniform.projection = frame.uniforms.proj.to_cols_array_2d();
+
+    let clip_plane = [0.0, -1.0, 0.0, REFLECTION_CLIP_Y];
+
+    builder
+        .begin_render_pass(
+            RenderPassBeginInfo {
+                clear_values: vec![
+                    Some(frame.uniforms.fog_color.into()),
+                    Some(1.0f32.into()),
+                ],
+                ..RenderPassBeginInfo::framebuffer(framebuffer)
+            },
+            SubpassBeginInfo {
+                contents: SubpassContents::Inline,
+                ..Default::default()
+            },
+        )
+        .expect("begin reflection render pass")
+        .set_viewport(0, [viewport.clone()].into_iter().collect())
+        .expect("set reflection viewport");
+
+    // ---- Sky dome ----
+    builder
+        .bind_pipeline_graphics(reflection.sky_pipeline.clone())
+        .expect("bind reflection sky pipeline");
+    let sky_buf = Buffer::from_data(
+        scene.memory_allocator.clone(),
+        BufferCreateInfo {
+            usage: BufferUsage::UNIFORM_BUFFER,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+            ..Default::default()
+        },
+        sky_uniform,
+    )
+    .expect("reflection sky uniform buffer");
+    let sky_set_layout = reflection.sky_pipeline.layout().set_layouts()[0].clone();
+    let sky_set = DescriptorSet::new(
+        scene.descriptor_set_allocator.clone(),
+        sky_set_layout,
+        [
+            WriteDescriptorSet::buffer(0, sky_buf),
+            WriteDescriptorSet::image_view_sampler(
+                1,
+                scene.cloud_a_view.clone(),
+                scene.mesh_sampler.clone(),
+            ),
+            WriteDescriptorSet::image_view_sampler(
+                2,
+                scene.cloud_b_view.clone(),
+                scene.mesh_sampler.clone(),
+            ),
+        ],
+        [],
+    )
+    .expect("reflection sky descriptor set");
+    let sky_index_count = scene.sky_dome_indices.len() as u32;
+    builder
+        .bind_descriptor_sets(
+            PipelineBindPoint::Graphics,
+            reflection.sky_pipeline.layout().clone(),
+            0,
+            sky_set,
+        )
+        .expect("bind reflection sky descriptor sets")
+        .bind_vertex_buffers(0, scene.sky_dome_vertices.clone())
+        .expect("bind reflection sky vertex buffers")
+        .bind_index_buffer(scene.sky_dome_indices.clone())
+        .expect("bind reflection sky index buffer");
+    unsafe {
+        builder
+            .draw_indexed(sky_index_count, 1, 0, 0, 0)
+            .expect("draw reflection sky");
+    }
+
+    // ---- 3D scene (world, player, traffic) ----
+    builder
+        .bind_pipeline_graphics(reflection.mesh_pipeline.clone())
+        .expect("bind reflection mesh pipeline");
+    let draw = |builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+                vertices: Subbuffer<[Vertex3d]>,
+                indices: Subbuffer<[u32]>,
+                texture: Arc<ImageView>,
+                model: Mat4| {
+        let index_count = indices.len() as u32;
+        let mvp = scene.mvp_buffer(model, &uniforms, &frame.headlights, clip_plane);
+        let set_layout = reflection.mesh_pipeline.layout().set_layouts()[0].clone();
+        let set = DescriptorSet::new(
+            scene.descriptor_set_allocator.clone(),
+            set_layout,
+            [
+                WriteDescriptorSet::buffer(0, mvp),
+                WriteDescriptorSet::image_view_sampler(1, texture, scene.mesh_sampler.clone()),
+            ],
+            [],
+        )
+        .expect("reflection descriptor set");
+        builder
+            .bind_descriptor_sets(
+                PipelineBindPoint::Graphics,
+                reflection.mesh_pipeline.layout().clone(),
+                0,
+                set,
+            )
+            .expect("bind reflection descriptor sets")
+            .bind_vertex_buffers(0, vertices)
+            .expect("bind reflection vertex buffers")
+            .bind_index_buffer(indices)
+            .expect("bind reflection index buffer");
+        unsafe {
+            builder
+                .draw_indexed(index_count, 1, 0, 0, 0)
+                .expect("draw reflection indexed");
+        }
+    };
+
+    for (world_vertices, world_indices) in world_chunks {
+        draw(
+            builder,
+            world_vertices.clone(),
+            world_indices.clone(),
+            scene.world_texture_view.clone(),
+            Mat4::IDENTITY,
+        );
+    }
+    draw(
+        builder,
+        scene.car_vertices.clone(),
+        scene.car_indices.clone(),
+        scene.car_texture_view.clone(),
+        Mat4::from_scale_rotation_translation(
+            Vec3::ONE,
+            glam::Quat::from_rotation_y(-game.vehicle.heading),
+            Vec3::new(game.player_world_x(), 0.03, game.player_world_z()),
+        ),
+    );
+    for (idx, t) in game.traffic.iter().enumerate() {
+        let tvx = road_curve(t.distance) + t.lane;
+        let traffic_rot = traffic_rotation(t.lane, t.distance);
+        let (traffic_vertices, traffic_indices, _anchors) =
+            &scene.traffic_meshes[idx % scene.traffic_meshes.len()];
+        draw(
+            builder,
+            traffic_vertices.clone(),
+            traffic_indices.clone(),
+            scene.car_texture_view.clone(),
+            Mat4::from_scale_rotation_translation(
+                Vec3::ONE,
+                traffic_rot,
+                Vec3::new(tvx, 0.35, -t.distance),
+            ),
+        );
+    }
+
+    builder
+        .end_render_pass(SubpassEndInfo::default())
+        .expect("end reflection render pass");
 }
 
 /// Records the HUD/text draw: binds `hud_pipeline` (either the scene pass's

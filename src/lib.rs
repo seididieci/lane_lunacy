@@ -76,6 +76,8 @@ pub fn run(
     profile: Option<PathBuf>,
     present_mode: crate::cli::PresentMode,
     fps_limit: Option<u32>,
+    window_capture: Option<PathBuf>,
+    capture_dir: Option<PathBuf>,
 ) {
     let event_loop = EventLoop::new().expect("failed to create event loop");
     let instance = create_surface_instance(&event_loop);
@@ -100,6 +102,8 @@ pub fn run(
         profile,
         present_mode,
         fps_limit,
+        window_capture,
+        capture_dir,
     );
     event_loop.run_app(&mut app).expect("event loop failed");
 }

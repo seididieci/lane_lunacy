@@ -30,6 +30,7 @@ layout(set = 0, binding = 0) uniform MVP {
     vec4 lamp_dir[16];
     vec4 lamp_state[16];
     vec4 terrain_state;
+    vec4 clip_plane;
 };
 
 void main() {

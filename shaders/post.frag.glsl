@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: MIT
 // Post-processing composite pass. Reads the HDR offscreen scene image (and, when
 // BLOOM is on, the lowest-downsampled bloom image), the resolved depth
-// attachment (for screen-space puddle reflections), and applies the enabled FX
-// chain. All effects are gated by bits in the PostSettings `flags` uniform, so
-// with everything off this is an identity passthrough.
+// attachment (for world-position reconstruction feeding puddle reflections), the
+// planar reflection target, and applies the enabled FX chain. All effects are
+// gated by bits in the PostSettings `flags` uniform, so with everything off this
+// is an identity passthrough.
 layout(location = 0) in vec2 v_uv;
 layout(location = 0) out vec4 f_color;
 
@@ -19,16 +20,21 @@ layout(set = 0, binding = 0) uniform PostSettings {
     float texel_x;
     float texel_y;
     float wet_fac;
-    // Puddle-reflection quality: 0 = off (skip SSR entirely), 1 = low,
+    // Puddle-reflection quality: 0 = off (skip reflections entirely), 1 = low,
     // 2 = high. Lives where the old padding began, so std140 layout is stable.
     float puddle_quality;
+    // Reflection backend selector: 0 = off, 1 = planar, 2 = SSR. Planar is the
+    // current default backend; SSR is kept as an alternative implementation.
+    float reflection_method;
+    // World-space height of the road plane the planar camera mirrors across.
+    float planar_plane_y;
     float _pad1;
     float _pad2;
-    float _pad3;
-    float _pad4;
-    float _pad5;
     mat4 inv_view_proj;
     mat4 view_proj;
+    // (projection * mirrored view): projects a road point into the planar
+    // reflection texture sampled at `binding 4`.
+    mat4 planar_view_proj;
     vec4 eye;
     vec4 fog_color;
 };
@@ -36,6 +42,7 @@ layout(set = 0, binding = 0) uniform PostSettings {
 layout(set = 0, binding = 1) uniform sampler2D scene;
 layout(set = 0, binding = 2) uniform sampler2D bloom;
 layout(set = 0, binding = 3) uniform sampler2D depth;
+layout(set = 0, binding = 4) uniform sampler2D planar_refl;
 
 const uint FLAG_FXAA = 1u << 0;
 const uint FLAG_BLOOM = 1u << 1;
@@ -45,6 +52,14 @@ const uint FLAG_SATURATION = 1u << 4;
 const uint FLAG_CHROMA = 1u << 5;
 const uint FLAG_RAINDROPS = 1u << 6;
 const uint FLAG_REFLECT = 1u << 7;
+const uint FLAG_DEBUG_MASK = 1u << 8;
+const uint FLAG_DEBUG_PLANAR = 1u << 9;
+const uint FLAG_DEBUG_REFLTEX = 1u << 10;
+
+// Reflection backend selector values (mirrors `shaders::REFLECT_*`).
+const float REFLECT_OFF = 0.0;
+const float REFLECT_PLANAR = 1.0;
+const float REFLECT_SSR = 2.0;
 
 const vec3 LUMA = vec3(0.299, 0.587, 0.114);
 
@@ -141,35 +156,57 @@ float puddle_noise(vec2 p, int oct) {
     return v / norm;
 }
 
+const float ROAD_HALF = 4.8;
+const float SHOULDER_W = 0.55;
+
+float road_center_x(float s) {
+    return 12.0 * sin(s * 0.02);
+}
+
+float road_lateral(float x, float s) {
+    return x - road_center_x(s);
+}
+
+float road_surface_height(float s, float lat) {
+    float d = abs(lat);
+    if (d <= ROAD_HALF) {
+        return 0.015;
+    }
+    if (d <= ROAD_HALF + SHOULDER_W) {
+        return 0.021;
+    }
+    return 0.0;
+}
+
 // Deterministic puddle patches on the asphalt ribbon, driven by the wet factor
 // so puddles appear as rain ramps up and stay stable as the car drives past.
 // Mirrors `road_curve` (12 * sin(0.02 * s)) and ROAD_HALF + shoulder from the
 // Rust side so the mask lines up with the actual road geometry.
 //
-// `quality` (0/1/2) trades detail for cost: higher levels add a domain-warped
-// third noise octave for more organic, irregular puddle outlines.
+// `quality` is currently ignored on purpose: LOW/HIGH are temporarily identical
+// while the conservative SSR baseline is stabilized.
 float puddle_mask(vec3 world_pos, float wet, float quality) {
     if (wet <= 0.001) {
         return 0.0;
     }
-    // The road is a flat ribbon near y = 0; reject everything else quickly.
-    if (abs(world_pos.y - 0.02) > 0.05) {
+    float s = -world_pos.z;
+    float lat = road_lateral(world_pos.x, s);
+    float half_road = ROAD_HALF + SHOULDER_W;
+    if (abs(lat) > half_road) {
         return 0.0;
     }
-    float s = -world_pos.z;
-    float lat = world_pos.x - 12.0 * sin(s * 0.02);
-    float half_road = 4.8 + 0.55; // ROAD_HALF + shoulder strip
-    if (abs(lat) > half_road) {
+    float road_y = road_surface_height(s, lat);
+    if (abs(world_pos.y - road_y) > 0.065) {
         return 0.0;
     }
     // Continuous, road-aligned noise space: low frequency along the road (long
     // shallow pools), higher across it, so patches melt into the asphalt rather
     // than snapping to a block grid.
-    int oct = quality > 1.5 ? 3 : 2;
+    int oct = 2;
     vec2 q = vec2(s * 0.11, lat * 0.45);
     // Domain warp: bend the noise coordinates so the puddle outlines meander
-    // instead of following a straight grid. Higher quality warps harder.
-    float warp_amp = quality > 1.5 ? 0.6 : 0.35;
+    // instead of following a straight grid.
+    float warp_amp = 0.35;
     vec2 w = warp_amp * vec2(
         puddle_noise(q + vec2(0.0, 1.7), 2),
         puddle_noise(q + vec2(5.3, 2.9), 2));
@@ -187,13 +224,16 @@ float puddle_mask(vec3 world_pos, float wet, float quality) {
 // reflected ray in world space, projects each sample to the screen, and accepts
 // a hit when the reconstructed surface sits at roughly the ray's height (or the
 // sample is sky/far, which gives the classic wet-road sky sheen).
-// `quality` (1 = low, 2 = high) trades ray steps for cost.
+// `quality` is currently ignored on purpose: LOW/HIGH are temporarily identical
+// while the conservative SSR baseline is stabilized.
 vec3 ssr_reflection(vec3 world_pos, vec3 view_dir, float quality) {
     vec3 rd = normalize(vec3(view_dir.x, -view_dir.y, view_dir.z));
     if (rd.y <= 0.01) {
         return vec3(0.0); // looking straight down: nothing to mirror
     }
-    int steps = quality > 1.5 ? 28 : 14;
+    int steps = 12;
+    float hit_radius = 0.42;
+    float min_above_road = 0.65;
     vec3 ro = world_pos;
     vec3 hit = vec3(0.0);
     bool found = false;
@@ -224,9 +264,19 @@ vec3 ssr_reflection(vec3 world_pos, vec3 view_dir, float quality) {
             break;
         }
         vec3 sw = reconstruct_world(sp, d);
-        // Height match: the ray has reached roughly the surface height, and the
-        // surface is meaningfully above the puddle (skip the road itself).
-        if (sw.y >= p.y - 0.6 && sw.y <= p.y + 0.15 && sw.y > world_pos.y + 0.2) {
+        // Conservative hit test: require the reconstructed scene point to stay
+        // close to the marched ray sample and meaningfully above the puddle.
+        float ray_gap = length(sw - p);
+        bool near_ray = ray_gap <= hit_radius;
+        bool near_height = abs(sw.y - p.y) <= 0.12;
+        float sw_s = -sw.z;
+        float sw_lat = road_lateral(sw.x, sw_s);
+        float sw_road_y = road_surface_height(sw_s, sw_lat);
+        bool in_road_ribbon = abs(sw_lat) <= (ROAD_HALF + SHOULDER_W + 0.08);
+        bool near_road_surface = abs(sw.y - sw_road_y) <= 0.16;
+        bool self_road_hit = in_road_ribbon && near_road_surface;
+        bool above_road = sw.y > sw_road_y + min_above_road;
+        if (near_ray && near_height && above_road && !self_road_hit) {
             hit = texture(scene, sp).rgb;
             hit_t = t;
             found = true;
@@ -234,17 +284,9 @@ vec3 ssr_reflection(vec3 world_pos, vec3 view_dir, float quality) {
         }
     }
     if (!found) {
-        // Miss: fade toward whatever sits at the far end of the reflected ray
-        // (roughly the horizon/sky), else the fog color.
+        // Conservative miss fallback: keep the sheen subtle and stable.
         hit = fog_color.rgb;
-        vec4 far_clip = view_proj * vec4(ro + rd * 60.0, 1.0);
-        if (far_clip.w > 0.0) {
-            vec2 far_sp = far_clip.xy / far_clip.w * 0.5 + 0.5;
-            if (far_sp.x >= 0.0 && far_sp.x <= 1.0 && far_sp.y >= 0.0 && far_sp.y <= 1.0) {
-                hit = texture(scene, far_sp).rgb;
-            }
-        }
-        hit *= 0.55; // keep misses faint so puddles stay readable
+        hit *= 0.38; // keep misses faint so puddles stay readable
         hit_t = 70.0;
     }
     // Fade reflections with distance so far puddles melt into the fog.
@@ -311,17 +353,33 @@ void main() {
         color = vec3(r, color.g, bl);
     }
 
-    // Puddle reflections: reconstruct the surface and reflect the scene into
-    // the wet asphalt. Runs before FXAA/bloom so the reflections are
+    // Puddle reflections: reconstruct the surface and blend the reflection
+    // backend's output (planar texture by default, SSR as the alternative)
+    // into the wet asphalt. Runs before FXAA/bloom so the reflections are
     // antialiased and get the same glow treatment as the rest of the frame.
+    float dbg_mask = 0.0;
+    vec3 dbg_planar = vec3(0.0);
+    bool dbg_planar_valid = false;
     if ((flags & FLAG_REFLECT) != 0u && wet_fac > 0.001) {
         float d = texture(depth, uv).r;
         if (d < 1.0) {
-                vec3 world_pos = reconstruct_world(uv, d);
-                float pm = puddle_mask(world_pos, wet_fac, puddle_quality);
-                if (pm > 0.001) {
-                    vec3 view_dir = normalize(world_pos - eye.xyz);
-                    vec3 refl = ssr_reflection(world_pos, view_dir, puddle_quality);
+            vec3 world_pos = reconstruct_world(uv, d);
+            float pm = puddle_mask(world_pos, wet_fac, puddle_quality);
+            dbg_mask = pm;
+            if (pm > 0.001) {
+                vec3 view_dir = normalize(world_pos - eye.xyz);
+                vec3 refl = vec3(0.0);
+                if (reflection_method >= REFLECT_SSR) {
+                    refl = ssr_reflection(world_pos, view_dir, puddle_quality);
+                } else if (reflection_method >= REFLECT_PLANAR) {
+                    vec4 clip = planar_view_proj * vec4(world_pos, 1.0);
+                    dbg_planar_valid = clip.w > 0.0;
+                    vec2 puv = clip.w > 0.0 ? clip.xy / clip.w * 0.5 + 0.5 : vec2(-1.0);
+                    dbg_planar_valid =
+                        dbg_planar_valid && puv.x >= 0.0 && puv.x <= 1.0 && puv.y >= 0.0 && puv.y <= 1.0;
+                    refl = texture(planar_refl, clamp(puv, 0.0, 1.0)).rgb;
+                    dbg_planar = refl;
+                }
                 // Fresnel-ish pickup: puddles reflect most at grazing angles
                 // (exactly how a chase camera sees the road ahead).
                 float fres = pow(1.0 - max(dot(normalize(view_dir), vec3(0.0, 1.0, 0.0)), 0.0), 3.0);
@@ -360,6 +418,30 @@ void main() {
     // (the HUD pass composites above, so text stays readable).
     if ((flags & FLAG_RAINDROPS) != 0u) {
         color = rain_droplets(color, uv, time, wet_fac);
+    }
+
+    // Temporary diagnostics (LANE_DEBUG_POST): visualize the puddle mask or the
+    // planar sample. Overrides everything so the values are easy to measure.
+    if ((flags & FLAG_DEBUG_MASK) != 0u) {
+        f_color = vec4(vec3(dbg_mask), 1.0);
+        return;
+    }
+    if ((flags & FLAG_DEBUG_PLANAR) != 0u) {
+        // Black = no puddle here. Green = puddle whose planar projection was
+        // valid (shows the reflected sample), red = puddle whose projection
+        // fell outside the reflection target.
+        if (dbg_mask <= 0.001) {
+            f_color = vec4(0.0, 0.0, 0.0, 1.0);
+            return;
+        }
+        vec3 tint = dbg_planar_valid ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+        f_color = vec4(mix(tint, dbg_planar, 0.85), 1.0);
+        return;
+    }
+    // Temporary diagnostics: dump the planar reflection texture as-is.
+    if ((flags & FLAG_DEBUG_REFLTEX) != 0u) {
+        f_color = vec4(texture(planar_refl, uv).rgb, 1.0);
+        return;
     }
 
     f_color = vec4(color, 1.0);
