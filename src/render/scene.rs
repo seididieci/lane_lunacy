@@ -87,6 +87,14 @@ pub struct SceneResources {
     pub dust_pipeline: Arc<GraphicsPipeline>,
     pub flare_pipeline: Arc<GraphicsPipeline>,
 
+    /// Color-only overlay pass the ray-traced backend uses to composite the
+    /// CPU particle quads (rain/mist/dust/glows) over the RT image. The color
+    /// attachment loads the existing RT output; the shaders occlude per-pixel
+    /// against the raygen's depth image, so no depth attachment is needed.
+    pub rt_particle_render_pass: Arc<RenderPass>,
+    pub rt_particle_pipeline: Arc<GraphicsPipeline>,
+    pub rt_dust_pipeline: Arc<GraphicsPipeline>,
+
     pub flare_core_view: Arc<ImageView>,
     pub flare_streak_view: Arc<ImageView>,
     pub flare_ring_view: Arc<ImageView>,
@@ -321,6 +329,62 @@ impl SceneResources {
             particle.vertex_input,
             particle.layout,
             samples,
+        );
+
+        // ---- RT particle overlay pass ----
+        // The ray-traced backend writes the scene color directly into the
+        // offscreen and has no depth buffer, so the CPU particle quads are
+        // composited in a dedicated color-only pass that *loads* the RT output.
+        // Occlusion happens in `rt_particle.frag.glsl` against the raygen's
+        // linear-distance depth image (sampled at binding 2), so no depth
+        // attachment is required. Always single-sampled: the offscreen is 1x
+        // even under 2x/4x AA.
+        let rt_particle_render_pass = vulkano::single_pass_renderpass!(
+            device.clone(),
+            attachments: {
+                color: {
+                    format: Format::R16G16B16A16_SFLOAT,
+                    samples: 1,
+                    load_op: Load,
+                    store_op: Store,
+                },
+            },
+            pass: {
+                color: [color],
+                depth_stencil: {},
+            }
+        )
+        .expect("rt particle overlay render pass");
+        let rt_particle_subpass = Subpass::from(rt_particle_render_pass.clone(), 0).unwrap();
+        let rt_particle =
+            load_shaders::<ParticleVertex>(&device, shaders::PARTICLE_VERT_SPV, shaders::RT_PARTICLE_FRAG_SPV);
+        let rt_particle_pipeline = graphics_pipeline(
+            &device,
+            &rt_particle_subpass,
+            PipelineSpec {
+                label: "rt particle pipeline",
+                cull_mode: CullMode::None,
+                depth: Depth::None,
+                blend: Blend::Additive,
+            },
+            rt_particle.stages.clone(),
+            rt_particle.vertex_input.clone(),
+            rt_particle.layout.clone(),
+            vulkano::image::SampleCount::Sample1,
+        );
+        let rt_dust_pipeline = graphics_pipeline(
+            &device,
+            &rt_particle_subpass,
+            PipelineSpec {
+                label: "rt dust pipeline",
+                cull_mode: CullMode::None,
+                depth: Depth::None,
+                blend: Blend::Alpha,
+            },
+            rt_particle.stages,
+            rt_particle.vertex_input,
+            rt_particle.layout,
+            vulkano::image::SampleCount::Sample1,
         );
 
         // Sprite atlas for the particle pipeline: a horizontal strip of four
@@ -594,6 +658,9 @@ impl SceneResources {
             particle_pipeline,
             dust_pipeline,
             flare_pipeline,
+            rt_particle_render_pass,
+            rt_particle_pipeline,
+            rt_dust_pipeline,
             flare_core_view,
             flare_streak_view,
             flare_ring_view,
@@ -748,6 +815,75 @@ impl SceneResources {
             builder
                 .draw(particle_count, 1, 0, 0)
                 .expect("draw particles");
+        }
+    }
+
+    /// Draws particles into the ray-traced overlay pass. Identical to
+    /// [`Self::draw_particles`] but binds a third descriptor (binding 2) with
+    /// the raygen's linear-depth image so `rt_particle.frag.glsl` can discard
+    /// fragments hidden behind geometry. `depth_sampler` must be a NEAREST
+    /// sampler (exact texel depth reads, like the post composite's).
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_rt_particles(
+        &self,
+        builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+        pipeline: &Arc<GraphicsPipeline>,
+        verts: &[ParticleVertex],
+        uniforms: &FrameUniforms,
+        headlights: &Headlights,
+        depth_view: Arc<ImageView>,
+        depth_sampler: Arc<Sampler>,
+    ) {
+        if verts.is_empty() {
+            return;
+        }
+        let particle_count = verts.len() as u32;
+        let mvp = self.mvp_buffer(Mat4::IDENTITY, uniforms, headlights, [0.0, 0.0, 0.0, -1.0]);
+        let set_layout = pipeline.layout().set_layouts()[0].clone();
+        let set = DescriptorSet::new(
+            self.descriptor_set_allocator.clone(),
+            set_layout,
+            [
+                WriteDescriptorSet::buffer(0, mvp),
+                WriteDescriptorSet::image_view_sampler(
+                    1,
+                    self.particle_sprite_view.clone(),
+                    self.particle_sampler.clone(),
+                ),
+                WriteDescriptorSet::image_view_sampler(2, depth_view, depth_sampler),
+            ],
+            [],
+        )
+        .expect("rt particle descriptor set");
+        let particle_buf = Buffer::from_iter(
+            self.memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::VERTEX_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            verts.iter().copied(),
+        )
+        .expect("rt particle buffer");
+        builder
+            .bind_pipeline_graphics(pipeline.clone())
+            .expect("bind rt particle pipeline")
+            .bind_descriptor_sets(
+                PipelineBindPoint::Graphics,
+                pipeline.layout().clone(),
+                0,
+                set,
+            )
+            .expect("bind rt particle descriptor sets")
+            .bind_vertex_buffers(0, particle_buf)
+            .expect("bind rt particle vertex buffers");
+        unsafe {
+            builder
+                .draw(particle_count, 1, 0, 0)
+                .expect("draw rt particles");
         }
     }
 }

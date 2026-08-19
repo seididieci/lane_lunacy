@@ -959,6 +959,7 @@ dependencies = [
 name = "lane_lunacy"
 version = "0.1.0"
 dependencies = [
+ "ash",
  "fontdue",
  "glam",
  "gltf",

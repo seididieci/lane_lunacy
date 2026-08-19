@@ -173,6 +173,9 @@ pub struct Renderer {
     /// Single scene framebuffer (independent of the swapchain images: the
     /// resolve target is the shared offscreen image, not the swapchain).
     scene_framebuffer: Arc<Framebuffer>,
+    /// RT particle overlay framebuffer: the offscreen color target (Load) with
+    /// no depth attachment, used to composite rain/mist/dust over the RT image.
+    rt_particle_framebuffer: Arc<Framebuffer>,
     /// One composite framebuffer per swapchain image.
     post_framebuffers: Vec<Arc<Framebuffer>>,
     /// One HUD/text framebuffer per swapchain image, bound to `post.hud_pass`
@@ -318,6 +321,10 @@ impl Renderer {
             msaa_color_view.as_ref(),
             Some(&depth_resolve_view),
         );
+        let rt_particle_framebuffer = create_rt_particle_framebuffer(
+            &scene.rt_particle_render_pass,
+            &offscreen_view,
+        );
         let post = PostResources::new(
             &device,
             swapchain.image_format(),
@@ -350,6 +357,7 @@ impl Renderer {
             depth_view,
             depth_resolve_view,
             scene_framebuffer,
+            rt_particle_framebuffer,
             post_framebuffers,
             hud_framebuffers,
             scene,
@@ -407,6 +415,10 @@ impl Renderer {
             self.msaa_color_view.as_ref(),
             Some(&self.depth_resolve_view),
         );
+        self.rt_particle_framebuffer = create_rt_particle_framebuffer(
+            &self.scene.rt_particle_render_pass,
+            &self.offscreen_view,
+        );
     }
 
     /// Changes the terrain ribbon density. The cached world chunks are
@@ -441,6 +453,10 @@ impl Renderer {
             &self.depth_view,
             self.msaa_color_view.as_ref(),
             Some(&self.depth_resolve_view),
+        );
+        self.rt_particle_framebuffer = create_rt_particle_framebuffer(
+            &self.scene.rt_particle_render_pass,
+            &self.offscreen_view,
         );
         self.post_framebuffers = create_post_framebuffers(&self.post.pass, &new_images);
         self.hud_framebuffers = create_post_framebuffers(&self.post.hud_pass, &new_images);
@@ -651,6 +667,7 @@ impl Renderer {
             self.frame_builder.world_chunks(),
             self.frame_builder.world_chunk_indices(),
             self.scene_framebuffer.clone(),
+            self.rt_particle_framebuffer.clone(),
             self.post_framebuffers[image_i as usize].clone(),
             self.hud_framebuffers[image_i as usize].clone(),
             &self.post.bloom_fbs,
@@ -1092,6 +1109,23 @@ fn create_scene_framebuffer(
         },
     )
     .expect("scene framebuffer")
+}
+
+/// RT particle overlay framebuffer: a single color attachment (the offscreen,
+/// loaded rather than cleared) with no depth. The shader occludes against the
+/// raygen's depth image, so the pass never needs a depth attachment.
+fn create_rt_particle_framebuffer(
+    render_pass: &Arc<RenderPass>,
+    offscreen: &Arc<ImageView>,
+) -> Arc<Framebuffer> {
+    Framebuffer::new(
+        render_pass.clone(),
+        FramebufferCreateInfo {
+            attachments: vec![offscreen.clone()],
+            ..Default::default()
+        },
+    )
+    .expect("rt particle framebuffer")
 }
 
 fn create_post_framebuffers(

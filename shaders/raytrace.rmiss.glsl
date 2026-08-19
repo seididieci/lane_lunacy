@@ -8,7 +8,16 @@
 // marks the result as a miss (`color.w = 0`), so reflections over open sky and
 // the primary background share the same path.
 
-layout(location = 0) rayPayloadEXT vec4 rtp;
+struct RTShade {
+    vec4 color;
+    vec4 normal;
+    vec4 world_pos;
+    vec4 albedo;
+    vec4 uv;
+    vec4 extra;
+};
+
+layout(location = 0) rayPayloadInEXT RTShade rtp;
 
 layout(set = 0, binding = 0, std140) uniform RtUniforms {
     mat4 inv_view_proj;
@@ -31,8 +40,6 @@ layout(set = 0, binding = 0, std140) uniform RtUniforms {
 
 layout(set = 0, binding = 8) uniform sampler2D clouds_a;
 layout(set = 0, binding = 9) uniform sampler2D clouds_b;
-
-layout(set = 0, binding = 2, rgba16f) uniform image2D rt_out;
 
 // Sparse cell-based star points on the sphere, with a faint twinkle (mirrors
 // the sky shader).
@@ -123,6 +130,10 @@ void main() {
     vec3 haze = mix(horizon.rgb, oc_horizon, cover);
     col = mix(col, haze, (1.0 - t) * 0.12);
 
-    rtp = vec4(1.0, 0.0, 0.0, 0.0);
-    imageStore(rt_out, ivec2(gl_LaunchIDEXT.xy), vec4(1.0, 0.0, 0.0, 1.0));
+    rtp.color = vec4(col, 0.0);
+    rtp.normal = vec4(0.0);
+    rtp.world_pos = vec4(0.0);
+    rtp.albedo = vec4(0.0);
+    rtp.uv = vec4(0.0);
+    rtp.extra = vec4(0.0);
 }

@@ -12,6 +12,8 @@ pub const PARTICLE_VERT_SPV: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/spv/particle.vert.spv"));
 pub const PARTICLE_FRAG_SPV: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/spv/particle.frag.spv"));
+pub const RT_PARTICLE_FRAG_SPV: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/spv/rt_particle.frag.spv"));
 pub const FLARE_VERT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spv/flare.vert.spv"));
 pub const FLARE_FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spv/flare.frag.spv"));
 pub const POST_VERT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spv/post.vert.spv"));

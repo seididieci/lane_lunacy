@@ -24,7 +24,10 @@
 //! fence for `image_i` before recording, so replacing `image_i`'s buffers and
 //! acceleration structures is always safe.
 
+use std::ffi::CString;
+use std::mem::MaybeUninit;
 use std::num::NonZeroU64;
+use std::ptr;
 use std::sync::Arc;
 
 use glam::{Mat4, Vec3};
@@ -57,7 +60,8 @@ use vulkano::pipeline::ray_tracing::{
 };
 use vulkano::pipeline::{PipelineBindPoint, PipelineLayout, PipelineShaderStageCreateInfo};
 use vulkano::shader::{ShaderModule, ShaderModuleCreateInfo};
-use vulkano::Packed24_8;
+use vulkano::shader::ShaderStage;
+use vulkano::{Packed24_8, VulkanObject};
 
 use crate::game::Game;
 use crate::render::frame::{traffic_rotation, Frame};
@@ -75,12 +79,31 @@ use crate::vertex::Vertex3d;
 const VERT_CAP_VEC4: usize = 14_000_000;
 const INDEX_CAP: usize = 7_000_000;
 const SLOT_CAP: usize = 256;
-/// Meshes a repack stages: player + 4 traffic models + up to 8 window chunks.
-const MAX_SLOTS: usize = 5 + 8;
 /// Player + traffic + the 8-chunk window + slack.
 const INSTANCE_CAP: usize = 1 + 8 + 8 + 8;
 /// Acceleration-structure storage and slices must be 256-byte aligned.
 const AS_ALIGN_BYTES: u64 = 256;
+/// Chunk slots in the window: 1 behind + current + 6 ahead. Each chunk index
+/// maps to a FIXED slot (`static_slots + (index mod CHUNK_SLOT_COUNT)`), so a
+/// window crossing only rewrites the entering chunk's slot instead of the whole
+/// pool.
+const CHUNK_SLOT_COUNT: usize = 8;
+/// Per-chunk vertex/index capacity. Sizes every chunk slot for the worst case
+/// (measured: HIGH ~404K verts / ~605K indices) so the slot's pool region and
+/// BLAS storage never move when neighbours enter/leave.
+const CHUNK_VERT_CAP: u32 = 430_000;
+const CHUNK_INDEX_CAP: u32 = 630_000;
+
+/// Fixed pool region for one mesh slot. `vertex_base` is in `vec4` units and
+/// never changes once the layout is built, so the BLAS over a slot stays valid
+/// unless that slot's own geometry is rewritten.
+#[derive(Clone, Copy, Debug)]
+struct SlotLayout {
+    vertex_base: u32,
+    vertex_cap: u32,
+    index_base: u32,
+    index_cap: u32,
+}
 
 /// One mesh in the RT vertex pool. Mirrors the `RtSlot` struct in
 /// `raytrace.rchit.glsl`. `vertex_base` is in `vec4` units (vertex `i` runs at
@@ -137,12 +160,10 @@ fn to_transform(m: &Mat4) -> TransformMatrix {
 
 pub struct RayTraceResources {
     device: Arc<Device>,
-    memory_allocator: Arc<StandardMemoryAllocator>,
     pipeline: Arc<RayTracingPipeline>,
     layout: Arc<PipelineLayout>,
     sbt: ShaderBindingTable,
 
-    images: usize,
     verts_pools: Vec<Subbuffer<[f32]>>,
     index_pools: Vec<Subbuffer<[u32]>>,
     slot_pools: Vec<Subbuffer<[RtSlot]>>,
@@ -152,16 +173,30 @@ pub struct RayTraceResources {
     blas: Vec<Vec<Arc<AccelerationStructure>>>,
     tlas: Vec<Arc<AccelerationStructure>>,
 
-    /// CPU mirror of the statics (player + 4 traffic models), staged once.
-    static_geometry: Vec<(Vec<Vertex3d>, Vec<u32>)>,
-    /// Current pool layout: one [`RtSlot`] per mesh, in pool order.
-    slots: Vec<RtSlot>,
-
     output_image: Option<Arc<Image>>,
     output_view: Option<Arc<ImageView>>,
     output_size: [u32; 2],
 
-    geometry_dirty: bool,
+    /// R32 linear eye-distance depth written by the raygen, sampled by the RT
+    /// particle overlay pass for per-pixel occlusion of rain/mist/dust.
+    depth_image: Option<Arc<Image>>,
+    depth_view: Option<Arc<ImageView>>,
+
+    /// Fixed per-slot pool regions (statics + chunk slots), built once.
+    slot_layouts: Vec<SlotLayout>,
+    /// Number of static slots (player + traffic models); chunk slots follow.
+    static_slots: usize,
+    /// Which chunk index currently occupies each chunk slot (for instance
+    /// writes / TLAS). Only the entering chunk changes per window crossing.
+    chunk_owner: Vec<Option<i32>>,
+    /// CPU mirror of the packed pool layout, one [`RtSlot`] per slot.
+    slots: Vec<RtSlot>,
+    /// Per-slot CPU copy of the packed vertex/index arrays. Statics are staged
+    /// once; a chunk slot is rewritten only when its owning chunk changes.
+    slot_data: Vec<Option<(Vec<f32>, Vec<u32>)>>,
+    /// Per-image, per-slot flag: that slot's pool region + BLAS need (re)writing
+    /// on that image's own frame (after its fence wait).
+    blas_dirty: Vec<Vec<bool>>,
     last_chunk_indices: Vec<i32>,
 }
 
@@ -203,25 +238,116 @@ impl RayTraceResources {
                 .unwrap(),
         )
         .expect("ray tracing pipeline layout");
-        let pipeline = RayTracingPipeline::new(
-            device.clone(),
-            None,
-            RayTracingPipelineCreateInfo {
-                stages: smallvec![stages[0].clone(), stages[1].clone(), stages[2].clone()],
-                groups: smallvec![
-                    RayTracingShaderGroupCreateInfo::General { general_shader: 0 },
-                    RayTracingShaderGroupCreateInfo::General { general_shader: 1 },
-                    RayTracingShaderGroupCreateInfo::TrianglesHit {
-                        closest_hit_shader: Some(2),
-                        any_hit_shader: None,
-                    },
-                ],
-                max_pipeline_ray_recursion_depth: 1,
-                layout: layout.clone(),
-                ..RayTracingPipelineCreateInfo::layout(layout.clone())
-            },
-        )
-        .expect("ray tracing pipeline");
+
+        // vulkano 0.35's `RayTracingPipelineCreateInfo` never sets
+        // `max_pipeline_ray_payload_size` / `max_pipeline_ray_hit_attribute_size`
+        // (both default to 0), and the spec (VUID-03447) requires the payload
+        // size to be at least the largest payload declared by any shader in the
+        // pipeline. With 0 the driver silently drops all payload writes, so the
+        // raygen reads back its own pre-trace value and the image is black. Build
+        // the pipeline with the raw `vkCreateRayTracingPipelinesKHR` instead.
+        let rgen_stage = &stages[0];
+        let rmiss_stage = &stages[1];
+        let rchit_stage = &stages[2];
+        let name_rgen = CString::new(rgen_stage.entry_point.info().name.as_str()).unwrap();
+        let name_rmiss = CString::new(rmiss_stage.entry_point.info().name.as_str()).unwrap();
+        let name_rchit = CString::new(rchit_stage.entry_point.info().name.as_str()).unwrap();
+
+        // 6x vec4 = 96 bytes (the canonical `RTShade` payload), and the default
+        // triangle hit attributes are 2 floats (barycentric coords) = 8 bytes.
+        let max_pipeline_ray_payload_size: u32 = 96;
+        let max_pipeline_ray_hit_attribute_size: u32 = 8;
+
+        let raw_stages = [
+            ash::vk::PipelineShaderStageCreateInfo::default()
+                .stage(ash::vk::ShaderStageFlags::from(ShaderStage::from(
+                    rgen_stage.entry_point.info().execution_model,
+                )))
+                .module(rgen_stage.entry_point.module().handle())
+                .name(&name_rgen),
+            ash::vk::PipelineShaderStageCreateInfo::default()
+                .stage(ash::vk::ShaderStageFlags::from(ShaderStage::from(
+                    rmiss_stage.entry_point.info().execution_model,
+                )))
+                .module(rmiss_stage.entry_point.module().handle())
+                .name(&name_rmiss),
+            ash::vk::PipelineShaderStageCreateInfo::default()
+                .stage(ash::vk::ShaderStageFlags::from(ShaderStage::from(
+                    rchit_stage.entry_point.info().execution_model,
+                )))
+                .module(rchit_stage.entry_point.module().handle())
+                .name(&name_rchit),
+        ];
+        let raw_groups = [
+            ash::vk::RayTracingShaderGroupCreateInfoKHR::default()
+                .ty(ash::vk::RayTracingShaderGroupTypeKHR::GENERAL)
+                .general_shader(0)
+                .closest_hit_shader(ash::vk::SHADER_UNUSED_KHR)
+                .any_hit_shader(ash::vk::SHADER_UNUSED_KHR)
+                .intersection_shader(ash::vk::SHADER_UNUSED_KHR),
+            ash::vk::RayTracingShaderGroupCreateInfoKHR::default()
+                .ty(ash::vk::RayTracingShaderGroupTypeKHR::GENERAL)
+                .general_shader(1)
+                .closest_hit_shader(ash::vk::SHADER_UNUSED_KHR)
+                .any_hit_shader(ash::vk::SHADER_UNUSED_KHR)
+                .intersection_shader(ash::vk::SHADER_UNUSED_KHR),
+            ash::vk::RayTracingShaderGroupCreateInfoKHR::default()
+                .ty(ash::vk::RayTracingShaderGroupTypeKHR::TRIANGLES_HIT_GROUP)
+                .general_shader(ash::vk::SHADER_UNUSED_KHR)
+                .closest_hit_shader(2)
+                .any_hit_shader(ash::vk::SHADER_UNUSED_KHR)
+                .intersection_shader(ash::vk::SHADER_UNUSED_KHR),
+        ];
+        let library_interface =
+            &ash::vk::RayTracingPipelineInterfaceCreateInfoKHR::default()
+                .max_pipeline_ray_payload_size(max_pipeline_ray_payload_size)
+                .max_pipeline_ray_hit_attribute_size(max_pipeline_ray_hit_attribute_size);
+        let create_info_vk = ash::vk::RayTracingPipelineCreateInfoKHR::default()
+            .stages(&raw_stages)
+            .groups(&raw_groups)
+            .layout(layout.handle())
+            .max_pipeline_ray_recursion_depth(1)
+            .library_interface(library_interface)
+            .base_pipeline_index(-1);
+
+        let fns = device.fns();
+        let mut handle = MaybeUninit::uninit();
+        unsafe {
+            (fns.khr_ray_tracing_pipeline
+                .create_ray_tracing_pipelines_khr)(
+                device.handle(),
+                ash::vk::DeferredOperationKHR::null(),
+                ash::vk::PipelineCache::null(),
+                1,
+                &create_info_vk,
+                ptr::null(),
+                handle.as_mut_ptr(),
+            )
+        }
+        .result()
+        .expect("create ray tracing pipeline");
+        let handle = unsafe { handle.assume_init() };
+
+        let pipeline = unsafe {
+            RayTracingPipeline::from_handle(
+                device.clone(),
+                handle,
+                RayTracingPipelineCreateInfo {
+                    stages: smallvec![stages[0].clone(), stages[1].clone(), stages[2].clone()],
+                    groups: smallvec![
+                        RayTracingShaderGroupCreateInfo::General { general_shader: 0 },
+                        RayTracingShaderGroupCreateInfo::General { general_shader: 1 },
+                        RayTracingShaderGroupCreateInfo::TrianglesHit {
+                            closest_hit_shader: Some(2),
+                            any_hit_shader: None,
+                        },
+                    ],
+                    max_pipeline_ray_recursion_depth: 1,
+                    layout: layout.clone(),
+                    ..RayTracingPipelineCreateInfo::layout(layout.clone())
+                },
+            )
+        };
         let sbt = ShaderBindingTable::new(scene.memory_allocator.clone(), &pipeline)
             .expect("shader binding table");
 
@@ -349,6 +475,139 @@ impl RayTraceResources {
             static_geometry.push((tv, ti));
         }
 
+        // ---- Fixed per-slot pool layout ----
+        // Statics (player + traffic) get their own fixed regions first; the 8
+        // chunk slots follow, each sized for the worst-case chunk. Because the
+        // region of a slot never moves, the BLAS over it stays valid unless the
+        // slot's own geometry is rewritten (only the entering chunk per crossing).
+        let static_slots = static_geometry.len();
+        let total_slots = static_slots + CHUNK_SLOT_COUNT;
+        let mut slot_layouts = Vec::with_capacity(total_slots);
+        let mut slots = Vec::with_capacity(total_slots);
+        let mut slot_data: Vec<Option<(Vec<f32>, Vec<u32>)>> =
+            (0..total_slots).map(|_| None).collect();
+
+        let mut float_base = 0u32; // in vec4 units
+        let mut index_base = 0u32;
+        for (v, i) in &static_geometry {
+            let layout = SlotLayout {
+                vertex_base: float_base,
+                vertex_cap: v.len() as u32,
+                index_base,
+                index_cap: i.len() as u32,
+            };
+            float_base += v.len() as u32 * 3; // 3 vec4 per vertex
+            index_base += i.len() as u32;
+            let packed = pack_mesh(v, i);
+            slot_data[slot_layouts.len()] = Some(packed);
+            slot_layouts.push(layout);
+            slots.push(RtSlot {
+                vertex_base: layout.vertex_base,
+                vertex_count: layout.vertex_cap,
+                index_base: layout.index_base,
+                index_count: layout.index_cap,
+            });
+        }
+        for _ in 0..CHUNK_SLOT_COUNT {
+            let layout = SlotLayout {
+                vertex_base: float_base,
+                vertex_cap: CHUNK_VERT_CAP,
+                index_base,
+                index_cap: CHUNK_INDEX_CAP,
+            };
+            float_base += CHUNK_VERT_CAP * 3;
+            index_base += CHUNK_INDEX_CAP;
+            slot_layouts.push(layout);
+            slots.push(RtSlot {
+                vertex_base: layout.vertex_base,
+                vertex_count: 0,
+                index_base: layout.index_base,
+                index_count: 0,
+            });
+        }
+        let total_floats = float_base as usize;
+        let total_indices = index_base as usize;
+        assert!(
+            total_floats <= VERT_CAP_VEC4 * 4,
+            "RT vertex pool layout {total_floats} > cap {}",
+            VERT_CAP_VEC4 * 4
+        );
+        assert!(
+            total_indices <= INDEX_CAP,
+            "RT index pool layout {total_indices} > cap {INDEX_CAP}"
+        );
+        assert!(
+            total_slots <= SLOT_CAP,
+            "RT slot pool layout {total_slots} > cap {SLOT_CAP}"
+        );
+
+        // Write the static geometry into every image's pool once.
+        for i in 0..images {
+            for (slot, data) in slot_data.iter().enumerate() {
+                let Some((floats, indices)) = data else { continue };
+                let layout = slot_layouts[slot];
+                let vstart: usize = layout.vertex_base as usize * 4;
+                let vend: usize = vstart + floats.len();
+                let mut vg: vulkano::buffer::BufferWriteGuard<'_, [f32]> =
+                    verts_pools[i].write().expect("write vert pool");
+                vg[vstart..vend].copy_from_slice(floats);
+                let istart: usize = layout.index_base as usize;
+                let iend: usize = istart + indices.len();
+                let mut ig: vulkano::buffer::BufferWriteGuard<'_, [u32]> =
+                    index_pools[i].write().expect("write index pool");
+                ig[istart..iend].copy_from_slice(indices);
+            }
+            let mut sg: vulkano::buffer::BufferWriteGuard<'_, [RtSlot]> =
+                slot_pools[i].write().expect("write slot pool");
+            sg[..slots.len()].copy_from_slice(&slots);
+        }
+
+        // Per-slot BLAS storage, one fixed 256-aligned slice per slot. Built
+        // once; rebuilds reuse the same slice (only dirty slots are rebuilt).
+        let mut blas = Vec::with_capacity(images);
+        for _ in 0..images {
+            let mut sizes = Vec::with_capacity(total_slots);
+            let mut offsets = Vec::with_capacity(total_slots);
+            let mut total = 0u64;
+            for layout in &slot_layouts {
+                offsets.push(total);
+                let size = align_up(
+                    blas_size_for_cap(&device, layout.vertex_cap, layout.index_cap),
+                    AS_ALIGN_BYTES,
+                );
+                sizes.push(size);
+                total += size;
+            }
+            let storage = aligned_buffer(
+                mem.clone(),
+                total,
+                BufferUsage::ACCELERATION_STRUCTURE_STORAGE,
+            );
+            let mut img_blas = Vec::with_capacity(total_slots);
+            for (idx, _) in slot_layouts.iter().enumerate() {
+                let slice = storage.clone().slice(offsets[idx]..offsets[idx] + sizes[idx]);
+                // Safety: the create info supplies a valid 256-aligned backing
+                // buffer slice and type.
+                img_blas.push(
+                    unsafe {
+                        AccelerationStructure::new(
+                            device.clone(),
+                            AccelerationStructureCreateInfo {
+                                ty: AccelerationStructureType::BottomLevel,
+                                buffer: slice.clone(),
+                                ..AccelerationStructureCreateInfo::new(slice)
+                            },
+                        )
+                    }
+                    .expect("bottom-level acceleration structure"),
+                );
+            }
+            // Each bottom-level structure keeps its storage slice alive via
+            // `AccelerationStructureCreateInfo::buffer`, so the local pool can
+            // be dropped once the structures are created.
+            blas.push(img_blas);
+        }
+
         let mut tlas = Vec::with_capacity(images);
         for storage in tlas_storage {
             // Safety: the create info supplies a valid backing buffer and type.
@@ -369,33 +628,38 @@ impl RayTraceResources {
 
         Arc::new(RayTraceResources {
             device,
-            memory_allocator: scene.memory_allocator.clone(),
             pipeline,
             layout,
             sbt,
-            images,
             verts_pools,
             index_pools,
             slot_pools,
             instance_buffers,
             blas_scratch,
             tlas_scratch,
-            blas: vec![Vec::new(); images],
+            blas,
             tlas,
-            static_geometry,
-            slots: Vec::new(),
             output_image: None,
             output_view: None,
             output_size: [0, 0],
-            geometry_dirty: true,
+            depth_image: None,
+            depth_view: None,
+            slot_layouts,
+            static_slots,
+            chunk_owner: vec![None; CHUNK_SLOT_COUNT],
+            slots,
+            slot_data,
+            blas_dirty: vec![vec![true; total_slots]; images],
             last_chunk_indices: Vec::new(),
         })
     }
 
     /// Records the RT render into the caller's command buffer: rebuilds the
-    /// BLAS when the world window changed, rebuilds the TLAS with this frame's
-    /// instances, fires the rays into the internal storage image, then copies
-    /// it into the offscreen color target for bloom/post/HUD.
+    /// TLAS with this frame's instances, fires the rays into the internal
+    /// storage image, then copies it into the offscreen color target for
+    /// bloom/post/HUD. Geometry slots are fixed: only the entering chunk (if
+    /// the window moved) has its pool region + BLAS rewritten, lazily per image
+    /// on that image's own frame.
     #[allow(clippy::too_many_arguments)]
     pub fn record(
         &mut self,
@@ -410,14 +674,13 @@ impl RayTraceResources {
         extent: [u32; 2],
     ) {
         self.ensure_output(scene, extent);
-        let rebuilt = self.sync_geometry(scene, world_chunks, chunk_indices, image_i);
-        if rebuilt {
-            self.build_blas_objects(image_i);
+        self.sync_geometry(world_chunks, chunk_indices);
+        let dirty: Vec<usize> = self.dirty_slots(image_i);
+        if !dirty.is_empty() {
+            self.apply_dirty_slots(image_i, &dirty);
+            self.record_blas_builds(builder, image_i, &dirty);
         }
-        self.write_instances(game, scene, image_i);
-        if rebuilt {
-            self.record_blas_builds(builder, image_i);
-        }
+        self.write_instances(game, scene, image_i, chunk_indices);
         self.record_tlas_build(builder, image_i, game, world_chunks.len());
         self.record_trace(builder, scene, frame, image_i, extent);
         self.copy_output(builder, image_i, offscreen_view);
@@ -446,108 +709,45 @@ impl RayTraceResources {
         self.output_image = Some(image);
         self.output_view = Some(view);
         self.output_size = extent;
+
+        let depth_image = Image::new(
+            scene.memory_allocator.clone(),
+            ImageCreateInfo {
+                image_type: ImageType::Dim2d,
+                format: Format::R32_SFLOAT,
+                extent: [extent[0], extent[1], 1],
+                usage: ImageUsage::STORAGE | ImageUsage::SAMPLED,
+                ..Default::default()
+            },
+            AllocationCreateInfo::default(),
+        )
+        .expect("ray tracing depth image");
+        self.depth_image = Some(depth_image.clone());
+        self.depth_view = Some(
+            ImageView::new_default(depth_image).expect("ray tracing depth view"),
+        );
     }
 
     /// Compares the chunk window against the last repack; when it changed,
-    /// re-packs the vertex/index/slot pools (writing every image's copy) and
-    /// flags the BLAS for a rebuild. Returns true when the BLAS must be
-    /// rebuilt this frame.
-    fn sync_geometry(
-        &mut self,
-        scene: &SceneResources,
-        world_chunks: &[WorldChunk],
-        chunk_indices: &[i32],
-        _image_i: usize,
-    ) -> bool {
-        if !self.geometry_dirty && self.last_chunk_indices.as_slice() == chunk_indices {
-            return false;
+    /// re-packs only the entering chunk(s) into their fixed slot regions and
+    /// marks those slots dirty for every image. Chunks that stay in the window
+    /// keep their pool regions + BLAS untouched.
+    fn sync_geometry(&mut self, world_chunks: &[WorldChunk], chunk_indices: &[i32]) {
+        if self.last_chunk_indices.as_slice() == chunk_indices {
+            return;
         }
 
-        let (floats, indices, slots) = self.pack(scene, world_chunks);
-        eprintln!(
-            "RT pack: {} floats ({} verts), {} indices, {} slots",
-            floats.len(),
-            floats.len() / 12,
-            indices.len(),
-            slots.len()
-        );
-        assert!(
-            floats.len() <= VERT_CAP_VEC4 * 4,
-            "RT vertex pool overflow: {} floats > cap {}",
-            floats.len(),
-            VERT_CAP_VEC4 * 4
-        );
-        assert!(
-            indices.len() <= INDEX_CAP,
-            "RT index pool overflow: {} indices > cap {}",
-            indices.len(),
-            INDEX_CAP
-        );
-        assert!(
-            slots.len() <= SLOT_CAP,
-            "RT slot pool overflow: {} slots > cap {}",
-            slots.len(),
-            SLOT_CAP
-        );
-
-        for i in 0..self.images {
-            {
-                let mut guard = self.verts_pools[i].write().expect("write vert pool");
-                guard.fill(0.0);
-                guard[..floats.len()].copy_from_slice(&floats);
+        // Map each window chunk to its fixed slot (`static + index mod 8`).
+        // Chunks are consecutive, so on a +1 slide the entering chunk reuses
+        // the leaving chunk's slot and every other slot is untouched.
+        let mut repacked = 0usize;
+        for (j, &idx) in chunk_indices.iter().enumerate() {
+            let slot = self.chunk_slot(idx);
+            let owner_i = slot - self.static_slots;
+            if self.chunk_owner[owner_i] == Some(idx) {
+                continue;
             }
-            {
-                let mut guard = self.index_pools[i].write().expect("write index pool");
-                guard.fill(0);
-                guard[..indices.len()].copy_from_slice(&indices);
-            }
-            {
-                let mut guard = self.slot_pools[i].write().expect("write slot pool");
-                guard[..slots.len()].copy_from_slice(&slots);
-            }
-        }
-
-        self.slots = slots;
-        self.last_chunk_indices = chunk_indices.to_vec();
-        self.geometry_dirty = false;
-        true
-    }
-
-    /// Stages every mesh (statics + chunks) into contiguous CPU arrays and
-    /// returns the packed pools plus the per-mesh [`RtSlot`] table.
-    fn pack(&self, _scene: &SceneResources, world_chunks: &[WorldChunk]) -> (Vec<f32>, Vec<u32>, Vec<RtSlot>) {
-        let mut floats = Vec::with_capacity(VERT_CAP_VEC4 * 4);
-        let mut indices = Vec::with_capacity(INDEX_CAP);
-        let mut slots = Vec::with_capacity(MAX_SLOTS);
-
-        let mut push_mesh = |verts: &[Vertex3d], idx: &[u32], slots: &mut Vec<RtSlot>| {
-            let vertex_base = (floats.len() / 4) as u32;
-            let index_base = indices.len() as u32;
-            // 3 vec4 per vertex, matching `raytrace.rchit.glsl`:
-            //   verts[base + i*3 + 0] = position.xyz, uv.x
-            //   verts[base + i*3 + 1] = normal.xyz,  material
-            //   verts[base + i*3 + 2] = color.xyz,   uv.y
-            for v in verts {
-                floats.extend_from_slice(&v.position);
-                floats.push(v.tex_coord[0]);
-                floats.extend_from_slice(&v.normal);
-                floats.push(v.material);
-                floats.extend_from_slice(&v.color);
-                floats.push(v.tex_coord[1]);
-            }
-            indices.extend_from_slice(idx);
-            slots.push(RtSlot {
-                vertex_base,
-                vertex_count: verts.len() as u32,
-                index_base,
-                index_count: idx.len() as u32,
-            });
-        };
-
-        for (v, i) in &self.static_geometry {
-            push_mesh(v, i, &mut slots);
-        }
-        for (world_vertices, world_indices) in world_chunks {
+            let (world_vertices, world_indices) = &world_chunks[j];
             let v: Vec<Vertex3d> = world_vertices
                 .read()
                 .expect("read chunk vertices for RT repack")
@@ -556,96 +756,87 @@ impl RayTraceResources {
                 .read()
                 .expect("read chunk indices for RT repack")
                 .to_vec();
-            push_mesh(&v, &i, &mut slots);
-        }
-
-        (floats, indices, slots)
-    }
-
-    /// Creates (or replaces) the per-image bottom-level structures, slicing the
-    /// blas storage buffer at 256-aligned offsets. Safe because the fence for
-    /// `image_i` was already waited before recording. Rebuilds *every* image's
-    /// BLAS because `sync_geometry` repacks all the pools.
-    fn build_blas_objects(&mut self, _image_i: usize) {
-        let mut sizes = Vec::with_capacity(self.slots.len());
-        let mut total = 0u64;
-        let mut offsets = Vec::with_capacity(self.slots.len());
-        for slot in &self.slots {
-            offsets.push(total);
-            let size = align_up(self.blas_size_for_slot(slot), AS_ALIGN_BYTES);
-            sizes.push(size);
-            total += size;
-        }
-        assert!(total > 0, "RT BLAS storage must have at least one slot");
-
-        // Allocate fresh per-image blas storage big enough for the current
-        // slot set (sized at repack time, so no cap waste).
-        let mem = self.memory_allocator.clone();
-        let mut blas_storage = Vec::with_capacity(self.images);
-        for _ in 0..self.images {
-            blas_storage.push(aligned_buffer(
-                mem.clone(),
-                total,
-                BufferUsage::ACCELERATION_STRUCTURE_STORAGE,
-            ));
-        }
-
-        // Slice a per-slot bottom-level structure out of each image's buffer.
-        let mut blas = Vec::with_capacity(self.images);
-        for storage in blas_storage {
-            let mut img_blas = Vec::with_capacity(self.slots.len());
-            for (i, _slot) in self.slots.iter().enumerate() {
-                let slice = storage.clone().slice(offsets[i]..offsets[i] + sizes[i]);
-                // Safety: the create info supplies a valid 256-aligned backing
-                // buffer slice and type.
-                img_blas.push(
-                    unsafe {
-                        AccelerationStructure::new(
-                            self.device.clone(),
-                            AccelerationStructureCreateInfo {
-                                ty: AccelerationStructureType::BottomLevel,
-                                buffer: slice.clone(),
-                                ..AccelerationStructureCreateInfo::new(slice)
-                            },
-                        )
-                    }
-                    .expect("bottom-level acceleration structure"),
-                );
+            let layout = self.slot_layouts[slot];
+            assert!(
+                v.len() <= layout.vertex_cap as usize,
+                "chunk {idx} {} verts > slot cap {}",
+                v.len(),
+                layout.vertex_cap
+            );
+            assert!(
+                i.len() <= layout.index_cap as usize,
+                "chunk {idx} {} indices > slot cap {}",
+                i.len(),
+                layout.index_cap
+            );
+            self.slot_data[slot] = Some(pack_mesh(&v, &i));
+            self.slots[slot].vertex_count = v.len() as u32;
+            self.slots[slot].index_count = i.len() as u32;
+            self.chunk_owner[owner_i] = Some(idx);
+            for flags in &mut self.blas_dirty {
+                flags[slot] = true;
             }
-            blas.push(img_blas);
+            repacked += 1;
         }
-
-        // Each bottom-level structure keeps its storage slice alive via
-        // `AccelerationStructureCreateInfo::buffer`, so the local pool can be
-        // dropped once the structures are created.
-        self.blas = blas;
+        self.last_chunk_indices = chunk_indices.to_vec();
+        eprintln!("RT pack: {} chunk(s) repacked, {} slots total", repacked, self.static_slots + CHUNK_SLOT_COUNT);
     }
 
-    fn blas_size_for_slot(&self, slot: &RtSlot) -> u64 {
-        // Mirrors `blas_info`: the size query accounts for `max_vertex` and
-        // `vertex_stride`, so a bare geometry would under-size the structure.
-        let mut tri = AccelerationStructureGeometryTrianglesData::new(Format::R32G32B32_SFLOAT);
-        tri.vertex_stride = 48;
-        tri.max_vertex = slot.vertex_count.saturating_sub(1);
-        let info = AccelerationStructureBuildGeometryInfo::new(
-            AccelerationStructureGeometries::Triangles(vec![tri]),
-        );
-        self.device
-            .acceleration_structure_build_sizes(
-                AccelerationStructureBuildType::Device,
-                &info,
-                &[slot.index_count / 3],
-            )
-            .expect("blas build size")
-            .acceleration_structure_size
+    /// The fixed pool slot for a world chunk index.
+    fn chunk_slot(&self, index: i32) -> usize {
+        self.static_slots + index.rem_euclid(CHUNK_SLOT_COUNT as i32) as usize
     }
 
+    /// Slots that still need their pool region + BLAS rewritten on `image_i`'s
+    /// next frame.
+    fn dirty_slots(&self, image_i: usize) -> Vec<usize> {
+        self.blas_dirty[image_i]
+            .iter()
+            .enumerate()
+            .filter(|(_, &d)| d)
+            .map(|(s, _)| s)
+            .collect()
+    }
+
+    /// Writes the packed arrays of the given slots into `image_i`'s pools and
+    /// clears their dirty flags. Safe because the fence for `image_i` was
+    /// already waited before recording, so no in-flight command buffer can
+    /// still read those buffers.
+    fn apply_dirty_slots(&mut self, image_i: usize, dirty: &[usize]) {
+        for &slot in dirty {
+            let Some((floats, indices)) = self.slot_data[slot].as_ref() else { continue };
+            let layout = self.slot_layouts[slot];
+            {
+                let mut guard = self.verts_pools[image_i].write().expect("write vert pool");
+                let vstart = layout.vertex_base as usize * 4;
+                let vend = vstart + floats.len();
+                guard[vstart..vend].copy_from_slice(floats);
+            }
+            {
+                let mut guard = self.index_pools[image_i].write().expect("write index pool");
+                let istart = layout.index_base as usize;
+                let iend = istart + indices.len();
+                guard[istart..iend].copy_from_slice(indices);
+            }
+            {
+                let mut guard = self.slot_pools[image_i].write().expect("write slot pool");
+                guard[slot] = self.slots[slot];
+            }
+            self.blas_dirty[image_i][slot] = false;
+        }
+    }
+
+    /// Rebuilds the BLAS for the given slots. Each slot's acceleration
+    /// structure was allocated once with a fixed storage slice, so a rebuild
+    /// reuses the same object + slice.
     fn record_blas_builds(
         &self,
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
         image_i: usize,
+        dirty: &[usize],
     ) {
-        for (idx, slot) in self.slots.iter().enumerate() {
+        for &idx in dirty {
+            let slot = &self.slots[idx];
             let mut info = self.blas_info(image_i, slot);
             info.dst_acceleration_structure = Some(self.blas[image_i][idx].clone());
             info.scratch_data = Some(self.blas_scratch[image_i].clone());
@@ -679,7 +870,13 @@ impl RayTraceResources {
         AccelerationStructureBuildGeometryInfo::new(AccelerationStructureGeometries::Triangles(vec![tri]))
     }
 
-    fn write_instances(&mut self, game: &Game, scene: &SceneResources, image_i: usize) {
+    fn write_instances(
+        &mut self,
+        game: &Game,
+        scene: &SceneResources,
+        image_i: usize,
+        chunk_indices: &[i32],
+    ) {
         let mut instances = Vec::with_capacity(INSTANCE_CAP);
         let push = |instances: &mut Vec<AccelerationStructureInstance>, slot: u32, transform: TransformMatrix| {
             instances.push(AccelerationStructureInstance {
@@ -714,9 +911,9 @@ impl RayTraceResources {
                 )),
             );
         }
-        let chunk_slot_base = 1 + scene.traffic_meshes.len();
-        for j in 0..self.slots.len().saturating_sub(chunk_slot_base) {
-            push(&mut instances, (chunk_slot_base + j) as u32, to_transform(&Mat4::IDENTITY));
+        for &idx in chunk_indices {
+            let slot = self.chunk_slot(idx);
+            push(&mut instances, slot as u32, to_transform(&Mat4::IDENTITY));
         }
 
         let mut guard = self.instance_buffers[image_i]
@@ -804,6 +1001,10 @@ impl RayTraceResources {
                 WriteDescriptorSet::buffer(0, rt_buf),
                 WriteDescriptorSet::buffer(1, mvp),
                 WriteDescriptorSet::image_view(2, self.output_view.clone().expect("rt output view")),
+                WriteDescriptorSet::image_view(
+                    10,
+                    self.depth_view.clone().expect("rt depth view"),
+                ),
                 WriteDescriptorSet::buffer(3, self.verts_pools[image_i].clone()),
                 WriteDescriptorSet::buffer(4, self.index_pools[image_i].clone()),
                 WriteDescriptorSet::buffer(5, self.slot_pools[image_i].clone()),
@@ -876,8 +1077,51 @@ impl RayTraceResources {
             .expect("copy rt output into offscreen");
         let _ = image_i;
     }
+
+    /// The primary-ray depth image (linear eye distance, R32), sampled by the
+    /// RT particle overlay pass to occlude rain/mist/dust behind geometry.
+    pub fn depth_view(&self) -> Arc<ImageView> {
+        self.depth_view.clone().expect("rt depth view")
+    }
 }
 
 fn align_up(x: u64, align: u64) -> u64 {
     x.div_ceil(align) * align
+}
+
+/// Serializes one mesh into the RT pool layout, matching `raytrace.rchit.glsl`:
+///   verts[base + i*3 + 0] = position.xyz, uv.x
+///   verts[base + i*3 + 1] = normal.xyz,  material
+///   verts[base + i*3 + 2] = color.xyz,   uv.y
+fn pack_mesh(verts: &[Vertex3d], idx: &[u32]) -> (Vec<f32>, Vec<u32>) {
+    let mut floats = Vec::with_capacity(verts.len() * 12);
+    for v in verts {
+        floats.extend_from_slice(&v.position);
+        floats.push(v.tex_coord[0]);
+        floats.extend_from_slice(&v.normal);
+        floats.push(v.material);
+        floats.extend_from_slice(&v.color);
+        floats.push(v.tex_coord[1]);
+    }
+    (floats, idx.to_vec())
+}
+
+/// Acceleration-structure storage size for a slot with the given caps. Mirrors
+/// `blas_info`: the size query accounts for `max_vertex` and `vertex_stride`,
+/// so a bare geometry would under-size the structure.
+fn blas_size_for_cap(device: &Arc<Device>, vertex_cap: u32, index_cap: u32) -> u64 {
+    let mut tri = AccelerationStructureGeometryTrianglesData::new(Format::R32G32B32_SFLOAT);
+    tri.vertex_stride = 48;
+    tri.max_vertex = vertex_cap.saturating_sub(1);
+    let info = AccelerationStructureBuildGeometryInfo::new(
+        AccelerationStructureGeometries::Triangles(vec![tri]),
+    );
+    device
+        .acceleration_structure_build_sizes(
+            AccelerationStructureBuildType::Device,
+            &info,
+            &[index_cap / 3],
+        )
+        .expect("blas build size")
+        .acceleration_structure_size
 }
