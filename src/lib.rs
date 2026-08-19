@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 pub mod app;
+pub mod audio;
 pub mod cli;
 pub mod debug;
 pub mod font;

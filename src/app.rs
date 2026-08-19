@@ -19,6 +19,7 @@ use vulkano::image::{SampleCount, SampleCounts};
 use vulkano::instance::Instance;
 use vulkano::swapchain::Surface;
 
+use crate::audio::{enumerate_output_devices, AudioEngine, Sfx};
 use crate::cli::PresentMode;
 use crate::debug::DebugStats;
 use crate::font::FontAtlas;
@@ -27,7 +28,8 @@ use crate::gpu::{create_graphics_context, enumerate_devices, select_physical_dev
 use crate::hud::build_hud_tree;
 use crate::input::Input;
 use crate::menu::{
-    build_menu_tree, AaMode, MenuRow, MenuScreen, MenuState, SettingsRow, SettingsState,
+    build_menu_tree, AaMode, AudioRow, GraphicsRow, MenuRow, MenuScreen, MenuState, SettingsRow,
+    SettingsState,
 };
 use crate::profiler::SessionProfiler;
 use crate::render::daynight;
@@ -60,6 +62,17 @@ pub struct App {
     applied: SettingsState,
     /// Antialiasing modes the currently-applied GPU supports.
     supported_aa: Vec<AaMode>,
+    /// Names of the audio output devices enumerated at startup.
+    audio_devices: Vec<String>,
+    /// Index of the host's default output device, if any.
+    audio_default: Option<usize>,
+    /// Audio backend. `None` when no usable output device exists.
+    audio: Option<AudioEngine>,
+    /// Previous-frame audio event state for edge-triggered SFX.
+    audio_prev_wrecks: u32,
+    audio_prev_blown: bool,
+    audio_prev_perfect_timer: f32,
+    audio_prev_gear: u32,
     seed: u64,
     menu: MenuState,
     mode: AppMode,
@@ -143,6 +156,13 @@ impl App {
                 ..SettingsState::default()
             },
             supported_aa: vec![AaMode::Off],
+            audio_devices: Vec::new(),
+            audio_default: None,
+            audio: None,
+            audio_prev_wrecks: 0,
+            audio_prev_blown: false,
+            audio_prev_perfect_timer: 0.0,
+            audio_prev_gear: 1,
             seed,
             menu: MenuState {
                 settings: SettingsState {
@@ -260,6 +280,25 @@ impl App {
         self.window = Some(window);
         self.previous = Instant::now();
 
+        // Audio: enumerate the output devices and open the selected one. The
+        // engine is optional -- no device means the game runs silently.
+        let (audio_devices, audio_default) = enumerate_output_devices();
+        self.audio_devices = audio_devices;
+        self.audio_default = audio_default;
+        let audio = AudioEngine::init(self.menu.settings.audio);
+        match &audio {
+            Some(_) => {
+                for (i, name) in self.audio_devices.iter().enumerate() {
+                    let tag = if self.audio_default == Some(i) { " (default)" } else { "" };
+                    println!("audio device {i}: {name}{tag}");
+                }
+            }
+            None => {
+                println!("audio: no output device available; running silent");
+            }
+        }
+        self.audio = audio;
+
         println!(
             "Controls: W / Up = throttle | S / Down = brake | A / Left & D / Right = steer | E = gear up | Q = gear down | R = restart | F3 / F4 = debug HUD | F10 = capture frame | F11 = fullscreen | ESC = pause menu"
         );
@@ -307,12 +346,13 @@ impl App {
         self.mode = AppMode::Playing;
     }
 
-    /// Commits the staged settings in one shot. GPU switches the backend; an
-    /// AA/FX-only change rebuilds the current backend in place. Difficulty and
-    /// weather are set on the main menu and are already in effect by the time
-    /// APPLY can be reached.
+    /// Commits the staged graphics settings in one shot. GPU switches the
+    /// backend; an AA/FX-only change rebuilds the current backend in place.
+    /// Difficulty and weather are set on the main menu and are already in
+    /// effect by the time APPLY can be reached. Only the graphics subset is
+    /// committed; the audio subset has its own APPLY.
     fn apply_settings(&mut self) {
-        if self.menu.settings == self.applied {
+        if self.menu.settings.graphics_equal(&self.applied) {
             return;
         }
         let gpu_changed = self
@@ -330,7 +370,66 @@ impl App {
                 renderer.set_aa(aa_samples(self.supported_aa[self.menu.settings.antialias]));
             }
         }
-        self.applied = self.menu.settings;
+        self.applied.copy_graphics_from(&self.menu.settings);
+    }
+
+    /// Commits the staged audio settings. A different DEVICE reopens the output
+    /// stream; volumes/toggles are applied to the live players. A short test
+    /// tone confirms the new device/volume took effect.
+    fn apply_audio_settings(&mut self) {
+        if self.menu.settings.audio_equal(&self.applied) {
+            return;
+        }
+        let mut audio = self.menu.settings.audio;
+        if let Some(engine) = &mut self.audio {
+            let device_changed = audio.device_index != engine.active_device();
+            if device_changed {
+                if engine.switch_device(audio.device_index).is_err() {
+                    println!(
+                        "audio: failed to open device [{}], keeping the current one",
+                        audio.device_index
+                    );
+                    audio.device_index = engine.active_device();
+                }
+            }
+            engine.apply(audio);
+            engine.play_sfx(Sfx::Test);
+        }
+        self.applied.audio = audio;
+    }
+
+    /// Feeds the current vehicle state into the engine sound every frame and
+    /// fires one-shot SFX on event edges (wreck, blown engine, perfect shift,
+    /// gear change). Idles the engine while paused in a menu.
+    fn update_audio(&mut self) {
+        let Some(audio) = &self.audio else {
+            return;
+        };
+        if matches!(self.mode, AppMode::Playing) {
+            audio.set_engine(
+                self.game.vehicle.rpm_frac(),
+                self.game.speed_kmh,
+                self.game.engine_blown,
+            );
+            if self.game.wrecks > self.audio_prev_wrecks {
+                audio.play_sfx(Sfx::Wreck);
+            }
+            if self.game.engine_blown && !self.audio_prev_blown {
+                audio.play_sfx(Sfx::Blow);
+            }
+            if self.game.perfect_shift_timer > 0.0 && self.audio_prev_perfect_timer == 0.0 {
+                audio.play_sfx(Sfx::PerfectShift);
+            }
+            if self.game.vehicle.gear != self.audio_prev_gear {
+                audio.play_sfx(Sfx::Gear);
+            }
+            self.audio_prev_wrecks = self.game.wrecks;
+            self.audio_prev_blown = self.game.engine_blown;
+            self.audio_prev_perfect_timer = self.game.perfect_shift_timer;
+            self.audio_prev_gear = self.game.vehicle.gear;
+        } else {
+            audio.set_engine(0.0, 0.0, self.game.engine_blown);
+        }
     }
 
     /// Switches the graphics backend to `menu.settings.gpu_index` when it
@@ -387,6 +486,8 @@ impl App {
         match self.menu.screen {
             MenuScreen::Main => self.handle_main_key(event_loop, kb),
             MenuScreen::Settings => self.handle_settings_key(kb),
+            MenuScreen::Graphics => self.handle_graphics_key(kb),
+            MenuScreen::Audio => self.handle_audio_key(kb),
         }
     }
 
@@ -436,7 +537,6 @@ impl App {
     }
 
     fn handle_settings_key(&mut self, kb: &KeyEvent) {
-        let device_count = self.gpu_names.len();
         match kb.physical_key {
             PhysicalKey::Code(KeyCode::ArrowUp) | PhysicalKey::Code(KeyCode::KeyW) => {
                 self.menu.settings_cursor = self.menu.settings_cursor.previous();
@@ -444,38 +544,96 @@ impl App {
             PhysicalKey::Code(KeyCode::ArrowDown) | PhysicalKey::Code(KeyCode::KeyS) => {
                 self.menu.settings_cursor = self.menu.settings_cursor.next();
             }
+            PhysicalKey::Code(KeyCode::Enter) => match self.menu.settings_cursor {
+                SettingsRow::Graphics => self.menu.open_graphics(),
+                SettingsRow::Audio => self.menu.open_audio(),
+                SettingsRow::Back => self.menu.back_to_main(),
+            },
+            _ => {}
+        }
+    }
+
+    fn handle_graphics_key(&mut self, kb: &KeyEvent) {
+        let device_count = self.gpu_names.len();
+        match kb.physical_key {
+            PhysicalKey::Code(KeyCode::ArrowUp) | PhysicalKey::Code(KeyCode::KeyW) => {
+                self.menu.graphics_cursor = self.menu.graphics_cursor.previous();
+            }
+            PhysicalKey::Code(KeyCode::ArrowDown) | PhysicalKey::Code(KeyCode::KeyS) => {
+                self.menu.graphics_cursor = self.menu.graphics_cursor.next();
+            }
             PhysicalKey::Code(KeyCode::ArrowLeft) | PhysicalKey::Code(KeyCode::KeyA) => {
-                self.cycle_settings_row(-1, device_count);
+                self.cycle_graphics_row(-1, device_count);
             }
             PhysicalKey::Code(KeyCode::ArrowRight) | PhysicalKey::Code(KeyCode::KeyD) => {
-                self.cycle_settings_row(1, device_count);
+                self.cycle_graphics_row(1, device_count);
             }
-            PhysicalKey::Code(KeyCode::Enter) => match self.menu.settings_cursor {
-                SettingsRow::Apply => self.apply_settings(),
-                SettingsRow::Back => self.menu.back_to_main(),
+            PhysicalKey::Code(KeyCode::Enter) => match self.menu.graphics_cursor {
+                GraphicsRow::Apply => self.apply_settings(),
+                GraphicsRow::Back => self.menu.back(),
                 _ => {}
             },
             _ => {}
         }
     }
 
-    /// Left/Right handler for the settings rows: cycles GPU/AA and toggles the
+    fn handle_audio_key(&mut self, kb: &KeyEvent) {
+        let device_count = self.audio_devices.len();
+        match kb.physical_key {
+            PhysicalKey::Code(KeyCode::ArrowUp) | PhysicalKey::Code(KeyCode::KeyW) => {
+                self.menu.audio_cursor = self.menu.audio_cursor.previous();
+            }
+            PhysicalKey::Code(KeyCode::ArrowDown) | PhysicalKey::Code(KeyCode::KeyS) => {
+                self.menu.audio_cursor = self.menu.audio_cursor.next();
+            }
+            PhysicalKey::Code(KeyCode::ArrowLeft) | PhysicalKey::Code(KeyCode::KeyA) => {
+                self.cycle_audio_row(-1, device_count);
+            }
+            PhysicalKey::Code(KeyCode::ArrowRight) | PhysicalKey::Code(KeyCode::KeyD) => {
+                self.cycle_audio_row(1, device_count);
+            }
+            PhysicalKey::Code(KeyCode::Enter) => match self.menu.audio_cursor {
+                AudioRow::Apply => self.apply_audio_settings(),
+                AudioRow::Back => self.menu.back(),
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
+    /// Left/Right handler for the graphics rows: cycles GPU/AA and toggles the
     /// FX rows. APPLY/BACK have no value to cycle.
-    fn cycle_settings_row(&mut self, delta: i32, device_count: usize) {
-        match self.menu.settings_cursor {
-            SettingsRow::Gpu => self.menu.cycle_gpu(delta, device_count),
-            SettingsRow::Antialias => self.menu.cycle_antialias(delta, &self.supported_aa),
-            SettingsRow::TerrainDetail => self.menu.cycle_terrain_detail(delta),
-            SettingsRow::Fxaa
-            | SettingsRow::Bloom
-            | SettingsRow::Vignette
-            | SettingsRow::Grain
-            | SettingsRow::Saturation
-            | SettingsRow::ChromaticAberration
-            | SettingsRow::RainFx
-            | SettingsRow::Raytrace => self.menu.toggle_fx(self.menu.settings_cursor),
-            SettingsRow::Reflect => self.menu.cycle_puddles(delta),
-            SettingsRow::Apply | SettingsRow::Back => {}
+    fn cycle_graphics_row(&mut self, delta: i32, device_count: usize) {
+        match self.menu.graphics_cursor {
+            GraphicsRow::Gpu => self.menu.cycle_gpu(delta, device_count),
+            GraphicsRow::Antialias => self.menu.cycle_antialias(delta, &self.supported_aa),
+            GraphicsRow::TerrainDetail => self.menu.cycle_terrain_detail(delta),
+            GraphicsRow::Fxaa
+            | GraphicsRow::Bloom
+            | GraphicsRow::Vignette
+            | GraphicsRow::Grain
+            | GraphicsRow::Saturation
+            | GraphicsRow::ChromaticAberration
+            | GraphicsRow::RainFx
+            | GraphicsRow::Raytrace => self.menu.toggle_fx(self.menu.graphics_cursor),
+            GraphicsRow::Reflect => self.menu.cycle_puddles(delta),
+            GraphicsRow::Apply | GraphicsRow::Back => {}
+        }
+    }
+
+    /// Left/Right handler for the audio rows: cycles the device, steps the
+    /// volume sliders and toggles the FX/music switches. APPLY/BACK have no
+    /// value to cycle.
+    fn cycle_audio_row(&mut self, delta: i32, device_count: usize) {
+        match self.menu.audio_cursor {
+            AudioRow::Device => self.menu.cycle_audio_device(delta, device_count),
+            AudioRow::Master | AudioRow::Music | AudioRow::Sfx => {
+                self.menu.adjust_volume(self.menu.audio_cursor, delta)
+            }
+            AudioRow::FxEnabled | AudioRow::MusicEnabled => {
+                self.menu.toggle_audio(self.menu.audio_cursor)
+            }
+            AudioRow::Apply | AudioRow::Back => {}
         }
     }
 }
@@ -583,10 +741,6 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        let Some(renderer) = &mut self.renderer else {
-            return;
-        };
-
         let frame_started = Instant::now();
         let now = Instant::now();
         let dt = now.duration_since(self.previous);
@@ -610,7 +764,12 @@ impl ApplicationHandler for App {
             self.input.gear_up = false;
             self.input.gear_down = false;
         }
+        self.update_audio();
         timings.sim_ms = sim_started.elapsed().as_secs_f32() * 1000.0;
+
+        let Some(renderer) = &mut self.renderer else {
+            return;
+        };
 
         let aspect = self.window.as_ref().map_or(16.0 / 9.0, |w| {
             let size = w.inner_size();
@@ -621,12 +780,19 @@ impl ApplicationHandler for App {
             }
         });
         let mut root = match &self.mode {
-            AppMode::Menu => build_menu_tree(
-                &self.menu,
-                &self.gpu_names,
-                &self.supported_aa,
-                self.menu.settings != self.applied,
-            ),
+            AppMode::Menu => {
+                let graphics_dirty = !self.menu.settings.graphics_equal(&self.applied);
+                let audio_dirty = !self.menu.settings.audio_equal(&self.applied);
+                build_menu_tree(
+                    &self.menu,
+                    &self.gpu_names,
+                    &self.supported_aa,
+                    &self.audio_devices,
+                    self.audio_default,
+                    graphics_dirty,
+                    audio_dirty,
+                )
+            }
             AppMode::Playing => {
                 build_hud_tree(&self.game, self.debug_visible.then_some(&self.debug))
             }

@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT
 
+use crate::audio::AudioSettings;
 use crate::font::{
-    ICON_CHIP, ICON_LOGOUT, ICON_PLAY, ICON_SPEEDOMETER, ICON_STEERING, ICON_WEATHER,
+    ICON_AUDIO, ICON_CHIP, ICON_LOGOUT, ICON_MUSIC, ICON_PLAY, ICON_SPEEDOMETER,
+    ICON_STEERING, ICON_WEATHER,
 };
 use crate::game::{DifficultyLevel, Weather};
 use crate::mesh::TerrainDetail;
@@ -23,11 +25,13 @@ const SECTION_GAP: f32 = 64.0;
 const CARD_PAD: Insets = Insets::new(64.0, 48.0, 64.0, 48.0);
 
 /// Which menu screen is currently open. `Main` is the title/pause entry point;
-/// `Settings` is a submenu reached from it.
+/// `Settings` is the category picker; `Graphics`/`Audio` are its submenus.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuScreen {
     Main,
     Settings,
+    Graphics,
+    Audio,
 }
 
 /// Rows of the main menu (title screen and pause menu). `Mode`/`Weather` are
@@ -66,9 +70,37 @@ impl MenuRow {
     }
 }
 
-/// Rows of the settings submenu.
+/// Rows of the settings category picker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsRow {
+    Graphics,
+    Audio,
+    Back,
+}
+
+impl SettingsRow {
+    /// The row above this one (clamped at the top).
+    pub fn previous(self) -> Self {
+        match self {
+            SettingsRow::Graphics => SettingsRow::Graphics,
+            SettingsRow::Audio => SettingsRow::Graphics,
+            SettingsRow::Back => SettingsRow::Audio,
+        }
+    }
+
+    /// The row below this one (clamped at the bottom).
+    pub fn next(self) -> Self {
+        match self {
+            SettingsRow::Graphics => SettingsRow::Audio,
+            SettingsRow::Audio => SettingsRow::Back,
+            SettingsRow::Back => SettingsRow::Back,
+        }
+    }
+}
+
+/// Rows of the graphics submenu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GraphicsRow {
     Gpu,
     Antialias,
     TerrainDetail,
@@ -85,44 +117,87 @@ pub enum SettingsRow {
     Back,
 }
 
-impl SettingsRow {
+impl GraphicsRow {
     /// The row above this one (clamped at the top).
     pub fn previous(self) -> Self {
         match self {
-            SettingsRow::Gpu => SettingsRow::Gpu,
-            SettingsRow::Antialias => SettingsRow::Gpu,
-            SettingsRow::TerrainDetail => SettingsRow::Antialias,
-            SettingsRow::Fxaa => SettingsRow::TerrainDetail,
-            SettingsRow::Bloom => SettingsRow::Fxaa,
-            SettingsRow::Vignette => SettingsRow::Bloom,
-            SettingsRow::Grain => SettingsRow::Vignette,
-            SettingsRow::Saturation => SettingsRow::Grain,
-            SettingsRow::ChromaticAberration => SettingsRow::Saturation,
-            SettingsRow::RainFx => SettingsRow::ChromaticAberration,
-            SettingsRow::Reflect => SettingsRow::RainFx,
-            SettingsRow::Raytrace => SettingsRow::Reflect,
-            SettingsRow::Apply => SettingsRow::Raytrace,
-            SettingsRow::Back => SettingsRow::Apply,
+            GraphicsRow::Gpu => GraphicsRow::Gpu,
+            GraphicsRow::Antialias => GraphicsRow::Gpu,
+            GraphicsRow::TerrainDetail => GraphicsRow::Antialias,
+            GraphicsRow::Fxaa => GraphicsRow::TerrainDetail,
+            GraphicsRow::Bloom => GraphicsRow::Fxaa,
+            GraphicsRow::Vignette => GraphicsRow::Bloom,
+            GraphicsRow::Grain => GraphicsRow::Vignette,
+            GraphicsRow::Saturation => GraphicsRow::Grain,
+            GraphicsRow::ChromaticAberration => GraphicsRow::Saturation,
+            GraphicsRow::RainFx => GraphicsRow::ChromaticAberration,
+            GraphicsRow::Reflect => GraphicsRow::RainFx,
+            GraphicsRow::Raytrace => GraphicsRow::Reflect,
+            GraphicsRow::Apply => GraphicsRow::Raytrace,
+            GraphicsRow::Back => GraphicsRow::Apply,
         }
     }
 
     /// The row below this one (clamped at the bottom).
     pub fn next(self) -> Self {
         match self {
-            SettingsRow::Gpu => SettingsRow::Antialias,
-            SettingsRow::Antialias => SettingsRow::TerrainDetail,
-            SettingsRow::TerrainDetail => SettingsRow::Fxaa,
-            SettingsRow::Fxaa => SettingsRow::Bloom,
-            SettingsRow::Bloom => SettingsRow::Vignette,
-            SettingsRow::Vignette => SettingsRow::Grain,
-            SettingsRow::Grain => SettingsRow::Saturation,
-            SettingsRow::Saturation => SettingsRow::ChromaticAberration,
-            SettingsRow::ChromaticAberration => SettingsRow::RainFx,
-            SettingsRow::RainFx => SettingsRow::Reflect,
-            SettingsRow::Reflect => SettingsRow::Raytrace,
-            SettingsRow::Raytrace => SettingsRow::Apply,
-            SettingsRow::Apply => SettingsRow::Back,
-            SettingsRow::Back => SettingsRow::Back,
+            GraphicsRow::Gpu => GraphicsRow::Antialias,
+            GraphicsRow::Antialias => GraphicsRow::TerrainDetail,
+            GraphicsRow::TerrainDetail => GraphicsRow::Fxaa,
+            GraphicsRow::Fxaa => GraphicsRow::Bloom,
+            GraphicsRow::Bloom => GraphicsRow::Vignette,
+            GraphicsRow::Vignette => GraphicsRow::Grain,
+            GraphicsRow::Grain => GraphicsRow::Saturation,
+            GraphicsRow::Saturation => GraphicsRow::ChromaticAberration,
+            GraphicsRow::ChromaticAberration => GraphicsRow::RainFx,
+            GraphicsRow::RainFx => GraphicsRow::Reflect,
+            GraphicsRow::Reflect => GraphicsRow::Raytrace,
+            GraphicsRow::Raytrace => GraphicsRow::Apply,
+            GraphicsRow::Apply => GraphicsRow::Back,
+            GraphicsRow::Back => GraphicsRow::Back,
+        }
+    }
+}
+
+/// Rows of the audio submenu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AudioRow {
+    Device,
+    Master,
+    Music,
+    Sfx,
+    FxEnabled,
+    MusicEnabled,
+    Apply,
+    Back,
+}
+
+impl AudioRow {
+    /// The row above this one (clamped at the top).
+    pub fn previous(self) -> Self {
+        match self {
+            AudioRow::Device => AudioRow::Device,
+            AudioRow::Master => AudioRow::Device,
+            AudioRow::Music => AudioRow::Master,
+            AudioRow::Sfx => AudioRow::Music,
+            AudioRow::FxEnabled => AudioRow::Sfx,
+            AudioRow::MusicEnabled => AudioRow::FxEnabled,
+            AudioRow::Apply => AudioRow::MusicEnabled,
+            AudioRow::Back => AudioRow::Apply,
+        }
+    }
+
+    /// The row below this one (clamped at the bottom).
+    pub fn next(self) -> Self {
+        match self {
+            AudioRow::Device => AudioRow::Master,
+            AudioRow::Master => AudioRow::Music,
+            AudioRow::Music => AudioRow::Sfx,
+            AudioRow::Sfx => AudioRow::FxEnabled,
+            AudioRow::FxEnabled => AudioRow::MusicEnabled,
+            AudioRow::MusicEnabled => AudioRow::Apply,
+            AudioRow::Apply => AudioRow::Back,
+            AudioRow::Back => AudioRow::Back,
         }
     }
 }
@@ -180,9 +255,11 @@ impl PuddleQuality {
     }
 }
 
-/// The ten user-adjustable settings. Staged in the menu, committed in one shot
-/// by the APPLY row; `PartialEq` lets the app show the APPLY row as enabled only
-/// when the staged values differ from what is in effect.
+/// The user-adjustable settings. Graphics values are staged in the graphics
+/// submenu and committed by its APPLY row; audio values are staged in the audio
+/// submenu and committed by its APPLY row. `graphics_equal`/`audio_equal` let
+/// the app show each APPLY row as enabled only when the staged values differ
+/// from what is in effect.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SettingsState {
     pub gpu_index: usize,
@@ -205,6 +282,8 @@ pub struct SettingsState {
     /// Full ray-traced lighting + reflections (only on GPUs with the
     /// ray-tracing extensions).
     pub raytrace: bool,
+    /// Audio channel settings (device, volumes, toggles).
+    pub audio: AudioSettings,
 }
 
 impl Default for SettingsState {
@@ -224,7 +303,50 @@ impl Default for SettingsState {
             rain_fx: true,
             puddles: PuddleQuality::High,
             raytrace: false,
+            audio: AudioSettings::default(),
         }
+    }
+}
+
+impl SettingsState {
+    /// Whether the graphics subset matches `other` (drives the graphics APPLY
+    /// row's enabled state).
+    pub fn graphics_equal(&self, other: &SettingsState) -> bool {
+        self.gpu_index == other.gpu_index
+            && self.antialias == other.antialias
+            && self.terrain_detail == other.terrain_detail
+            && self.fxaa == other.fxaa
+            && self.bloom == other.bloom
+            && self.vignette == other.vignette
+            && self.grain == other.grain
+            && self.saturation == other.saturation
+            && self.chroma == other.chroma
+            && self.rain_fx == other.rain_fx
+            && self.puddles == other.puddles
+            && self.raytrace == other.raytrace
+    }
+
+    /// Whether the audio subset matches `other` (drives the audio APPLY row's
+    /// enabled state).
+    pub fn audio_equal(&self, other: &SettingsState) -> bool {
+        self.audio == other.audio
+    }
+
+    /// Copies the graphics subset from `src`, leaving difficulty/weather/audio
+    /// untouched. Used by the graphics APPLY commit.
+    pub fn copy_graphics_from(&mut self, src: &SettingsState) {
+        self.gpu_index = src.gpu_index;
+        self.antialias = src.antialias;
+        self.terrain_detail = src.terrain_detail;
+        self.fxaa = src.fxaa;
+        self.bloom = src.bloom;
+        self.vignette = src.vignette;
+        self.grain = src.grain;
+        self.saturation = src.saturation;
+        self.chroma = src.chroma;
+        self.rain_fx = src.rain_fx;
+        self.puddles = src.puddles;
+        self.raytrace = src.raytrace;
     }
 }
 
@@ -233,6 +355,8 @@ pub struct MenuState {
     pub screen: MenuScreen,
     pub main_cursor: MenuRow,
     pub settings_cursor: SettingsRow,
+    pub graphics_cursor: GraphicsRow,
+    pub audio_cursor: AudioRow,
     pub settings: SettingsState,
 }
 
@@ -241,7 +365,9 @@ impl MenuState {
         MenuState {
             screen: MenuScreen::Main,
             main_cursor: MenuRow::Start,
-            settings_cursor: SettingsRow::Gpu,
+            settings_cursor: SettingsRow::Graphics,
+            graphics_cursor: GraphicsRow::Gpu,
+            audio_cursor: AudioRow::Device,
             settings: SettingsState {
                 gpu_index,
                 weather,
@@ -254,13 +380,35 @@ impl MenuState {
     pub fn open_for_pause(&mut self) {
         self.screen = MenuScreen::Main;
         self.main_cursor = MenuRow::Start;
-        self.settings_cursor = SettingsRow::Gpu;
+        self.settings_cursor = SettingsRow::Graphics;
+        self.graphics_cursor = GraphicsRow::Gpu;
+        self.audio_cursor = AudioRow::Device;
     }
 
-    /// Enters the settings submenu.
+    /// Enters the settings category picker.
     pub fn open_settings(&mut self) {
         self.screen = MenuScreen::Settings;
-        self.settings_cursor = SettingsRow::Gpu;
+        self.settings_cursor = SettingsRow::Graphics;
+    }
+
+    /// Enters the graphics submenu.
+    pub fn open_graphics(&mut self) {
+        self.screen = MenuScreen::Graphics;
+        self.graphics_cursor = GraphicsRow::Gpu;
+    }
+
+    /// Enters the audio submenu.
+    pub fn open_audio(&mut self) {
+        self.screen = MenuScreen::Audio;
+        self.audio_cursor = AudioRow::Device;
+    }
+
+    /// Steps back one level (submenu -> category picker -> main).
+    pub fn back(&mut self) {
+        self.screen = match self.screen {
+            MenuScreen::Graphics | MenuScreen::Audio => MenuScreen::Settings,
+            _ => MenuScreen::Main,
+        };
     }
 
     /// Returns to the main menu.
@@ -347,16 +495,16 @@ impl MenuState {
     }
 
     /// Toggles the boolean FX row `row` (no-op for non-FX rows).
-    pub fn toggle_fx(&mut self, row: SettingsRow) {
+    pub fn toggle_fx(&mut self, row: GraphicsRow) {
         match row {
-            SettingsRow::Fxaa => self.settings.fxaa = !self.settings.fxaa,
-            SettingsRow::Bloom => self.settings.bloom = !self.settings.bloom,
-            SettingsRow::Vignette => self.settings.vignette = !self.settings.vignette,
-            SettingsRow::Grain => self.settings.grain = !self.settings.grain,
-            SettingsRow::Saturation => self.settings.saturation = !self.settings.saturation,
-            SettingsRow::ChromaticAberration => self.settings.chroma = !self.settings.chroma,
-            SettingsRow::RainFx => self.settings.rain_fx = !self.settings.rain_fx,
-            SettingsRow::Raytrace => self.settings.raytrace = !self.settings.raytrace,
+            GraphicsRow::Fxaa => self.settings.fxaa = !self.settings.fxaa,
+            GraphicsRow::Bloom => self.settings.bloom = !self.settings.bloom,
+            GraphicsRow::Vignette => self.settings.vignette = !self.settings.vignette,
+            GraphicsRow::Grain => self.settings.grain = !self.settings.grain,
+            GraphicsRow::Saturation => self.settings.saturation = !self.settings.saturation,
+            GraphicsRow::ChromaticAberration => self.settings.chroma = !self.settings.chroma,
+            GraphicsRow::RainFx => self.settings.rain_fx = !self.settings.rain_fx,
+            GraphicsRow::Raytrace => self.settings.raytrace = !self.settings.raytrace,
             _ => {}
         }
     }
@@ -376,6 +524,41 @@ impl MenuState {
         let next = (cur as i32 + delta).rem_euclid(levels.len() as i32) as usize;
         self.settings.puddles = levels[next];
     }
+
+    /// Cycles the DEVICE row over the enumerated output devices. No-op when
+    /// there are none (no audio hardware).
+    pub fn cycle_audio_device(&mut self, delta: i32, device_count: usize) {
+        if device_count == 0 {
+            return;
+        }
+        self.settings.audio.device_index = (self.settings.audio.device_index as i32 + delta)
+            .rem_euclid(device_count as i32) as usize;
+    }
+
+    /// Steps a volume row by +/- 5%, clamped to 0..=100.
+    pub fn adjust_volume(&mut self, row: AudioRow, delta: i32) {
+        let step = 5;
+        let adjust = |cur: &mut u8| {
+            *cur = ((*cur as i32 + delta * step).clamp(0, 100)) as u8;
+        };
+        match row {
+            AudioRow::Master => adjust(&mut self.settings.audio.master),
+            AudioRow::Music => adjust(&mut self.settings.audio.music),
+            AudioRow::Sfx => adjust(&mut self.settings.audio.sfx),
+            _ => {}
+        }
+    }
+
+    /// Toggles an audio boolean row (no-op for non-toggle rows).
+    pub fn toggle_audio(&mut self, row: AudioRow) {
+        match row {
+            AudioRow::FxEnabled => self.settings.audio.fx_enabled = !self.settings.audio.fx_enabled,
+            AudioRow::MusicEnabled => {
+                self.settings.audio.music_enabled = !self.settings.audio.music_enabled
+            }
+            _ => {}
+        }
+    }
 }
 
 fn gpu_label(index: usize, names: &[String]) -> String {
@@ -386,6 +569,18 @@ fn gpu_label(index: usize, names: &[String]) -> String {
         format!("{} GPU  [{}]  {}...", ICON_CHIP, index, trimmed)
     } else {
         format!("{} GPU  [{}]  {}", ICON_CHIP, index, trimmed)
+    }
+}
+
+fn audio_device_label(index: usize, names: &[String], default: Option<usize>) -> String {
+    let name = names.get(index).map(|s| s.as_str()).unwrap_or("NO AUDIO DEVICE");
+    const MAX_CHARS: usize = 40;
+    let trimmed: String = name.chars().take(MAX_CHARS).collect();
+    let default_tag = if default == Some(index) { "  (DEFAULT)" } else { "" };
+    if name.chars().count() > MAX_CHARS {
+        format!("DEVICE  [{}]  {}...{}", index, trimmed, default_tag)
+    } else {
+        format!("DEVICE  [{}]  {}{}", index, trimmed, default_tag)
     }
 }
 
@@ -402,17 +597,40 @@ pub(crate) fn build_menu_tree(
     menu: &MenuState,
     gpu_names: &[String],
     supported_aa: &[AaMode],
-    dirty: bool,
+    audio_devices: &[String],
+    audio_default: Option<usize>,
+    graphics_dirty: bool,
+    audio_dirty: bool,
 ) -> Node {
     match menu.screen {
         MenuScreen::Main => build_main_tree(menu),
-        MenuScreen::Settings => build_settings_tree(menu, gpu_names, supported_aa, dirty),
+        MenuScreen::Settings => build_settings_tree(menu),
+        MenuScreen::Graphics => build_graphics_tree(menu, gpu_names, supported_aa, graphics_dirty),
+        MenuScreen::Audio => build_audio_tree(menu, audio_devices, audio_default, audio_dirty),
     }
+}
+
+fn card(title: String, rows: Column) -> Node {
+    let foot = "UP/DOWN MOVE, LEFT/RIGHT CHANGE, ENTER CONFIRM";
+    let col = Column::new(
+        vec![
+            Node::new(Text::new(title, TITLE_EM, TITLE_COLOR).aligned(HAlign::Center)),
+            Node::new(Spacer::new(0.0, SECTION_GAP)),
+            Node::new(rows),
+            Node::new(Spacer::new(0.0, SECTION_GAP)),
+            Node::new(Text::new(foot, FOOT_EM, FOOT_COLOR).aligned(HAlign::Center)),
+        ],
+        0.0,
+        HAlign::Center,
+    );
+    Node::new(Overlay::new().child(
+        Align::Center,
+        Node::new(Panel::wrap(BACKDROP, CARD_PAD, Node::new(col))),
+    ))
 }
 
 fn build_main_tree(menu: &MenuState) -> Node {
     let title = format!("{}  LANE LUNACY", ICON_STEERING);
-    let foot = "UP/DOWN MOVE, LEFT/RIGHT CHANGE, ENTER CONFIRM";
 
     let rows = Column::new(
         vec![
@@ -459,32 +677,44 @@ fn build_main_tree(menu: &MenuState) -> Node {
         HAlign::Center,
     );
 
-    let card = Column::new(
+    card(title, rows)
+}
+
+fn build_settings_tree(menu: &MenuState) -> Node {
+    let title = "SETTINGS".to_string();
+    let focused = |row: SettingsRow| menu.settings_cursor == row;
+    let rows = Column::new(
         vec![
-            Node::new(Text::new(title, TITLE_EM, TITLE_COLOR).aligned(HAlign::Center)),
-            Node::new(Spacer::new(0.0, SECTION_GAP)),
-            Node::new(rows),
-            Node::new(Spacer::new(0.0, SECTION_GAP)),
-            Node::new(Text::new(foot, FOOT_EM, FOOT_COLOR).aligned(HAlign::Center)),
+            Node::new(
+                Button::new(
+                    format!("{}  GRAPHICS", ICON_CHIP),
+                    ROW_EM,
+                    ROW_COLOR,
+                    30,
+                )
+                .focused(focused(SettingsRow::Graphics)),
+            ),
+            Node::new(
+                Button::new(format!("{}  AUDIO", ICON_AUDIO), ROW_EM, ROW_COLOR, 31)
+                    .focused(focused(SettingsRow::Audio)),
+            ),
+            Node::new(Button::new("BACK", ROW_EM, ROW_COLOR, 32).focused(focused(SettingsRow::Back))),
         ],
-        0.0,
+        ROW_GAP,
         HAlign::Center,
     );
 
-    Node::new(Overlay::new().child(
-        Align::Center,
-        Node::new(Panel::wrap(BACKDROP, CARD_PAD, Node::new(card))),
-    ))
+    card(title, rows)
 }
 
-fn build_settings_tree(
+fn build_graphics_tree(
     menu: &MenuState,
     gpu_names: &[String],
     supported_aa: &[AaMode],
     dirty: bool,
 ) -> Node {
     let s = &menu.settings;
-    let title = format!("{}  SETTINGS", ICON_SPEEDOMETER);
+    let title = format!("{}  GRAPHICS", ICON_SPEEDOMETER);
     let gpu_t = gpu_label(s.gpu_index, gpu_names);
     let aa_label = supported_aa
         .get(s.antialias)
@@ -492,27 +722,27 @@ fn build_settings_tree(
         .unwrap_or("OFF");
     let aa_t = format!("ANTIALIASING  {}", aa_label);
     let terrain_t = format!("TERRAIN DETAIL  {}", s.terrain_detail.label());
-    let foot = "UP/DOWN MOVE, LEFT/RIGHT CHANGE, ENTER CONFIRM";
     let apply_color = if dirty { ROW_COLOR } else { DIM_COLOR };
 
-    let focused = |row: SettingsRow| menu.settings_cursor == row;
+    let focused = |row: GraphicsRow| menu.graphics_cursor == row;
     let rows = Column::new(
         vec![
-            Node::new(Button::new(gpu_t, ROW_EM, ROW_COLOR, 10).focused(focused(SettingsRow::Gpu))),
+            Node::new(Button::new(gpu_t, ROW_EM, ROW_COLOR, 10).focused(focused(GraphicsRow::Gpu))),
             Node::new(
-                Button::new(aa_t, ROW_EM, ROW_COLOR, 11).focused(focused(SettingsRow::Antialias)),
+                Button::new(aa_t, ROW_EM, ROW_COLOR, 11)
+                    .focused(focused(GraphicsRow::Antialias)),
             ),
             Node::new(
                 Button::new(terrain_t, ROW_EM, ROW_COLOR, 12)
-                    .focused(focused(SettingsRow::TerrainDetail)),
+                    .focused(focused(GraphicsRow::TerrainDetail)),
             ),
             Node::new(
                 Button::new(format!("FXAA  {}", on_off(s.fxaa)), ROW_EM, ROW_COLOR, 13)
-                    .focused(focused(SettingsRow::Fxaa)),
+                    .focused(focused(GraphicsRow::Fxaa)),
             ),
             Node::new(
                 Button::new(format!("BLOOM  {}", on_off(s.bloom)), ROW_EM, ROW_COLOR, 14)
-                    .focused(focused(SettingsRow::Bloom)),
+                    .focused(focused(GraphicsRow::Bloom)),
             ),
             Node::new(
                 Button::new(
@@ -521,11 +751,11 @@ fn build_settings_tree(
                     ROW_COLOR,
                     15,
                 )
-                .focused(focused(SettingsRow::Vignette)),
+                .focused(focused(GraphicsRow::Vignette)),
             ),
             Node::new(
                 Button::new(format!("GRAIN  {}", on_off(s.grain)), ROW_EM, ROW_COLOR, 16)
-                    .focused(focused(SettingsRow::Grain)),
+                    .focused(focused(GraphicsRow::Grain)),
             ),
             Node::new(
                 Button::new(
@@ -534,7 +764,7 @@ fn build_settings_tree(
                     ROW_COLOR,
                     17,
                 )
-                .focused(focused(SettingsRow::Saturation)),
+                .focused(focused(GraphicsRow::Saturation)),
             ),
             Node::new(
                 Button::new(
@@ -543,7 +773,7 @@ fn build_settings_tree(
                     ROW_COLOR,
                     18,
                 )
-                .focused(focused(SettingsRow::ChromaticAberration)),
+                .focused(focused(GraphicsRow::ChromaticAberration)),
             ),
             Node::new(
                 Button::new(
@@ -552,7 +782,7 @@ fn build_settings_tree(
                     ROW_COLOR,
                     19,
                 )
-                .focused(focused(SettingsRow::RainFx)),
+                .focused(focused(GraphicsRow::RainFx)),
             ),
             Node::new(
                 Button::new(
@@ -561,7 +791,7 @@ fn build_settings_tree(
                     ROW_COLOR,
                     20,
                 )
-                .focused(focused(SettingsRow::Reflect)),
+                .focused(focused(GraphicsRow::Reflect)),
             ),
             Node::new(
                 Button::new(
@@ -570,35 +800,82 @@ fn build_settings_tree(
                     ROW_COLOR,
                     21,
                 )
-                .focused(focused(SettingsRow::Raytrace)),
+                .focused(focused(GraphicsRow::Raytrace)),
             ),
             Node::new(
-                Button::new("APPLY", ROW_EM, apply_color, 22).focused(focused(SettingsRow::Apply)),
+                Button::new("APPLY", ROW_EM, apply_color, 22).focused(focused(GraphicsRow::Apply)),
             ),
             Node::new(
-                Button::new("BACK", ROW_EM, ROW_COLOR, 23).focused(focused(SettingsRow::Back)),
+                Button::new("BACK", ROW_EM, ROW_COLOR, 23).focused(focused(GraphicsRow::Back)),
             ),
         ],
         ROW_GAP,
         HAlign::Center,
     );
 
-    let card = Column::new(
+    card(title, rows)
+}
+
+fn build_audio_tree(
+    menu: &MenuState,
+    audio_devices: &[String],
+    audio_default: Option<usize>,
+    dirty: bool,
+) -> Node {
+    let s = &menu.settings.audio;
+    let title = format!("{}  AUDIO", ICON_AUDIO);
+    let device_t = audio_device_label(s.device_index, audio_devices, audio_default);
+    let apply_color = if dirty { ROW_COLOR } else { DIM_COLOR };
+
+    let focused = |row: AudioRow| menu.audio_cursor == row;
+    let rows = Column::new(
         vec![
-            Node::new(Text::new(title, TITLE_EM, TITLE_COLOR).aligned(HAlign::Center)),
-            Node::new(Spacer::new(0.0, SECTION_GAP)),
-            Node::new(rows),
-            Node::new(Spacer::new(0.0, SECTION_GAP)),
-            Node::new(Text::new(foot, FOOT_EM, FOOT_COLOR).aligned(HAlign::Center)),
+            Node::new(Button::new(device_t, ROW_EM, ROW_COLOR, 40).focused(focused(AudioRow::Device))),
+            Node::new(
+                Button::new(format!("MASTER  {}%", s.master), ROW_EM, ROW_COLOR, 41)
+                    .focused(focused(AudioRow::Master)),
+            ),
+            Node::new(
+                Button::new(
+                    format!("{}  MUSIC  {}%", ICON_MUSIC, s.music),
+                    ROW_EM,
+                    ROW_COLOR,
+                    42,
+                )
+                .focused(focused(AudioRow::Music)),
+            ),
+            Node::new(
+                Button::new(format!("SFX  {}%", s.sfx), ROW_EM, ROW_COLOR, 43)
+                    .focused(focused(AudioRow::Sfx)),
+            ),
+            Node::new(
+                Button::new(
+                    format!("SOUND FX  {}", on_off(s.fx_enabled)),
+                    ROW_EM,
+                    ROW_COLOR,
+                    44,
+                )
+                .focused(focused(AudioRow::FxEnabled)),
+            ),
+            Node::new(
+                Button::new(
+                    format!("{}  ON  {}", ICON_MUSIC, on_off(s.music_enabled)),
+                    ROW_EM,
+                    ROW_COLOR,
+                    45,
+                )
+                .focused(focused(AudioRow::MusicEnabled)),
+            ),
+            Node::new(
+                Button::new("APPLY", ROW_EM, apply_color, 46).focused(focused(AudioRow::Apply)),
+            ),
+            Node::new(Button::new("BACK", ROW_EM, ROW_COLOR, 47).focused(focused(AudioRow::Back))),
         ],
-        0.0,
+        ROW_GAP,
         HAlign::Center,
     );
 
-    Node::new(Overlay::new().child(
-        Align::Center,
-        Node::new(Panel::wrap(BACKDROP, CARD_PAD, Node::new(card))),
-    ))
+    card(title, rows)
 }
 
 #[cfg(test)]
@@ -609,6 +886,10 @@ mod tests {
 
     fn names() -> Vec<String> {
         vec!["Test GPU".to_string()]
+    }
+
+    fn audio_names() -> Vec<String> {
+        vec!["Default ALSA device".to_string(), "USB Headset".to_string()]
     }
 
     fn hit_test_id(root: &Node, ui: &Ui, id: u64) -> bool {
@@ -626,16 +907,28 @@ mod tests {
         false
     }
 
+    fn build(menu: &MenuState, graphics_dirty: bool, audio_dirty: bool) -> (Node, Ui) {
+        let supported = [AaMode::Off, AaMode::X2, AaMode::X4];
+        let atlas = FontAtlas::load();
+        let ui = Ui::new();
+        let mut root = build_menu_tree(
+            menu,
+            &names(),
+            &supported,
+            &audio_names(),
+            Some(0),
+            graphics_dirty,
+            audio_dirty,
+        );
+        let verts = ui.build(&mut root, &atlas, 16.0 / 9.0, 0.0);
+        assert!(!verts.is_empty());
+        (root, ui)
+    }
+
     #[test]
     fn main_menu_builds_and_centers_start_first() {
         let menu = MenuState::new(0, Weather::Auto);
-        let supported = [AaMode::Off];
-        let atlas = FontAtlas::load();
-        let ui = Ui::new();
-
-        let mut root = build_menu_tree(&menu, &names(), &supported, false);
-        let verts = ui.build(&mut root, &atlas, 16.0 / 9.0, 0.0);
-        assert!(!verts.is_empty());
+        let (root, ui) = build(&menu, false, false);
 
         // START (id 0) is the first row, so it must be hit-testable on the
         // canvas center line.
@@ -646,22 +939,43 @@ mod tests {
     }
 
     #[test]
-    fn settings_screen_builds_all_rows() {
+    fn settings_screen_builds_all_categories() {
         let mut menu = MenuState::new(0, Weather::Auto);
         menu.open_settings();
-        let supported = [AaMode::Off, AaMode::X2, AaMode::X4];
-        let atlas = FontAtlas::load();
-        let ui = Ui::new();
+        let (root, ui) = build(&menu, false, false);
 
-        let mut root = build_menu_tree(&menu, &names(), &supported, true);
-        let verts = ui.build(&mut root, &atlas, 16.0 / 9.0, 0.0);
-        assert!(!verts.is_empty());
+        for id in 30..=32 {
+            assert!(
+                hit_test_id(&root, &ui, id),
+                "settings category id {id} must be hit-testable"
+            );
+        }
+    }
 
-        // Every settings row must be present and hit-testable on the center line.
+    #[test]
+    fn graphics_screen_builds_all_rows() {
+        let mut menu = MenuState::new(0, Weather::Auto);
+        menu.open_graphics();
+        let (root, ui) = build(&menu, true, false);
+
         for id in 10..=23 {
             assert!(
                 hit_test_id(&root, &ui, id),
-                "settings row id {id} must be hit-testable"
+                "graphics row id {id} must be hit-testable"
+            );
+        }
+    }
+
+    #[test]
+    fn audio_screen_builds_all_rows() {
+        let mut menu = MenuState::new(0, Weather::Auto);
+        menu.open_audio();
+        let (root, ui) = build(&menu, false, true);
+
+        for id in 40..=47 {
+            assert!(
+                hit_test_id(&root, &ui, id),
+                "audio row id {id} must be hit-testable"
             );
         }
     }
@@ -669,15 +983,8 @@ mod tests {
     #[test]
     fn main_menu_shows_mode_and_weather_rows() {
         let menu = MenuState::new(0, Weather::Auto);
-        let supported = [AaMode::Off];
-        let atlas = FontAtlas::load();
-        let ui = Ui::new();
+        let (root, ui) = build(&menu, false, false);
 
-        let mut root = build_menu_tree(&menu, &names(), &supported, false);
-        let verts = ui.build(&mut root, &atlas, 16.0 / 9.0, 0.0);
-        assert!(!verts.is_empty());
-
-        // START, MODE, WEATHER, SETTINGS and EXIT all present on the center line.
         for id in 0..=4 {
             assert!(
                 hit_test_id(&root, &ui, id),
@@ -725,10 +1032,32 @@ mod tests {
 
     #[test]
     fn settings_cursor_clamps_at_ends() {
-        assert_eq!(SettingsRow::Gpu.previous(), SettingsRow::Gpu);
+        assert_eq!(SettingsRow::Graphics.previous(), SettingsRow::Graphics);
         assert_eq!(SettingsRow::Back.next(), SettingsRow::Back);
-        assert_eq!(SettingsRow::Back.previous(), SettingsRow::Apply);
-        assert_eq!(SettingsRow::Gpu.next(), SettingsRow::Antialias);
+        assert_eq!(SettingsRow::Back.previous(), SettingsRow::Audio);
+        assert_eq!(SettingsRow::Graphics.next(), SettingsRow::Audio);
+        assert_eq!(SettingsRow::Audio.next(), SettingsRow::Back);
+    }
+
+    #[test]
+    fn graphics_cursor_clamps_at_ends() {
+        assert_eq!(GraphicsRow::Gpu.previous(), GraphicsRow::Gpu);
+        assert_eq!(GraphicsRow::Back.next(), GraphicsRow::Back);
+        assert_eq!(GraphicsRow::Back.previous(), GraphicsRow::Apply);
+        assert_eq!(GraphicsRow::Gpu.next(), GraphicsRow::Antialias);
+    }
+
+    #[test]
+    fn audio_cursor_clamps_at_ends() {
+        assert_eq!(AudioRow::Device.previous(), AudioRow::Device);
+        assert_eq!(AudioRow::Back.next(), AudioRow::Back);
+        assert_eq!(AudioRow::Back.previous(), AudioRow::Apply);
+        assert_eq!(AudioRow::Device.next(), AudioRow::Master);
+        assert_eq!(AudioRow::Master.next(), AudioRow::Music);
+        assert_eq!(AudioRow::Music.next(), AudioRow::Sfx);
+        assert_eq!(AudioRow::Sfx.next(), AudioRow::FxEnabled);
+        assert_eq!(AudioRow::FxEnabled.next(), AudioRow::MusicEnabled);
+        assert_eq!(AudioRow::MusicEnabled.next(), AudioRow::Apply);
     }
 
     #[test]
@@ -794,12 +1123,82 @@ mod tests {
     #[test]
     fn fx_toggles_flip_bool_rows() {
         let mut menu = MenuState::new(0, Weather::Auto);
-        menu.toggle_fx(SettingsRow::Bloom);
+        menu.toggle_fx(GraphicsRow::Bloom);
         assert!(menu.settings.bloom);
-        menu.toggle_fx(SettingsRow::Bloom);
+        menu.toggle_fx(GraphicsRow::Bloom);
         assert!(!menu.settings.bloom);
         // Non-FX rows are no-ops.
-        menu.toggle_fx(SettingsRow::Apply);
+        menu.toggle_fx(GraphicsRow::Apply);
         assert!(!menu.settings.fxaa);
+    }
+
+    #[test]
+    fn audio_device_cycles_and_noops_on_empty() {
+        let mut menu = MenuState::new(0, Weather::Auto);
+        menu.cycle_audio_device(1, 2);
+        assert_eq!(menu.settings.audio.device_index, 1);
+        menu.cycle_audio_device(1, 2);
+        assert_eq!(menu.settings.audio.device_index, 0);
+        menu.cycle_audio_device(-1, 2);
+        assert_eq!(menu.settings.audio.device_index, 1);
+        // No devices: cycling is a no-op.
+        let idx = menu.settings.audio.device_index;
+        menu.cycle_audio_device(1, 0);
+        assert_eq!(menu.settings.audio.device_index, idx);
+    }
+
+    #[test]
+    fn audio_volume_steps_clamp_at_0_and_100() {
+        let mut menu = MenuState::new(0, Weather::Auto);
+        menu.settings.audio.master = 100;
+        menu.adjust_volume(AudioRow::Master, 1);
+        assert_eq!(menu.settings.audio.master, 100);
+        menu.adjust_volume(AudioRow::Master, -100);
+        assert_eq!(menu.settings.audio.master, 0);
+        menu.adjust_volume(AudioRow::Master, -1);
+        assert_eq!(menu.settings.audio.master, 0);
+
+        menu.settings.audio.sfx = 7;
+        menu.adjust_volume(AudioRow::Sfx, 1);
+        assert_eq!(menu.settings.audio.sfx, 12);
+        menu.adjust_volume(AudioRow::Music, 0);
+        assert_eq!(menu.settings.audio.music, 70);
+        // Non-volume rows are no-ops.
+        menu.adjust_volume(AudioRow::Back, 1);
+        assert_eq!(menu.settings.audio.master, 0);
+    }
+
+    #[test]
+    fn audio_toggles_flip_bool_rows() {
+        let mut menu = MenuState::new(0, Weather::Auto);
+        assert!(menu.settings.audio.fx_enabled);
+        menu.toggle_audio(AudioRow::FxEnabled);
+        assert!(!menu.settings.audio.fx_enabled);
+        menu.toggle_audio(AudioRow::MusicEnabled);
+        assert!(!menu.settings.audio.music_enabled);
+        // Non-toggle rows are no-ops.
+        menu.toggle_audio(AudioRow::Apply);
+        assert!(!menu.settings.audio.fx_enabled);
+    }
+
+    #[test]
+    fn settings_subset_comparisons() {
+        let a = SettingsState::default();
+        let b = SettingsState {
+            audio: AudioSettings {
+                master: 50,
+                ..AudioSettings::default()
+            },
+            ..SettingsState::default()
+        };
+        assert!(a.graphics_equal(&b));
+        assert!(!a.audio_equal(&b));
+
+        let c = SettingsState {
+            bloom: true,
+            ..SettingsState::default()
+        };
+        assert!(!a.graphics_equal(&c));
+        assert!(a.audio_equal(&c));
     }
 }

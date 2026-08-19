@@ -52,3 +52,37 @@ project under the SIL Open Font License, Version 1.1:
 
 See assets/fonts/OFL-MapleMono-NF.txt for the full license text and copyright
 notice. The font is not sold separately.
+
+Sound effects (assets/sfx/)
+---------------------------
+The engine loop and one-shot effects are embedded recordings from OpenGameArt,
+converted to mono 16-bit PCM @ 48 kHz. See assets/sfx/SOURCES.md for the
+per-file breakdown.
+
+engine_loop.wav ("Car Engine Loop 96kHz, 4s" by qubodup) is licensed under the
+Creative Commons Attribution 3.0 Unported (CC BY 3.0) license:
+
+  https://creativecommons.org/licenses/by/3.0/
+
+Credit: qubodup, "Car Engine Loop 96kHz, 4s",
+https://opengameart.org/content/car-engine-loop-96khz-4s
+
+wreck.wav (bong1.wav), gear.wav (clink1.wav) and perfect_shift.wav (bing1.wav)
+are from "Metal Impact Sounds" by BMacZero / Brian MacIntosh and are released
+under Creative Commons Zero (CC0) - public domain:
+
+  https://creativecommons.org/publicdomain/zero/1.0/
+
+Credit (not required): BMacZero / Brian MacIntosh,
+https://opengameart.org/content/metal-impact-sounds
+
+blow.wav ("Dynamite with sensor.wav") is by Listener and is released under
+Creative Commons Zero (CC0) - public domain:
+
+  https://creativecommons.org/publicdomain/zero/1.0/
+
+Credit (not required): Listener,
+https://opengameart.org/content/dynamite-sound-effect
+
+The Test beep (device/volume confirmation) is original project audio and is
+covered by the "Original assets" section above.

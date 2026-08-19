@@ -53,13 +53,16 @@ Buckle up. It gets spicy.
 The main menu offers **START**, **MODE**, **WEATHER**, **SETTINGS** and **EXIT**.
 **MODE** and **WEATHER** are value rows: use `←`/`→` to cycle them and they take
 effect immediately (changing MODE restarts the run). **START** begins the run
-with everything in effect; **SETTINGS** opens the staging screen.
+with everything in effect; **SETTINGS** opens a category screen with **GRAPHICS**
+and **AUDIO** submenus.
 
 #### Settings
 
 Settings are *staged*: tweak as much as you like, then press **APPLY** to commit
 them in one shot (it is dimmed until something changes). **BACK** returns to the
-main menu without committing.
+category screen / main menu without committing.
+
+##### Graphics
 
 | Row               | Values                                                |
 |-------------------|-------------------------------------------------------|
@@ -71,13 +74,35 @@ main menu without committing.
 | GRAIN             | ON / OFF — animated film grain                        |
 | SATURATION        | ON / OFF — boosted color saturation                   |
 | CHROMATIC         | ON / OFF — radial red/blue shift                      |
-| APPLY / BACK      | Commit everything / return to menu                    |
+| APPLY / BACK      | Commit graphics / return to settings                  |
 
 Switching GPU re-uses the window and keeps your run going. Antialiasing and
 post-processing apply live. Every effect defaults to ON at launch (the best
 MSAA mode the GPU supports, plus all post effects, which every Vulkan device
 can run) — dial any of them down in SETTINGS. MSAA modes are gated by what the
 chosen GPU supports.
+
+##### Audio
+
+| Row              | Values                                              |
+|------------------|-----------------------------------------------------|
+| DEVICE           | Every output device (the default is marked "default") |
+| MASTER           | 0–100 overall volume slider                        |
+| MUSIC            | 0–100 music-channel volume slider                  |
+| SFX              | 0–100 effect-channel volume slider                 |
+| FX ON            | ON / OFF — engine loop + one-shot effects          |
+| MUSIC ON         | ON / OFF — music channel (silent until a track ships) |
+| APPLY / BACK     | Commit audio / return to settings                  |
+
+The engine is a **real recorded loop** (a 4-cylinder car at ~7500 RPM, CC-BY
+qubodup) played back at a variable rate that follows the RPM needle — it idles
+deep, spools up smoothly with the throttle, and sings at the redline — with
+speed-scaled wind noise layered on top. The one-shot effects (wrecks, perfect
+shifts, the blown engine, gear changes) are **recorded sounds** (CC0) embedded in
+the binary. **APPLY** reopens the stream on a new DEVICE and plays a short test
+tone so you hear the change immediately. The ALSA host may occasionally report a
+benign `get_htstamp ... earlier than get_trigger_htstamp` timestamp race;
+playback is unaffected and these messages are suppressed.
 
 ### Driving
 
@@ -115,6 +140,7 @@ for_window [app_id="lane_lunacy"] floating enable
 - **winit** 0.30 for windowing and input
 - **GLSL shaders** compiled to SPIR-V automatically at build time with
   [shaderc](https://github.com/google/shaderc-rs) (glslang backend)
+- **rodio** + **cpal** for audio output (device enumeration and playback)
 - **Kenney** car models and textures embedded straight into the binary — no asset
   pipeline, no disk access at runtime
 - **fontdue** for a from-scratch HUD font atlas
@@ -131,9 +157,13 @@ for_window [app_id="lane_lunacy"] floating enable
   - `git` (glslang source is vendored, but the build fetches pins)
   - `python3`
 
-> 💡 Everything else is embedded in the binary — car models, textures, and the
-> **Maple Mono** HUD font (bundled under the SIL Open Font License). No runtime
-> asset files or system fonts are required.
+> 💡 Everything else is embedded in the binary — car models, textures, sound
+> effects, and the **Maple Mono** HUD font (bundled under the SIL Open Font
+> License). No runtime asset files or system fonts are required.
+
+**Audio** playback uses cpal's ALSA host on Linux, so the ALSA development
+headers are required to build (already present on most desktops):
+`alsa-lib-devel` on Fedora, `libasound2-dev` on Debian/Ubuntu.
 
 ---
 
@@ -225,14 +255,16 @@ LANE_SNAPSHOT_TESTS=1 cargo test        # + GPU probes (needs a Vulkan device)
 ```
 assets/models/       Embedded 3D models + textures (GLB, PNG)
 assets/fonts/        Embedded HUD font (TTF + OFL license)
+assets/sfx/          Embedded sound effects (WAV + SOURCES.md)
 shaders/*.glsl       GLSL shader sources (compiled to SPIR-V at build time)
 src/
-  app.rs             Window, event loop, input handling
+  app.rs             Window, event loop, input handling, audio event wiring
+  audio/             Audio output: device enumeration, engine loop + SFX playback
   game/              Game state: vehicle physics, traffic AI, difficulty
   render/            Renderer: Vulkan pipelines, camera, texture uploads
   mesh.rs            Procedural road/world geometry
   hud.rs, font.rs    HUD + font atlas
-  menu.rs            Two-screen menu (main + settings) with staged values
+  menu.rs            Menu tree: main + settings with graphics/audio submenus
   model.rs           GLB mesh loading
   gpu.rs             Device/surface/queue selection
   build.rs*          Shader compilation pipeline
@@ -248,8 +280,12 @@ so the golden baselines stay deterministic.
 ## 📜 Credits
 
 - Car models & textures: [Kenney](https://kenney.nl/) (see `assets/models/KENNEY_LICENSE.txt`)
+- Engine loop: [qubodup](https://opengameart.org/users/qubodup) — "Car Engine Loop 96kHz, 4s", [CC-BY 3.0](https://creativecommons.org/licenses/by/3.0/) (`assets/sfx/engine_loop.wav`)
+- Metal impact / chime SFX: BMacZero (Brian MacIntosh) — "Metal Impact Sounds", [CC0](https://creativecommons.org/publicdomain/zero/1.0/) (`assets/sfx/wreck.wav`, `gear.wav`, `perfect_shift.wav`)
+- Explosion SFX: [Listener](https://opengameart.org/users/listener) — "Dynamite sound effect", [CC0](https://creativecommons.org/publicdomain/zero/1.0/) (`assets/sfx/blow.wav`)
 - Built on [vulkano](https://github.com/vulkano-rs/vulkano), [winit](https://github.com/rust-windowing/winit),
-  [shaderc](https://github.com/google/shaderc-rs), [fontdue](https://github.com/mooman219/fontdue)
+  [shaderc](https://github.com/google/shaderc-rs), [fontdue](https://github.com/mooman219/fontdue),
+  [rodio](https://github.com/RustAudio/rodio), [cpal](https://github.com/RustAudio/cpal)
 
 ---
 
@@ -258,6 +294,8 @@ so the golden baselines stay deterministic.
 - **Code** (Rust source + GLSL shaders): [MIT](LICENSE) — Copyright (c) 2026 Lane Lunacy contributors.
 - **Original art/audio** (added by the project): [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/).
 - **Kenney car models & textures**: [CC0](https://creativecommons.org/publicdomain/zero/1.0/) public domain.
+- **Engine loop** (`assets/sfx/engine_loop.wav`): [CC-BY 3.0](https://creativecommons.org/licenses/by/3.0/), © qubodup.
+- **One-shot SFX** (`assets/sfx/wreck.wav`, `gear.wav`, `perfect_shift.wav`, `blow.wav`): [CC0](https://creativecommons.org/publicdomain/zero/1.0/) public domain.
 - **HUD font** (Maple Mono Nerd Font): bundled under the [SIL OFL 1.1](assets/fonts/OFL-MapleMono-NF.txt).
 
 See [LICENSE-ASSETS](LICENSE-ASSETS) for the full asset breakdown.
