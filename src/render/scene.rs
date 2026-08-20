@@ -105,6 +105,12 @@ pub struct SceneResources {
     pub hud_descriptor_set: Arc<DescriptorSet>,
     pub mesh_sampler: Arc<Sampler>,
     pub world_texture_view: Arc<ImageView>,
+    /// Downsampled atlas copies for the ray-traced hit shader's software mip
+    /// chain: `world_mid_view` = 1/4 res, `world_far_view` = 1/16 res. Explicit
+    /// LOD is ignored in RT stages on this driver, so the shader blends these
+    /// by distance instead of `textureLod`.
+    pub world_mid_view: Arc<ImageView>,
+    pub world_far_view: Arc<ImageView>,
     pub car_texture_view: Arc<ImageView>,
     pub cloud_a_view: Arc<ImageView>,
     pub cloud_b_view: Arc<ImageView>,
@@ -166,7 +172,12 @@ impl SceneResources {
             let asphalt_base = s.spawn(|| decode_png(ASPHALT_BASE_PNG, "asphalt_base"));
             let asphalt_worn = s.spawn(|| decode_png(ASPHALT_WORN_PNG, "asphalt_worn"));
             let asphalt_cracked = s.spawn(|| decode_png(ASPHALT_CRACKED_PNG, "asphalt_cracked"));
-            let grass = s.spawn(|| decode_png(GRASS_PNG, "grass"));
+            // Grass is mildly blurred at load so its fine grain reads as soft
+            // turf instead of a grainy speckle (most visible on the verges).
+            let grass = s.spawn(|| {
+                let img = decode_png(GRASS_PNG, "grass");
+                image::imageops::blur(&img, 1.2)
+            });
             let colormap = s.spawn(|| decode_png(CAR_COLORMAP_PNG, "car colormap"));
             let foliage = s.spawn(|| generate_foliage_tile(FOLIAGE_TILE, seed));
             let rock = s.spawn(|| generate_rock_tile(FOLIAGE_TILE, seed ^ 0x0BAD_F00D));
@@ -535,18 +546,6 @@ impl SceneResources {
         )
         .expect("atlas sampler");
 
-        let mesh_sampler = Sampler::new(
-            device.clone(),
-            SamplerCreateInfo {
-                mag_filter: vulkano::image::sampler::Filter::Linear,
-                min_filter: vulkano::image::sampler::Filter::Linear,
-                address_mode: [SamplerAddressMode::Repeat; 3],
-                lod: 0.0..=1.0,
-                ..Default::default()
-            },
-        )
-        .expect("mesh sampler");
-
         let hud_set_layout = hud_pipeline.layout().set_layouts()[0].clone();
         let hud_descriptor_set = DescriptorSet::new(
             descriptor_set_allocator.clone(),
@@ -574,32 +573,101 @@ impl SceneResources {
             image::RgbaImage::from_raw(FOLIAGE_TILE, FOLIAGE_TILE, rock_tile)
                 .expect("rock tile has the right size"),
         ];
+        // Each slot is padded with a horizontal gutter of cloned edge columns so
+        // the mip chain (generated over the whole atlas) blurs each slot into
+        // itself instead of bleeding the neighbouring slot's color across the
+        // boundary at low mips (e.g. green foliage tinting the rock slot). The
+        // shaders inset their sampled UV by this gutter; see `mesh.frag.glsl`
+        // and `raytrace.rchit.glsl` (SLOT_STRIDE / ATLAS_W must match here).
+        let gutter = 8u32;
         let slot_w = slot_textures[0].dimensions().0;
+        let slot_stride = slot_w + 2 * gutter;
         let atlas_h = slot_textures
             .iter()
             .map(|t| t.dimensions().1)
             .max()
             .unwrap();
-        let atlas_w = slot_w * slot_textures.len() as u32;
+        let atlas_w = slot_stride * slot_textures.len() as u32;
         let mut atlas = vec![0u8; (atlas_w * atlas_h * 4) as usize];
         for (slot, tex) in slot_textures.iter().enumerate() {
             let (sw, sh) = tex.dimensions();
-            let x0 = (slot as u32 * slot_w) as usize;
+            let cell_base = (slot as u32 * slot_stride) as usize;
             for y in 0..sh {
-                let dst = (y * atlas_w * 4) as usize + x0 * 4;
-                let src = (y * sw * 4) as usize;
-                atlas[dst..dst + (sw as usize) * 4]
-                    .copy_from_slice(&tex.as_raw()[src..src + (sw as usize) * 4]);
+                // Clamp the sampled x to the slot content, so the gutter columns
+                // clone the first/last content column of the slot.
+                for x in 0..slot_stride as usize {
+                    let src_x = (x as i64 - gutter as i64).clamp(0, sw as i64 - 1) as usize;
+                    let dst = (y * atlas_w * 4) as usize + (cell_base + x) * 4;
+                    let src = (y * sw * 4) as usize + src_x * 4;
+                    atlas[dst..dst + 4].copy_from_slice(&tex.as_raw()[src..src + 4]);
+                }
             }
         }
-        let world_texture_view = upload_rgba8_texture(
+        // Mipmapped so distant ground/road samples a pre-filtered level instead
+        // of aliasing into shimmering texels. The raster path selects the level
+        // from screen-space derivatives; the ray-traced hit shader picks it
+        // explicitly from the hit distance (implicit LOD is undefined in RT).
+        // CPU-downsampled copies of the atlas for the ray-traced hit shader.
+        // Explicit-LOD sampling (`textureLod`) is not honoured in the ray-tracing
+        // stage on this driver (always mip 0), so the RT path blends between the
+        // sharp atlas and two pre-filtered, downsampled atlases selected by
+        // distance instead. The downsamples keep the atlas (and its slot gutters)
+        // proportionally, so the same atlas-space UV math applies. See
+        // `raytrace.rchit.glsl`.
+        let atlas_img =
+            image::RgbaImage::from_raw(atlas_w, atlas_h, atlas).expect("world atlas image");
+        let (world_texture_view, world_mip_levels) = upload_rgba8_texture_mipmapped(
             memory_allocator.clone(),
             command_allocator.clone(),
             queue.clone(),
             atlas_w,
             atlas_h,
-            atlas,
+            atlas_img.clone().into_raw(),
         );
+        let world_mid_view = upload_rgba8_texture(
+            memory_allocator.clone(),
+            command_allocator.clone(),
+            queue.clone(),
+            (atlas_w / 4).max(1),
+            (atlas_h / 4).max(1),
+            image::imageops::resize(
+                &atlas_img,
+                (atlas_w / 4).max(1),
+                (atlas_h / 4).max(1),
+                image::imageops::FilterType::Triangle,
+            )
+            .into_raw(),
+        );
+        let world_far_view = upload_rgba8_texture(
+            memory_allocator.clone(),
+            command_allocator.clone(),
+            queue.clone(),
+            (atlas_w / 16).max(1),
+            (atlas_h / 16).max(1),
+            image::imageops::resize(
+                &atlas_img,
+                (atlas_w / 16).max(1),
+                (atlas_h / 16).max(1),
+                image::imageops::FilterType::Triangle,
+            )
+            .into_raw(),
+        );
+
+        // Sampled by the mesh/RT particle paths (world atlas, car texture,
+        // clouds) and the ray-traced hit/miss shaders. LOD range covers the
+        // full world-atlas mip chain; textures with fewer levels clamp.
+        let mesh_sampler = Sampler::new(
+            device.clone(),
+            SamplerCreateInfo {
+                mag_filter: vulkano::image::sampler::Filter::Linear,
+                min_filter: vulkano::image::sampler::Filter::Linear,
+                mipmap_mode: vulkano::image::sampler::SamplerMipmapMode::Linear,
+                address_mode: [SamplerAddressMode::Repeat; 3],
+                lod: 0.0..=world_mip_levels as f32 - 1.0,
+                ..Default::default()
+            },
+        )
+        .expect("mesh sampler");
 
         let (cmap_w, cmap_h) = colormap.dimensions();
         let car_texture_view = upload_rgba8_texture(
@@ -670,6 +738,8 @@ impl SceneResources {
             hud_descriptor_set,
             mesh_sampler,
             world_texture_view,
+            world_mid_view,
+            world_far_view,
             car_texture_view,
             cloud_a_view,
             cloud_b_view,

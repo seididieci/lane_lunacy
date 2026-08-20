@@ -60,8 +60,20 @@ void main() {
     vec4 far_pt = inv_view_proj * vec4(ndc, 1.0, 1.0);
     vec3 dir = normalize(far_pt.xyz / far_pt.w - eye.xyz);
 
+    // Per-pixel ray divergence (angular size of one pixel) — the exact analogue
+    // of the raster path's screen-space derivatives. The hit shader divides the
+    // world-space pixel footprint by this (via the surface's incidence cosine)
+    // to pick the texture mip level, so RT filtering matches raster on any
+    // surface orientation instead of a ground-only heuristic.
+    vec4 far_x = inv_view_proj * vec4(ndc + vec2(2.0 / float(size.x), 0.0), 1.0, 1.0);
+    vec3 dir_x = normalize(far_x.xyz / far_x.w - eye.xyz);
+    vec4 far_y = inv_view_proj * vec4(ndc + vec2(0.0, 2.0 / float(size.y)), 1.0, 1.0);
+    vec3 dir_y = normalize(far_y.xyz / far_y.w - eye.xyz);
+    float pixel_angle = max(length(cross(dir, dir_x)), length(cross(dir, dir_y)));
+    pixel_angle = max(pixel_angle, 1e-6);
+
     rtp.color = vec4(1.0, 0.0, 1.0, 1.0);
-    rtp.extra = vec4(0.0);
+    rtp.extra = vec4(0.0, 0.0, pixel_angle, 0.0);
     traceRayEXT(tlas, gl_RayFlagsOpaqueEXT, 0xFF, 0, 0, 0, eye.xyz, 0.001, dir, 2000.0, 0);
 
     vec4 primary_col = rtp.color;
@@ -75,7 +87,7 @@ void main() {
         rtp.world_pos = vec4(0.0);
         rtp.albedo = vec4(0.0);
         rtp.uv = vec4(0.0);
-        rtp.extra = vec4(0.0);
+        rtp.extra = vec4(0.0, 0.0, pixel_angle, 0.0);
         vec3 refl_dir = reflect(dir, primary_normal.xyz);
         vec3 origin = primary_pos.xyz + primary_normal.xyz * 0.01;
         traceRayEXT(tlas, gl_RayFlagsOpaqueEXT, 0xFF, 0, 0, 0, origin, 0.001, refl_dir, 2000.0, 0);

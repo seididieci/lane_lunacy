@@ -42,7 +42,7 @@ use vulkano::acceleration_structure::{
 };
 use vulkano::buffer::{Buffer, BufferContents, BufferCreateInfo, BufferUsage, IndexBuffer, Subbuffer};
 use vulkano::command_buffer::{
-    AutoCommandBufferBuilder, CopyImageInfo, PrimaryAutoCommandBuffer,
+    AutoCommandBufferBuilder, BlitImageInfo, PrimaryAutoCommandBuffer,
 };
 use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
 use vulkano::device::Device;
@@ -88,6 +88,12 @@ const AS_ALIGN_BYTES: u64 = 256;
 /// window crossing only rewrites the entering chunk's slot instead of the whole
 /// pool.
 const CHUNK_SLOT_COUNT: usize = 8;
+
+/// Ray-traced output is rendered at this × this resolution and downscaled into
+/// the offscreen, averaging per-pixel normal/texture noise the way the raster
+/// path's MSAA does (the RT stage can't select texture mips on this driver).
+const SUPERSAMPLE: u32 = 2;
+
 /// Per-chunk vertex/index capacity. Sizes every chunk slot for the worst case
 /// (measured: HIGH ~404K verts / ~605K indices) so the slot's pool region and
 /// BLAS storage never move when neighbours enter/leave.
@@ -181,6 +187,9 @@ pub struct RayTraceResources {
     /// particle overlay pass for per-pixel occlusion of rain/mist/dust.
     depth_image: Option<Arc<Image>>,
     depth_view: Option<Arc<ImageView>>,
+    /// 1x depth resolved from the supersampled chain for the particle overlay.
+    depth_resolved_image: Option<Arc<Image>>,
+    depth_resolved_view: Option<Arc<ImageView>>,
 
     /// Fixed per-slot pool regions (statics + chunk slots), built once.
     slot_layouts: Vec<SlotLayout>,
@@ -644,6 +653,8 @@ impl RayTraceResources {
             output_size: [0, 0],
             depth_image: None,
             depth_view: None,
+            depth_resolved_image: None,
+            depth_resolved_view: None,
             slot_layouts,
             static_slots,
             chunk_owner: vec![None; CHUNK_SLOT_COUNT],
@@ -682,15 +693,21 @@ impl RayTraceResources {
         }
         self.write_instances(game, scene, image_i, chunk_indices);
         self.record_tlas_build(builder, image_i, game, world_chunks.len());
-        self.record_trace(builder, scene, frame, image_i, extent);
-        self.copy_output(builder, image_i, offscreen_view);
+        // Supersample the ray-traced output (SS × SS rays per output pixel) and
+        // downscale it into the offscreen, so per-pixel normal/texture noise is
+        // averaged like the raster path's MSAA and the terrain reads as smooth
+        // as the raster render.
+        let ss = extent.map(|e| e * SUPERSAMPLE);
+        self.record_trace(builder, scene, frame, image_i, ss);
+        self.copy_output(builder, image_i, offscreen_view, extent);
     }
 
-    /// (Re)creates the internal storage image when the window size changed.
+    /// (Re)creates the internal storage images when the window size changed.
     fn ensure_output(&mut self, scene: &SceneResources, extent: [u32; 2]) {
         if self.output_size == extent {
             return;
         }
+        let ss = [extent[0] * SUPERSAMPLE, extent[1] * SUPERSAMPLE];
         // Safety: no further work is submitted to this device afterwards; it is
         // dropped immediately after this call.
         unsafe { self.device.wait_idle() }.expect("wait idle on RT resize");        let image = Image::new(
@@ -698,7 +715,7 @@ impl RayTraceResources {
             ImageCreateInfo {
                 image_type: ImageType::Dim2d,
                 format: Format::R16G16B16A16_SFLOAT,
-                extent: [extent[0], extent[1], 1],
+                extent: [ss[0], ss[1], 1],
                 usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC | ImageUsage::SAMPLED,
                 ..Default::default()
             },
@@ -715,8 +732,8 @@ impl RayTraceResources {
             ImageCreateInfo {
                 image_type: ImageType::Dim2d,
                 format: Format::R32_SFLOAT,
-                extent: [extent[0], extent[1], 1],
-                usage: ImageUsage::STORAGE | ImageUsage::SAMPLED,
+                extent: [ss[0], ss[1], 1],
+                usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC | ImageUsage::SAMPLED,
                 ..Default::default()
             },
             AllocationCreateInfo::default(),
@@ -725,6 +742,25 @@ impl RayTraceResources {
         self.depth_image = Some(depth_image.clone());
         self.depth_view = Some(
             ImageView::new_default(depth_image).expect("ray tracing depth view"),
+        );
+
+        // 1x depth resolved from the supersampled chain, sampled by the RT
+        // particle overlay pass for rain/mist occlusion.
+        let resolved = Image::new(
+            scene.memory_allocator.clone(),
+            ImageCreateInfo {
+                image_type: ImageType::Dim2d,
+                format: Format::R32_SFLOAT,
+                extent: [extent[0], extent[1], 1],
+                usage: ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED,
+                ..Default::default()
+            },
+            AllocationCreateInfo::default(),
+        )
+        .expect("ray tracing resolved depth image");
+        self.depth_resolved_image = Some(resolved.clone());
+        self.depth_resolved_view = Some(
+            ImageView::new_default(resolved).expect("ray tracing resolved depth view"),
         );
     }
 
@@ -1028,6 +1064,16 @@ impl RayTraceResources {
                     scene.cloud_b_view.clone(),
                     scene.mesh_sampler.clone(),
                 ),
+                WriteDescriptorSet::image_view_sampler(
+                    11,
+                    scene.world_mid_view.clone(),
+                    scene.mesh_sampler.clone(),
+                ),
+                WriteDescriptorSet::image_view_sampler(
+                    12,
+                    scene.world_far_view.clone(),
+                    scene.mesh_sampler.clone(),
+                ),
             ],
             [],
         )
@@ -1070,23 +1116,60 @@ impl RayTraceResources {
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
         image_i: usize,
         offscreen_view: Arc<ImageView>,
+        extent: [u32; 2],
     ) {
-        let src = self.output_image.clone().expect("rt output image");
-        builder
-            .copy_image(CopyImageInfo::images(src, offscreen_view.image().clone()))
-            .expect("copy rt output into offscreen");
         let _ = image_i;
+        // Downscale the supersampled color into the offscreen with a linear
+        // (box-ish) filter, which averages the SS² rays per output pixel.
+        let src = self.output_image.clone().expect("rt output image");
+        let dst = offscreen_view.image().clone();
+        let src_layers = src.subresource_layers();
+        let dst_layers = dst.subresource_layers();
+        let mut info = BlitImageInfo::images(src, dst);
+        info.filter = vulkano::image::sampler::Filter::Linear;
+        let region = &mut info.regions[0];
+        region.src_subresource = src_layers;
+        region.src_offsets = [[0, 0, 0], region_extent(self.output_size, SUPERSAMPLE)];
+        region.dst_subresource = dst_layers;
+        region.dst_offsets = [[0, 0, 0], [extent[0], extent[1], 1]];
+        builder
+            .blit_image(info)
+            .expect("blit supersampled rt output into offscreen");
+
+        // Resolve the supersampled depth down to 1x for the particle overlay.
+        let dsrc = self.depth_image.clone().expect("rt depth image");
+        let ddst = self
+            .depth_resolved_image
+            .clone()
+            .expect("rt resolved depth image");
+        let dsrc_layers = dsrc.subresource_layers();
+        let ddst_layers = ddst.subresource_layers();
+        let mut dinfo = BlitImageInfo::images(dsrc, ddst);
+        dinfo.filter = vulkano::image::sampler::Filter::Linear;
+        let dregion = &mut dinfo.regions[0];
+        dregion.src_subresource = dsrc_layers;
+        dregion.src_offsets = [[0, 0, 0], region_extent(self.output_size, SUPERSAMPLE)];
+        dregion.dst_subresource = ddst_layers;
+        dregion.dst_offsets = [[0, 0, 0], [extent[0], extent[1], 1]];
+        builder
+            .blit_image(dinfo)
+            .expect("blit supersampled rt depth into resolved");
     }
 
-    /// The primary-ray depth image (linear eye distance, R32), sampled by the
-    /// RT particle overlay pass to occlude rain/mist/dust behind geometry.
+    /// The resolved 1x primary-ray depth image (linear eye distance, R32),
+    /// sampled by the RT particle overlay pass to occlude rain/mist/dust.
     pub fn depth_view(&self) -> Arc<ImageView> {
-        self.depth_view.clone().expect("rt depth view")
+        self.depth_resolved_view.clone().expect("rt resolved depth view")
     }
 }
 
 fn align_up(x: u64, align: u64) -> u64 {
     x.div_ceil(align) * align
+}
+
+/// Blit region offset for a supersampled image: full size × `scale`.
+fn region_extent(extent: [u32; 2], scale: u32) -> [u32; 3] {
+    [extent[0] * scale, extent[1] * scale, 1]
 }
 
 /// Serializes one mesh into the RT pool layout, matching `raytrace.rchit.glsl`:

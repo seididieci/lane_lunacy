@@ -46,8 +46,9 @@ impl SurfaceMaterial {
             | SurfaceMaterial::AsphaltWorn
             | SurfaceMaterial::AsphaltCracked => 0.32,
             SurfaceMaterial::Grass => 0.10,
-            // Larger tiles on big cliff faces so the rock doesn't swim.
-            SurfaceMaterial::Rock => 0.08,
+            // Large tiles on big cliff faces so the rock doesn't swim: fewer
+            // repeats read as smooth stone rather than a visible tiled wall.
+            SurfaceMaterial::Rock => 0.05,
         }
     }
 
