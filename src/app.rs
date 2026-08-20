@@ -88,6 +88,7 @@ pub struct App {
     window_capture_armed: bool,
     capture_dir: Option<PathBuf>,
     rockwall_view: bool,
+    auto_start: bool,
     forced_camera_heading: Option<f32>,
     capture_seq: u64,
     /// Monotonic frame counter for the profiler rows.
@@ -115,6 +116,7 @@ impl App {
         window_capture: Option<PathBuf>,
         capture_dir: Option<PathBuf>,
         rockwall_view: bool,
+        auto_start: bool,
     ) -> Self {
         let mut game = Game::new();
         game.set_weather(weather);
@@ -178,11 +180,18 @@ impl App {
             window_capture_armed: false,
             capture_dir,
             rockwall_view,
+            auto_start,
             forced_camera_heading: None,
             capture_seq: 0,
             profile_frame_idx: 0,
             profile_frame_end: None,
         };
+        if app.auto_start {
+            // `--auto-start`: skip the menu and start the session at the spawn
+            // (normal chase camera, deterministic world from the seed). Lets
+            // capture/profile runs hit the live scene instead of the title.
+            app.mode = AppMode::Playing;
+        }
         if app.rockwall_view {
             app.activate_rockwall_view();
         }

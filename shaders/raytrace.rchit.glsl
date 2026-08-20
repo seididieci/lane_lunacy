@@ -310,7 +310,13 @@ void main() {
     if (v_material >= 3.0 && v_material < 90.0) {
         albedo *= terrain_state.xyz;
     }
-    vec3 lit = albedo * (ambient + diff * sun_intensity * 0.85);
+    // Solar base BEFORE the artificial lights are added: the raygen shadows the
+    // sun/moon (and the ambient that accompanies it) only, so this part is
+    // carried out in `rtp.albedo` and recombined as `lit - sun_base +
+    // sun_base * occluded`. The headlight/traffic/lamp additions below are added
+    // to `lit` but never to `sun_base`, so they stay unshadowed.
+    vec3 sun_base = albedo * (ambient + diff * sun_intensity * 0.85);
+    vec3 lit = sun_base;
 
     // Wet asphalt: darken + glossy sun/moon sheen (mirrors mesh.frag).
     float wet_look = 0.0;
@@ -419,7 +425,11 @@ void main() {
     rtp.color = vec4(final_col, 1.0);
     rtp.normal = vec4(n, 1.0);
     rtp.world_pos = vec4(v_world_pos, 1.0);
-    rtp.albedo = vec4(albedo, 1.0);
+    // The sun+ambient lighting base (pre-artificial-lights, pre-fog). `albedo`
+    // keeps this exact 3-vector instead of the raw texture albedo so the raygen
+    // can apply the shadow mask to just the solar term and leave the light pools
+    // untouched.
+    rtp.albedo = vec4(sun_base, 1.0);
     rtp.uv = vec4(v_uv, 0.0, 0.0);
     // `extra.x` carries the wet reflectivity so the raygen can decide whether
     // to fire a reflected ray and how strongly to mix it in. Reflections are

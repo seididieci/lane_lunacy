@@ -19,6 +19,7 @@ fn main() {
             window_capture,
             capture_dir,
             rockwall_view,
+            auto_start,
         } => lane_lunacy::run(
             gpu,
             weather,
@@ -33,6 +34,7 @@ fn main() {
             window_capture,
             capture_dir,
             rockwall_view,
+            auto_start,
         ),
         RunMode::Snapshot(opts) => lane_lunacy::run_snapshot(opts),
         RunMode::Report(csv) => lane_lunacy::run_report(csv),

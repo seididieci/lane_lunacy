@@ -27,6 +27,10 @@ pub const RAYTRACE_RCHIT_SPV: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/spv/raytrace.rchit.spv"));
 pub const RAYTRACE_RMISS_SPV: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/spv/raytrace.rmiss.spv"));
+pub const RAYTRACE_RSMISS_SPV: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/spv/raytrace.rsmiss.spv"));
+pub const RAYTRACE_RSHAD_SPV: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/spv/raytrace.rshad.spv"));
 
 pub fn spv_words(bytes: &[u8]) -> Vec<u32> {
     bytes

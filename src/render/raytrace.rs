@@ -83,6 +83,14 @@ const SLOT_CAP: usize = 256;
 const INSTANCE_CAP: usize = 1 + 8 + 8 + 8;
 /// Acceleration-structure storage and slices must be 256-byte aligned.
 const AS_ALIGN_BYTES: u64 = 256;
+/// The raygen's shadow probes trace with cull mask `0x01` (see
+/// `raytrace.rgen.glsl`); chunk (world) instances carry bit 0 set (`0x01`) so
+/// only terrain/walls/trees occlude, and the car statics carry bit 0 clear
+/// (`0xfe`) so the player + traffic cars never cast a shadow. The primary ray
+/// uses mask `0xFF` and still hits everything.
+const STATIC_INSTANCE_MASK: u32 = 0xfe;
+const CHUNK_INSTANCE_MASK: u32 = 0x01;
+
 /// Chunk slots in the window: 1 behind + current + 6 ahead. Each chunk index
 /// maps to a FIXED slot (`static_slots + (index mod CHUNK_SLOT_COUNT)`), so a
 /// window crossing only rewrites the entering chunk's slot instead of the whole
@@ -234,11 +242,27 @@ impl RayTraceResources {
             )
         }
         .expect("closest-hit shader module");
+        let rshadowmiss = unsafe {
+            ShaderModule::new(
+                device.clone(),
+                ShaderModuleCreateInfo::new(&shaders::spv_words(shaders::RAYTRACE_RSMISS_SPV)),
+            )
+        }
+        .expect("shadow miss shader module");
+        let rshadowhit = unsafe {
+            ShaderModule::new(
+                device.clone(),
+                ShaderModuleCreateInfo::new(&shaders::spv_words(shaders::RAYTRACE_RSHAD_SPV)),
+            )
+        }
+        .expect("shadow any-hit shader module");
 
         let stages = vec![
             PipelineShaderStageCreateInfo::new(rgen.entry_point("main").unwrap()),
             PipelineShaderStageCreateInfo::new(rmiss.entry_point("main").unwrap()),
             PipelineShaderStageCreateInfo::new(rchit.entry_point("main").unwrap()),
+            PipelineShaderStageCreateInfo::new(rshadowmiss.entry_point("main").unwrap()),
+            PipelineShaderStageCreateInfo::new(rshadowhit.entry_point("main").unwrap()),
         ];
         let layout = PipelineLayout::new(
             device.clone(),
@@ -258,12 +282,19 @@ impl RayTraceResources {
         let rgen_stage = &stages[0];
         let rmiss_stage = &stages[1];
         let rchit_stage = &stages[2];
+        let rshadowmiss_stage = &stages[3];
+        let rshadowhit_stage = &stages[4];
         let name_rgen = CString::new(rgen_stage.entry_point.info().name.as_str()).unwrap();
         let name_rmiss = CString::new(rmiss_stage.entry_point.info().name.as_str()).unwrap();
         let name_rchit = CString::new(rchit_stage.entry_point.info().name.as_str()).unwrap();
+        let name_rshadowmiss =
+            CString::new(rshadowmiss_stage.entry_point.info().name.as_str()).unwrap();
+        let name_rshadowhit = CString::new(rshadowhit_stage.entry_point.info().name.as_str()).unwrap();
 
-        // 6x vec4 = 96 bytes (the canonical `RTShade` payload), and the default
-        // triangle hit attributes are 2 floats (barycentric coords) = 8 bytes.
+        // 6x vec4 = 96 bytes (the single shared `RTShade` payload; the shadow
+        // probe reuses it, so no separate shadow payload channel is needed),
+        // and the default triangle hit attributes are 2 floats (barycentric
+        // coords) = 8 bytes.
         let max_pipeline_ray_payload_size: u32 = 96;
         let max_pipeline_ray_hit_attribute_size: u32 = 8;
 
@@ -286,6 +317,18 @@ impl RayTraceResources {
                 )))
                 .module(rchit_stage.entry_point.module().handle())
                 .name(&name_rchit),
+            ash::vk::PipelineShaderStageCreateInfo::default()
+                .stage(ash::vk::ShaderStageFlags::from(ShaderStage::from(
+                    rshadowmiss_stage.entry_point.info().execution_model,
+                )))
+                .module(rshadowmiss_stage.entry_point.module().handle())
+                .name(&name_rshadowmiss),
+            ash::vk::PipelineShaderStageCreateInfo::default()
+                .stage(ash::vk::ShaderStageFlags::from(ShaderStage::from(
+                    rshadowhit_stage.entry_point.info().execution_model,
+                )))
+                .module(rshadowhit_stage.entry_point.module().handle())
+                .name(&name_rshadowhit),
         ];
         let raw_groups = [
             ash::vk::RayTracingShaderGroupCreateInfoKHR::default()
@@ -301,10 +344,22 @@ impl RayTraceResources {
                 .any_hit_shader(ash::vk::SHADER_UNUSED_KHR)
                 .intersection_shader(ash::vk::SHADER_UNUSED_KHR),
             ash::vk::RayTracingShaderGroupCreateInfoKHR::default()
+                .ty(ash::vk::RayTracingShaderGroupTypeKHR::GENERAL)
+                .general_shader(3)
+                .closest_hit_shader(ash::vk::SHADER_UNUSED_KHR)
+                .any_hit_shader(ash::vk::SHADER_UNUSED_KHR)
+                .intersection_shader(ash::vk::SHADER_UNUSED_KHR),
+            ash::vk::RayTracingShaderGroupCreateInfoKHR::default()
                 .ty(ash::vk::RayTracingShaderGroupTypeKHR::TRIANGLES_HIT_GROUP)
                 .general_shader(ash::vk::SHADER_UNUSED_KHR)
                 .closest_hit_shader(2)
                 .any_hit_shader(ash::vk::SHADER_UNUSED_KHR)
+                .intersection_shader(ash::vk::SHADER_UNUSED_KHR),
+            ash::vk::RayTracingShaderGroupCreateInfoKHR::default()
+                .ty(ash::vk::RayTracingShaderGroupTypeKHR::TRIANGLES_HIT_GROUP)
+                .general_shader(ash::vk::SHADER_UNUSED_KHR)
+                .closest_hit_shader(ash::vk::SHADER_UNUSED_KHR)
+                .any_hit_shader(4)
                 .intersection_shader(ash::vk::SHADER_UNUSED_KHR),
         ];
         let library_interface =
@@ -342,13 +397,28 @@ impl RayTraceResources {
                 device.clone(),
                 handle,
                 RayTracingPipelineCreateInfo {
-                    stages: smallvec![stages[0].clone(), stages[1].clone(), stages[2].clone()],
+                    stages: smallvec![
+                        stages[0].clone(),
+                        stages[1].clone(),
+                        stages[2].clone(),
+                        stages[3].clone(),
+                        stages[4].clone(),
+                    ],
                     groups: smallvec![
                         RayTracingShaderGroupCreateInfo::General { general_shader: 0 },
                         RayTracingShaderGroupCreateInfo::General { general_shader: 1 },
+                        // Shadow-miss record (the raygen's shadow probes trace at
+                        // miss-record offset 2).
+                        RayTracingShaderGroupCreateInfo::General { general_shader: 3 },
                         RayTracingShaderGroupCreateInfo::TrianglesHit {
                             closest_hit_shader: Some(2),
                             any_hit_shader: None,
+                        },
+                        // Shadow-any-hit record (shadow probes trace at
+                        // hit-record offset 1 so GLSL resolves this group).
+                        RayTracingShaderGroupCreateInfo::TrianglesHit {
+                            closest_hit_shader: None,
+                            any_hit_shader: Some(4),
                         },
                     ],
                     max_pipeline_ray_recursion_depth: 1,
@@ -914,10 +984,21 @@ impl RayTraceResources {
         chunk_indices: &[i32],
     ) {
         let mut instances = Vec::with_capacity(INSTANCE_CAP);
-        let push = |instances: &mut Vec<AccelerationStructureInstance>, slot: u32, transform: TransformMatrix| {
+        // `is_shadow_caster` toggles the instance mask bit the raygen's shadow
+        // probes cull on (`SHADOW_RAY_MASK`): chunk (static) geometry is caster,
+        // car statics are not, so the shadow rays never even test the car hulls.
+        let push = |instances: &mut Vec<AccelerationStructureInstance>,
+                    slot: u32,
+                    transform: TransformMatrix,
+                    is_shadow_caster: bool| {
+            let mask: u8 = if is_shadow_caster {
+                CHUNK_INSTANCE_MASK as u8
+            } else {
+                STATIC_INSTANCE_MASK as u8
+            };
             instances.push(AccelerationStructureInstance {
                 transform,
-                instance_custom_index_and_mask: Packed24_8::new(slot, 0xff),
+                instance_custom_index_and_mask: Packed24_8::new(slot, mask),
                 acceleration_structure_reference: self.blas[image_i][slot as usize]
                     .device_address()
                     .get(),
@@ -933,6 +1014,7 @@ impl RayTraceResources {
                 glam::Quat::from_rotation_y(-game.vehicle.heading),
                 Vec3::new(game.player_world_x(), 0.03, game.player_world_z()),
             )),
+            false,
         );
         for (idx, t) in game.traffic.iter().enumerate() {
             let tvx = road_curve(t.distance) + t.lane;
@@ -945,11 +1027,12 @@ impl RayTraceResources {
                     traffic_rot,
                     Vec3::new(tvx, 0.35, -t.distance),
                 )),
+                false,
             );
         }
         for &idx in chunk_indices {
             let slot = self.chunk_slot(idx);
-            push(&mut instances, slot as u32, to_transform(&Mat4::IDENTITY));
+            push(&mut instances, slot as u32, to_transform(&Mat4::IDENTITY), true);
         }
 
         let mut guard = self.instance_buffers[image_i]
