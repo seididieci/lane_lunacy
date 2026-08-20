@@ -73,6 +73,8 @@ pub struct App {
     audio_prev_blown: bool,
     audio_prev_perfect_timer: f32,
     audio_prev_gear: u32,
+    /// Monotonically increasing frame counter for the audio param thread.
+    audio_frame: u32,
     seed: u64,
     menu: MenuState,
     mode: AppMode,
@@ -163,6 +165,7 @@ impl App {
             audio_prev_blown: false,
             audio_prev_perfect_timer: 0.0,
             audio_prev_gear: 1,
+            audio_frame: 0,
             seed,
             menu: MenuState {
                 settings: SettingsState {
@@ -401,14 +404,17 @@ impl App {
     /// Feeds the current vehicle state into the engine sound every frame and
     /// fires one-shot SFX on event edges (wreck, blown engine, perfect shift,
     /// gear change). Idles the engine while paused in a menu.
-    fn update_audio(&mut self) {
+    fn update_audio(&mut self, dt: f32) {
         let Some(audio) = &self.audio else {
             return;
         };
+        self.audio_frame += 1;
         if matches!(self.mode, AppMode::Playing) {
             audio.set_engine(
-                self.game.vehicle.rpm_frac(),
-                self.game.speed_kmh,
+                self.game.vehicle.speed,
+                self.game.vehicle.gear,
+                dt,
+                self.audio_frame,
                 self.game.engine_blown,
             );
             if self.game.wrecks > self.audio_prev_wrecks {
@@ -428,7 +434,7 @@ impl App {
             self.audio_prev_perfect_timer = self.game.perfect_shift_timer;
             self.audio_prev_gear = self.game.vehicle.gear;
         } else {
-            audio.set_engine(0.0, 0.0, self.game.engine_blown);
+            audio.set_engine(0.0, 1, dt, self.audio_frame, self.game.engine_blown);
         }
     }
 
@@ -764,7 +770,7 @@ impl ApplicationHandler for App {
             self.input.gear_up = false;
             self.input.gear_down = false;
         }
-        self.update_audio();
+        self.update_audio(dt.as_secs_f32());
         timings.sim_ms = sim_started.elapsed().as_secs_f32() * 1000.0;
 
         let Some(renderer) = &mut self.renderer else {

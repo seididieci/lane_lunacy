@@ -107,15 +107,36 @@ pub enum Sfx {
 }
 
 /// Parameters shared between the game thread and the engine-sound source.
+///
+/// The game publishes the raw vehicle state (`speed_mps`, `gear`, `dt`,
+/// `frame`) once per frame; a dedicated param thread re-samples that state at
+/// ~480 Hz, reconstructing the continuous rev curve with a first-order hold, so
+/// the audio never sees the render loop's 60 Hz quantization. `rpm` and `speed`
+/// are the thread's outputs; the engine source reads only those.
 struct EngineParams {
+    /// Published by the game: road speed in m/s.
+    speed_mps: AtomicU32,
+    /// Published by the game: current gear.
+    gear: AtomicU32,
+    /// Published by the game: frame duration in seconds.
+    dt: AtomicU32,
+    /// Published by the game: monotonic frame counter (bumped every frame).
+    frame: AtomicU32,
+    /// Written by the param thread: revs fraction in 0..=1.
     rpm: AtomicU32,
+    /// Written by the param thread: road speed in km/h (drives wind).
     speed: AtomicU32,
+    /// Written by the game: engine blown flag.
     blown: AtomicBool,
 }
 
 impl Default for EngineParams {
     fn default() -> Self {
         EngineParams {
+            speed_mps: AtomicU32::new(f32::to_bits(0.0)),
+            gear: AtomicU32::new(1),
+            dt: AtomicU32::new(f32::to_bits(1.0 / 60.0)),
+            frame: AtomicU32::new(0),
             rpm: AtomicU32::new(f32::to_bits(0.0)),
             speed: AtomicU32::new(f32::to_bits(0.0)),
             blown: AtomicBool::new(false),
@@ -127,6 +148,61 @@ const SAMPLE_RATE: u32 = 48_000;
 
 /// How many harmonics the procedural engine stacks up (sawtooth-ish timbre).
 const HARMONIC_COUNT: usize = 6;
+
+/// First-order-hold reconstruction of the rev curve: interpolate the road speed
+/// between the previous and current frame's published samples, then map it
+/// through the current gear to a revs fraction. `frac` is the fraction of the
+/// frame that has elapsed (0..=1).
+fn interpolated_rpm_frac(speed_prev: f32, speed_now: f32, frac: f32, gear: u32) -> f32 {
+    let speed = speed_prev + (speed_now - speed_prev) * frac.clamp(0.0, 1.0);
+    let redline = crate::game::vehicle::redline_speed((gear as usize).min(5));
+    if redline <= 0.0 {
+        0.0
+    } else {
+        (speed / redline).clamp(0.0, 1.0)
+    }
+}
+
+/// Re-samples the game's per-frame vehicle state at ~480 Hz and publishes fresh
+/// `rpm`/`speed` to the engine source. Between game frames the road speed is
+/// linearly interpolated, so the pitch glides continuously instead of stepping
+/// at the render loop's cadence. The thread is fire-and-forget; it shares the
+/// same `EngineParams` Arc across device switches.
+fn spawn_param_thread(params: Arc<EngineParams>) {
+    std::thread::spawn(move || {
+        let mut prev_speed = 0.0f32;
+        let mut prev_frame = 0u32;
+        let mut frame_start = std::time::Instant::now();
+        let mut frame_dt = 1.0 / 60.0;
+        let mut last_speed = 0.0f32;
+        loop {
+            std::thread::sleep(std::time::Duration::from_micros(2_000));
+            let frame = params.frame.load(Ordering::Relaxed);
+            let speed = f32::from_bits(params.speed_mps.load(Ordering::Relaxed));
+            let gear = params.gear.load(Ordering::Relaxed);
+            if frame != prev_frame {
+                prev_speed = last_speed;
+                prev_frame = frame;
+                frame_start = std::time::Instant::now();
+                frame_dt = f32::from_bits(params.dt.load(Ordering::Relaxed))
+                    .clamp(1.0 / 240.0, 1.0 / 15.0);
+            }
+            last_speed = speed;
+            let elapsed = (std::time::Instant::now() - frame_start).as_secs_f32();
+            let frac = if frame_dt > 0.0 {
+                (elapsed / frame_dt).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let rpm_frac = interpolated_rpm_frac(prev_speed, speed, frac, gear);
+            params.rpm.store(rpm_frac.to_bits(), Ordering::Relaxed);
+            let interp = prev_speed + (speed - prev_speed) * frac;
+            params
+                .speed
+                .store((interp * 3.6).max(0.0).to_bits(), Ordering::Relaxed);
+        }
+    });
+}
 
 /// Procedural engine source. A harmonic stack whose fundamental tracks the
 /// (smoothed) RPM, layered with a touch of white-noise roughness and
@@ -157,19 +233,16 @@ impl EngineSound {
         55.0 + 110.0 * revs.clamp(0.0, 1.0)
     }
 
-    /// Applies the shared attack/release smoothing to RPM and speed. The engine
-    /// target arrives once per frame, so the attack must span several frames or
-    /// fast revs read back as a stepped staircase; 150 ms (~9 frames at 60 Hz)
-    /// glides the pitch up smoothly, matching the release side. The oscillator
-    /// phases accumulate continuously, so frequency changes still glissando.
+    /// One-pole smoothing of the thread-published revs and road speed. The param
+    /// thread already feeds ~480 Hz first-order-hold samples, so a short 20 ms
+    /// constant rounds the residual micro-steps and gear-shift jumps without
+    /// adding perceptible lag; speed (wind texture) keeps a gentler 100 ms.
     fn advance(&mut self) {
         let rpm = f32::from_bits(self.params.rpm.load(Ordering::Relaxed));
-        let speed = f32::from_bits(self.params.speed.load(Ordering::Relaxed));
-        let attack = 1.0 - (-1.0 / (SAMPLE_RATE as f32 * 0.15)).exp();
-        let release = 1.0 - (-1.0 / (SAMPLE_RATE as f32 * 0.15)).exp();
-        let alpha = if rpm > self.smooth_rpm { attack } else { release };
+        let alpha = 1.0 - (-1.0 / (SAMPLE_RATE as f32 * 0.02)).exp();
         self.smooth_rpm += (rpm - self.smooth_rpm) * alpha;
-        let speed_alpha = 1.0 - (-1.0 / (SAMPLE_RATE as f32 * 0.2)).exp();
+        let speed = f32::from_bits(self.params.speed.load(Ordering::Relaxed));
+        let speed_alpha = 1.0 - (-1.0 / (SAMPLE_RATE as f32 * 0.1)).exp();
         self.smooth_speed += (speed - self.smooth_speed) * speed_alpha;
     }
 
@@ -396,6 +469,7 @@ impl AudioEngine {
         stream.log_on_drop(false);
         let params = Arc::new(EngineParams::default());
         let (engine, sfx, music) = open_players(&stream, &params, settings);
+        spawn_param_thread(params.clone());
         Some(AudioEngine {
             _stream: stream,
             engine,
@@ -458,14 +532,18 @@ impl AudioEngine {
         Ok(())
     }
 
-    /// Updates the procedural engine loop from the live vehicle state.
-    pub fn set_engine(&self, rpm_frac: f32, speed_kmh: f32, blown: bool) {
+    /// Publishes the live vehicle state for the param thread. `speed_mps`/`gear`
+    /// are the raw physics values, `dt` the frame duration, and `frame` a
+    /// monotonically increasing per-frame counter (bumped once per frame).
+    pub fn set_engine(&self, speed_mps: f32, gear: u32, dt: f32, frame: u32, blown: bool) {
         self.params
-            .rpm
-            .store(rpm_frac.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+            .speed_mps
+            .store(speed_mps.max(0.0).to_bits(), Ordering::Relaxed);
+        self.params.gear.store(gear, Ordering::Relaxed);
         self.params
-            .speed
-            .store(speed_kmh.max(0.0).to_bits(), Ordering::Relaxed);
+            .dt
+            .store(dt.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+        self.params.frame.store(frame, Ordering::Relaxed);
         self.params.blown.store(blown, Ordering::Relaxed);
     }
 
@@ -572,24 +650,48 @@ mod tests {
     }
 
     #[test]
-    fn engine_rpm_attack_spans_multiple_frames() {
-        // A hard 0 -> 1 rpm step (as if the player floored it between two
-        // frames) must glide: after ~25 ms the smoothed value should still be
-        // well short of the target, proving the attack spans many frames rather
-        // than snapping to the frame-quantized input (which reads as "stepped").
+    fn engine_rpm_smooths_a_step_without_lagging() {
+        // The one-pole should reach a step within a few time constants: after
+        // ~100 ms (5x the 20 ms constant) it should be within 1% of target, and
+        // mid-way it must still be moving (monotonic, bounded) — not snapped.
         let params = Arc::new(EngineParams::default());
+        params.rpm.store(1.0_f32.to_bits(), Ordering::Relaxed);
         let mut engine = EngineSound::new(params);
-        let frames = (SAMPLE_RATE as f32 * 0.025) as usize;
-        for _ in 0..frames {
+        let mid = (SAMPLE_RATE as f32 * 0.02) as usize;
+        for _ in 0..mid {
             engine.next_osc();
         }
-        let revs = engine.next_osc();
         assert!(
-            (0.0..0.5).contains(&engine.smooth_rpm),
-            "25 ms after a 0->1 rpm step the smoother should be <50% there, got {}",
+            engine.smooth_rpm > 0.3 && engine.smooth_rpm < 0.9,
+            "after ~20 ms the step should be part-way there, got {}",
             engine.smooth_rpm
         );
-        assert!(revs.is_finite());
+        for _ in 0..(SAMPLE_RATE as f32 * 0.1) as usize {
+            engine.next_osc();
+        }
+        assert!(
+            (engine.smooth_rpm - 1.0).abs() < 0.01,
+            "one-pole should converge within ~100 ms, got {}",
+            engine.smooth_rpm
+        );
+    }
+
+    #[test]
+    fn interpolated_rpm_tracks_speed_through_the_gear() {
+        // First-order hold: halfway between two frame samples of road speed,
+        // the revs should be exactly the midpoint mapped through the gear's
+        // redline, and out-of-range speeds must clamp.
+        let frac = interpolated_rpm_frac(0.0, 18.0, 0.5, 1);
+        let expected = (9.0 / crate::game::vehicle::redline_speed(1)).clamp(0.0, 1.0);
+        assert!((frac - expected).abs() < 1e-4, "midpoint revs wrong: {frac}");
+
+        // Gear 5 is an overdrive; the same speed reads lower revs there.
+        let low = interpolated_rpm_frac(0.0, 95.0, 1.0, 5);
+        assert!((0.0..0.9).contains(&low), "5th gear revs should stay low: {low}");
+
+        // Excessive speed (redline past) clamps to 1.0, negative to 0.0.
+        assert_eq!(interpolated_rpm_frac(0.0, 10_000.0, 1.0, 1), 1.0);
+        assert_eq!(interpolated_rpm_frac(-5.0, -10.0, 0.5, 1), 0.0);
     }
 
     #[test]
