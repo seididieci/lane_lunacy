@@ -66,6 +66,13 @@ layout(set = 0, binding = 5, std430) readonly buffer SlotBuf {
 
 layout(set = 0, binding = 6) uniform sampler2D world_tex;
 layout(set = 0, binding = 7) uniform sampler2D car_tex;
+// Pre-filtered atlas levels for the RT hit shader's software mip chain:
+// binding 11 = mip 2, binding 12 = mip 5 (the base atlas is binding 6 = mip 0).
+// Explicit-LOD sampling is not honoured in ray-tracing stages on this driver
+// (always mip 0), so the shader blends these levels by the computed distance
+// LOD instead of using `textureLod`.
+layout(set = 0, binding = 11) uniform sampler2D world_mid;
+layout(set = 0, binding = 12) uniform sampler2D world_far;
 
 // Deterministic value noise (quintic interpolation over the hash grid), so the
 // puddle patches are continuous blobs instead of a hard-edged cell checkerboard.
@@ -193,13 +200,20 @@ void main() {
     float m1 = verts[s.vertex_base + i1 * 3u + 1u].w;
     float m2 = verts[s.vertex_base + i2 * 3u + 1u].w;
 
-    // Barycentric coordinates, computed geometrically in object space (the
-    // vertex pool stores object-space positions; the default hit attribute
-    // built-in is not exposed as a bare expression by this glslang).
-    vec3 h = gl_ObjectRayOriginEXT + gl_HitTEXT * gl_ObjectRayDirectionEXT;
-    vec3 e1 = p1 - p0;
-    vec3 e2 = p2 - p0;
-    vec3 h0 = h - p0;
+    // Barycentric coordinates, computed in ray-local space to avoid float32
+    // cancellation: world-space chunk coordinates are hundreds of metres out,
+    // and subtracting two large positions (hit - vertex, vertex - vertex) loses
+    // precision, which makes the interpolated normal/uv wiggle per-pixel (the
+    // RT "grain" the raster path never has). Subtracting the object-space ray
+    // origin first keeps every vector ~hit-distance magnitude, so the weights
+    // are exact and interpolation matches the GPU's attribute interpolation.
+    vec3 p0l = p0 - gl_ObjectRayOriginEXT;
+    vec3 p1l = p1 - gl_ObjectRayOriginEXT;
+    vec3 p2l = p2 - gl_ObjectRayOriginEXT;
+    vec3 hl = gl_HitTEXT * gl_ObjectRayDirectionEXT;
+    vec3 e1 = p1l - p0l;
+    vec3 e2 = p2l - p0l;
+    vec3 h0 = hl - p0l;
     float d00 = dot(e1, e1);
     float d01 = dot(e1, e2);
     float d11 = dot(e2, e2);
@@ -211,9 +225,30 @@ void main() {
     float w = (d00 * d21 - d01 * d20) / denom;
     float w0 = 1.0 - v - w;
 
+    // Numerical guard: keep barycentrics in the triangle and renormalize.
+    // RT hit-point reconstruction is sensitive to float error on large world
+    // coordinates; tiny weight drift can shift interpolated material/UV enough
+    // to show repeating wall bands that raster interpolation does not.
+    w0 = max(w0, 0.0);
+    v = max(v, 0.0);
+    w = max(w, 0.0);
+    float wsum = w0 + v + w;
+    if (wsum > 0.0) {
+        float inv = 1.0 / wsum;
+        w0 *= inv;
+        v *= inv;
+        w *= inv;
+    }
+
     vec3 v_color = c0 * w0 + c1 * v + c2 * w;
     vec2 v_uv = uv0 * w0 + uv1 * v + uv2 * w;
     float v_material = m0 * w0 + m1 * v + m2 * w;
+    // Terrain/world triangles carry a constant slot id per primitive. Quantize
+    // to the nearest slot to prevent tiny interpolation drift from sampling the
+    // wrong atlas column in RT (visible as striped repetition on rock walls).
+    if (v_material < 90.0) {
+        v_material = floor(v_material + 0.5);
+    }
     vec3 v_world_pos = gl_WorldRayOriginEXT + gl_HitTEXT * gl_WorldRayDirectionEXT;
     // Rigid (unscaled) instances only, so the upper-left 3x3 of the instance
     // transform is the rotation alone.
@@ -232,9 +267,36 @@ void main() {
     if (v_material >= 90.0) {
         tex_col = texture(car_tex, v_uv).rgb;
     } else {
-        float atlas_u = v_material * (1.0 / 6.0);
-        vec2 uv = vec2(fract(v_uv.x) * (1.0 / 6.0) + atlas_u, fract(v_uv.y));
-        tex_col = texture(world_tex, uv).rgb;
+        // World texture atlas, one row of 6 slots; each slot is padded with an
+        // 8px gutter of cloned edge columns (see `scene.rs`) so mip filtering
+        // never bleeds the neighbouring slot's color; the UV is inset past it.
+        const float SLOT_W = 512.0;
+        const float GUTTER = 8.0;
+        const float SLOT_STRIDE = 528.0; // SLOT_W + 2 * GUTTER
+        const float ATLAS_W = 3168.0;    // 6 * SLOT_STRIDE
+        float atlas_u = (v_material * SLOT_STRIDE + GUTTER) / ATLAS_W;
+        float slot_w = SLOT_W / ATLAS_W;
+        vec2 uv = vec2(fract(v_uv.x) * slot_w + atlas_u, fract(v_uv.y));
+        // Ray-tracing stages have no implicit screen derivatives, so pick the
+        // mip level from the ray geometry to match the raster footprint: the
+        // world-space pixel size on the surface is `d * pixel_angle / cos_i`
+        // (hit distance × one pixel's angular size ÷ the incidence cosine). The
+        // raygen supplies `pixel_angle` (rtp.extra.z); `cos_i` handles any
+        // surface orientation — grazing ground foreshortens (large footprint),
+        // face-on rock walls do not. `uv_scale` = tiles/metre per material
+        // (surface.rs): asphalt 0.32, grass 0.10, rock 0.05.
+        float uv_scale = v_material < 3.0 ? 0.32 : (v_material < 4.0 ? 0.10 : 0.05);
+        float d = gl_HitTEXT;
+        vec3 ray_dir = normalize(gl_ObjectRayDirectionEXT);
+        float cos_i = max(abs(dot(n, -ray_dir)), 0.05);
+        float lod = log2(max(d * uv_scale * 512.0 * rtp.extra.z / cos_i, 1.0));
+        // Software mip chain: blend the sharp atlas (mip 0), the mid level
+        // (mip 2) and the far level (mip 5) by the distance LOD, because the
+        // driver ignores explicit LOD in the ray-tracing stage.
+        vec3 c0 = texture(world_tex, uv).rgb;
+        vec3 c1 = texture(world_mid, uv).rgb;
+        vec3 c2 = texture(world_far, uv).rgb;
+        tex_col = mix(mix(c0, c1, smoothstep(1.0, 3.0, lod)), c2, smoothstep(3.0, 5.5, lod));
         float luma = dot(tex_col, vec3(0.299, 0.587, 0.114));
         tex_col = mix(tex_col, vec3(luma), 0.35);
         if (v_material >= 3.0 && v_material < 4.0) {
