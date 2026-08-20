@@ -157,14 +157,15 @@ impl EngineSound {
         55.0 + 110.0 * revs.clamp(0.0, 1.0)
     }
 
-    /// Applies the shared attack/release smoothing to RPM and speed. Short time
-    /// constants (attack 40 ms, release 150 ms) so the pitch snaps onto the RPM
-    /// needle without clicks; the oscillator phases accumulate continuously, so
-    /// frequency changes glissando instead of stepping.
+    /// Applies the shared attack/release smoothing to RPM and speed. The engine
+    /// target arrives once per frame, so the attack must span several frames or
+    /// fast revs read back as a stepped staircase; 150 ms (~9 frames at 60 Hz)
+    /// glides the pitch up smoothly, matching the release side. The oscillator
+    /// phases accumulate continuously, so frequency changes still glissando.
     fn advance(&mut self) {
         let rpm = f32::from_bits(self.params.rpm.load(Ordering::Relaxed));
         let speed = f32::from_bits(self.params.speed.load(Ordering::Relaxed));
-        let attack = 1.0 - (-1.0 / (SAMPLE_RATE as f32 * 0.04)).exp();
+        let attack = 1.0 - (-1.0 / (SAMPLE_RATE as f32 * 0.15)).exp();
         let release = 1.0 - (-1.0 / (SAMPLE_RATE as f32 * 0.15)).exp();
         let alpha = if rpm > self.smooth_rpm { attack } else { release };
         self.smooth_rpm += (rpm - self.smooth_rpm) * alpha;
@@ -568,6 +569,27 @@ mod tests {
             redline > idle * 2,
             "redline ({redline}) should cross zero far more often than idle ({idle})"
         );
+    }
+
+    #[test]
+    fn engine_rpm_attack_spans_multiple_frames() {
+        // A hard 0 -> 1 rpm step (as if the player floored it between two
+        // frames) must glide: after ~25 ms the smoothed value should still be
+        // well short of the target, proving the attack spans many frames rather
+        // than snapping to the frame-quantized input (which reads as "stepped").
+        let params = Arc::new(EngineParams::default());
+        let mut engine = EngineSound::new(params);
+        let frames = (SAMPLE_RATE as f32 * 0.025) as usize;
+        for _ in 0..frames {
+            engine.next_osc();
+        }
+        let revs = engine.next_osc();
+        assert!(
+            (0.0..0.5).contains(&engine.smooth_rpm),
+            "25 ms after a 0->1 rpm step the smoother should be <50% there, got {}",
+            engine.smooth_rpm
+        );
+        assert!(revs.is_finite());
     }
 
     #[test]
