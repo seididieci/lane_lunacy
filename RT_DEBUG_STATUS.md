@@ -170,6 +170,75 @@ confirm visually. `cargo test` (170 pass) and `cargo clippy` clean (only
 pre-existing warnings). Bonus: night headlight/taillight/lamp glows are restored
 under RT too.
 
+## Noisy ground/rock textures under RT (FIXED: supersampling)
+
+Symptom: with `--raytrace` the terrain (grass, dirt, road, rock faces) read
+grainy/speckled vs the clean raster render, most visible on the rock faces.
+
+Root cause (found through controlled experiments on `--weather clear` captures,
+which are run-to-run deterministic — raster-vs-raster corr = 1.0):
+- The RT hit shader interpolates per-vertex normals from the ray hit, producing
+  ~3° per-pixel normal variation the raster's GPU interpolation doesn't have
+  (RT-vs-raster normal-field corr ≈ 0.97); the diffuse shading amplifies it.
+- The driver **ignores explicit LOD (`textureLod`) in the ray-tracing stage**
+  (forcing lod 0/5/9 produces byte-identical output), and even implicit LOD is
+  undefined there, so the world texture is always sampled at mip 0.
+- Neither texture mip changes nor MSAA explain it: forcing a 1/16-res downsampled
+  texture leaves the full-shading high-frequency metric unchanged, and raster 1x
+  ≈ raster 4x.
+
+Fix (`src/render/raytrace.rs`): render the RT at **2× supersampled** resolution
+and downscale into the offscreen with a linear blit — SS² = 4 rays per output
+pixel average the per-pixel normal/texture noise the way the raster's MSAA does.
+- `ensure_output` creates the storage color (and R32 depth) images at
+  `extent * 2`, plus a 1× resolved depth image; `record_trace` dispatches at the
+  supersampled size; `copy_output` blits color → offscreen and depth → resolved
+  with linear filtering. The particle overlay samples the resolved 1× depth, so
+  rain occlusion is unchanged.
+- Cost is near-free on the test GPU (idle 99 fps, avg 10.1 ms — the 1× RT render
+  was already not GPU-saturated).
+- `scene.rs` also uploads the world atlas mipmapped with a proper sampler
+  (raster benefits), and `raytrace.rchit.glsl` keeps a software 3-level mip
+  blend (sharp atlas + 1/4 + 1/16 downsamples, mixed by the distance LOD) since
+  hardware mip selection is unavailable in RT on this driver.
+
+Verified: `--raytrace --weather clear` captures now measure within ~0.5-1.0 HF of
+raster (was 1.2-1.9) and the vision agent reports the RT and raster terrain look
+**essentially equivalent** — no grain, smooth rock faces. `cargo test` (170 pass)
+and `cargo clippy` clean (6 pre-existing warnings).
+
+## Blocky/squared relief on rock walls (FIXED: terrain smoothing)
+
+Symptom: the large rock walls / hillsides read as a repeating **squared grid of
+facets** (bumpy shaded relief, same-color bumps catching light as a regular
+pattern) under RT. Both renderers shared it (RT-vs-raster diff on the rock band
+was ~2-3, i.e. the same geometry); RT just rendered it crisply so it was most
+visible there.
+
+Root cause: `src/world/terrain.rs` built every hill/mountain from bilinear
+**value noise on a rigid 14m/28m lattice** (`NOISE_CELL`/`NOISE_CELL_2`)
+interpolated with cubic `smoothstep` — C¹ continuous, so the second derivative
+jumps at every lattice wall and directional light creases the surface into a
+regular grid of facets. The mesh's fixed 1.0m along-road step then read as
+stepped slices on steep faces.
+
+Fix (both renderers, deterministic):
+- `terrain.rs` — `value_noise` now interpolates with **quintic smoothstep
+  (`smoothstep5`, C²)**: curvature is continuous across lattice walls, no
+  crease grid. Octaves widened/softened: `NOISE_CELL` 14→18, `NOISE_CELL_2`
+  28→36, `HILL_OCTAVE_2` 0.5→0.4, `HILL_AMP` 5.0→4.2 → rounder, gentler slopes.
+- `mesh.rs` — **adaptive along-road step on steep slopes** (`terrain_step`):
+  where the off-road slope approaches the rock threshold the step ramps down to
+  `STEP_FINE_MIN` 0.5m (blended over a slope band, no density seam), so rock
+  faces get a finer grid and stop slicing; open ground keeps the cheap coarse
+  step. `Low/Medium/High` budgets still hold (High < 400k tris).
+
+Verified: vision-confirmed the old squared facet grid is **gone** in both new RT
+and raster captures (`--seed 11 --weather clear`), terrain reads as continuous
+stone, no new artifacts (no blobby/over-round or washed-out hills). Idle RT
+still ~98-99 fps (10.2 ms). New test `steep_chunks_tessellate_denser_than_flat`;
+`cargo test` (169 pass) and `cargo clippy` clean (6 pre-existing warnings).
+
 ## Commands
 - Test capture: `cargo run -- --windowed --raytrace --seed 11 --window-capture /tmp/opencode/rt_x.png`
 - Rain capture: `cargo run -- --windowed --raytrace --seed 11 --weather rain --window-capture /tmp/opencode/rt_rain.png`
