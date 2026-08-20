@@ -430,6 +430,13 @@ impl Renderer {
         }
     }
 
+    /// Seeds the smoothed chase-camera heading used by `FrameBuilder`.
+    /// Useful for deterministic debug probes that must face a direction on the
+    /// very first rendered frame.
+    pub fn set_camera_heading(&mut self, heading: f32) {
+        self.frame_builder.set_camera_heading(heading);
+    }
+
     fn recreate_swapchain(&mut self) {
         let dims = self.window.inner_size();
         let (new_swapchain, new_images) = self

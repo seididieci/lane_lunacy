@@ -108,6 +108,9 @@ pub enum RunMode {
         window_capture: Option<PathBuf>,
         /// `--capture-dir <dir>`: enable in-run captures (F10) while driving.
         capture_dir: Option<PathBuf>,
+        /// `--rockwall-view`: skip the menu and spawn the camera at a
+        /// deterministic roadside rock wall for visual A/B debugging.
+        rockwall_view: bool,
     },
     Snapshot(SnapshotOptions),
     /// `--report <path.csv>`: re-read an existing profiling session and
@@ -133,6 +136,7 @@ pub fn parse(args: &[String]) -> RunMode {
     let mut fps_limit: Option<u32> = None;
     let mut window_capture: Option<PathBuf> = None;
     let mut capture_dir: Option<PathBuf> = None;
+    let mut rockwall_view = false;
 
     let mut snapshot: Option<PathBuf> = None;
     let mut report: Option<PathBuf> = None;
@@ -272,6 +276,10 @@ pub fn parse(args: &[String]) -> RunMode {
                     i += 1;
                 }
             }
+            "--rockwall-view" => {
+                rockwall_view = true;
+                i += 1;
+            }
             "--report" => {
                 if let Some(v) = args.get(i + 1).filter(|v| !v.starts_with("--")) {
                     report = Some(PathBuf::from(v));
@@ -349,6 +357,7 @@ pub fn parse(args: &[String]) -> RunMode {
             fps_limit,
             window_capture,
             capture_dir,
+            rockwall_view,
         },
     }
 }
@@ -391,6 +400,7 @@ mod tests {
                 fps_limit,
                 window_capture,
                 capture_dir,
+                rockwall_view,
             } => {
                 assert_eq!(gpu, 0);
                 assert_eq!(weather, Weather::Auto);
@@ -404,6 +414,7 @@ mod tests {
                 assert_eq!(fps_limit, None);
                 assert_eq!(window_capture, None);
                 assert_eq!(capture_dir, None);
+                assert!(!rockwall_view);
             }
             _ => panic!("expected interactive mode"),
         }
@@ -546,6 +557,14 @@ mod tests {
     fn capture_dir_without_value_is_ignored() {
         match parse_args(&["--capture-dir"]) {
             RunMode::Interactive { capture_dir, .. } => assert_eq!(capture_dir, None),
+            _ => panic!("expected interactive mode"),
+        }
+    }
+
+    #[test]
+    fn rockwall_view_flag_is_parsed() {
+        match parse_args(&["--rockwall-view"]) {
+            RunMode::Interactive { rockwall_view, .. } => assert!(rockwall_view),
             _ => panic!("expected interactive mode"),
         }
     }

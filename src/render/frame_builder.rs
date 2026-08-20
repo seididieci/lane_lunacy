@@ -149,6 +149,13 @@ impl FrameBuilder {
         stats
     }
 
+    /// Seeds the smoothed chase-camera heading, used by debug/probe startup
+    /// modes that need the very first rendered frame to face a specific
+    /// direction (without waiting several frames for smoothing to catch up).
+    pub fn set_camera_heading(&mut self, heading: f32) {
+        self.state.camera_heading = heading;
+    }
+
     /// Changes the terrain ribbon density. Invalidates the cached chunks so the
     /// next frame rebuilds the whole window at the new detail (a one-frame
     /// hitch, like an AA switch). Returns whether the detail actually changed.

@@ -79,6 +79,7 @@ pub fn run(
     fps_limit: Option<u32>,
     window_capture: Option<PathBuf>,
     capture_dir: Option<PathBuf>,
+    rockwall_view: bool,
 ) {
     let event_loop = EventLoop::new().expect("failed to create event loop");
     let instance = create_surface_instance(&event_loop);
@@ -106,6 +107,7 @@ pub fn run(
         fps_limit,
         window_capture,
         capture_dir,
+        rockwall_view,
     );
     event_loop.run_app(&mut app).expect("event loop failed");
 }
