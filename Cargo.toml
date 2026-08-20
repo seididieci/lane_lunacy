@@ -13,7 +13,7 @@ gltf = "1.4"
 image = "0.25"
 half = "2.7"
 smallvec = "1.8"
-rodio = { version = "0.22", default-features = false, features = ["playback", "wav"] }
+rodio = { version = "0.22", default-features = false, features = ["playback"] }
 
 [build-dependencies]
 shaderc = { version = "0.10.1", features = ["build-from-source"] }

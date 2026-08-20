@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: MIT
 
-use std::io::Cursor;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
@@ -11,13 +10,6 @@ use rodio::source::Source;
 use rodio::{
     ChannelCount, DeviceSinkBuilder, MixerDeviceSink, Player, SampleRate,
 };
-
-/// Embedded 16-bit mono PCM @ 48 kHz sound files (see assets/sfx/SOURCES.md).
-const WAV_ENGINE_LOOP: &[u8] = include_bytes!("../../assets/sfx/engine_loop.wav");
-const WAV_WRECK: &[u8] = include_bytes!("../../assets/sfx/wreck.wav");
-const WAV_PERFECT: &[u8] = include_bytes!("../../assets/sfx/perfect_shift.wav");
-const WAV_BLOW: &[u8] = include_bytes!("../../assets/sfx/blow.wav");
-const WAV_GEAR: &[u8] = include_bytes!("../../assets/sfx/gear.wav");
 
 /// Audio channel volumes and toggles, staged in the menu and committed on APPLY.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,8 +94,8 @@ pub fn enumerate_output_devices() -> (Vec<String>, Option<usize>) {
     (names, default)
 }
 
-/// One-shot sound effects. Wreck, PerfectShift, Blow and Gear play embedded
-/// recordings; Test is synthesized.
+/// One-shot sound effects. All are synthesized in code so they stay trivial to
+/// tune and never depend on external asset files.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Sfx {
     Wreck,
@@ -133,126 +125,42 @@ impl Default for EngineParams {
 
 const SAMPLE_RATE: u32 = 48_000;
 
-/// Lowest playback rate of the real engine loop, reached at idle. Pitching a
-/// real recording down reads it slower and lower; 0.25x keeps the low-end rumble
-/// without collapsing into an inaudible sub-bass.
-const MIN_PLAYBACK_RATE: f32 = 0.25;
+/// How many harmonics the procedural engine stacks up (sawtooth-ish timbre).
+const HARMONIC_COUNT: usize = 6;
 
-/// Slow-AGC "de-pump" that flattens the level drift baked into the recorded
-/// loop. The source was recorded on the move, not on a dyno, so its body bands
-/// breathe a few dB over ~0.25-1 Hz cycles (plus a small step at the loop seam).
-/// Pitched down, those cycles stretch into seconds-long pumping that reads as
-/// "stepped". The AGC tracks the loop's slow RMS envelope at the *actual*
-/// playback rate and gently normalizes it, so the engine holds a steady level
-/// while its fast texture (firing ripple, harmonics) is untouched.
-const AGC_TIME_S: f32 = 0.7;
-const AGC_GAIN_MIN: f32 = 0.5;
-const AGC_GAIN_MAX: f32 = 2.0;
-const AGC_GAIN_SMOOTH_S: f32 = 0.05;
-
-/// Decodes an embedded WAV to mono float samples at `SAMPLE_RATE`, downmixing
-/// extra channels and peak-normalizing to 0.95. Returns `None` on any failure so
-/// callers can fall back to a synthesized buffer.
-fn load_wav(bytes: &'static [u8]) -> Option<Vec<f32>> {
-    let decoder = rodio::Decoder::new_wav(Cursor::new(bytes)).ok()?;
-    let channels = decoder.channels().get();
-    let rate = decoder.sample_rate().get();
-    let mut samples: Vec<f32> = decoder.collect();
-    if samples.is_empty() {
-        return None;
-    }
-    if channels > 1 {
-        let channels = channels as usize;
-        samples = samples
-            .chunks(channels)
-            .map(|c| c.iter().sum::<f32>() / channels as f32)
-            .collect();
-    }
-    if rate != SAMPLE_RATE {
-        let ratio = rate as f64 / SAMPLE_RATE as f64;
-        let n = (samples.len() as f64 / ratio) as usize;
-        let mut resampled = Vec::with_capacity(n);
-        for i in 0..n {
-            let pos = i as f64 * ratio;
-            let i0 = (pos.floor() as usize).min(samples.len() - 1);
-            let i1 = (i0 + 1).min(samples.len() - 1);
-            let frac = (pos - pos.floor()) as f32;
-            resampled.push(samples[i0] + (samples[i1] - samples[i0]) * frac);
-        }
-        samples = resampled;
-    }
-    let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs())).max(1e-6);
-    let scale = 0.95 / peak;
-    for s in &mut samples {
-        *s *= scale;
-    }
-    Some(samples)
-}
-
-/// Real recorded engine loop (a 4-cylinder car at ~7500 rpm, public under
-/// CC-BY). If it cannot be decoded, a simple harmonic stack takes its place so
-/// the game still has an engine.
-fn load_engine_loop() -> Vec<f32> {
-    load_wav(WAV_ENGINE_LOOP).unwrap_or_else(|| {
-        let n = SAMPLE_RATE as usize;
-        let mut out = Vec::with_capacity(n);
-        let mut phase = 0.0f32;
-        let tau = std::f32::consts::TAU;
-        for _ in 0..n {
-            phase += 87.0 / SAMPLE_RATE as f32;
-            phase %= 1.0;
-            let v = (phase * tau).sin() * 0.5 + (phase * 2.0 * tau).sin() * 0.3;
-            out.push(v);
-        }
-        out
-    })
-}
-
-/// Looping engine source built from a real recording. The recorded loop is read
-/// back at a variable rate (`MIN_PLAYBACK_RATE` at idle, 1.0 at the redline) so
-/// pitch and speed track the vehicle; the position accumulates continuously, so
-/// rate changes glissando instead of stepping. Runs forever on the audio thread;
-/// the game writes `EngineParams`.
-struct LoopEngineSound {
+/// Procedural engine source. A harmonic stack whose fundamental tracks the
+/// (smoothed) RPM, layered with a touch of white-noise roughness and
+/// speed-proportional wind, then saturated with a soft tanh. Runs forever on
+/// the audio thread; the game writes `EngineParams`.
+struct EngineSound {
     params: Arc<EngineParams>,
-    samples: Vec<f32>,
-    pos: f64,
+    /// Phase of each harmonic in 0..1.
+    phases: [f32; HARMONIC_COUNT],
     noise_state: u64,
     smooth_rpm: f32,
     smooth_speed: f32,
-    /// Reference RMS level the AGC normalizes toward (the loop's own average).
-    rms_ref: f32,
-    /// One-pole RMS of the resampled loop output (slow).
-    env_rms: f32,
-    /// Smoothed AGC gain, starts at unity.
-    smooth_gain: f32,
 }
 
-impl LoopEngineSound {
+impl EngineSound {
     fn new(params: Arc<EngineParams>) -> Self {
-        let samples = load_engine_loop();
-        let rms_ref = (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt();
-        LoopEngineSound {
+        EngineSound {
             params,
-            samples,
-            pos: 0.0,
+            phases: [0.0; HARMONIC_COUNT],
             noise_state: 0x9E37_79B9_7F4A_7C15,
             smooth_rpm: 0.0,
             smooth_speed: 0.0,
-            rms_ref,
-            env_rms: rms_ref * rms_ref,
-            smooth_gain: 1.0,
         }
     }
 
-    /// Pure mapping from revs to the real-loop playback rate.
-    fn playback_rate(revs: f32) -> f32 {
-        MIN_PLAYBACK_RATE + (1.0 - MIN_PLAYBACK_RATE) * revs.clamp(0.0, 1.0)
+    /// Fundamental frequency (Hz): 55 at idle, 165 at the redline.
+    fn base_hz(revs: f32) -> f32 {
+        55.0 + 110.0 * revs.clamp(0.0, 1.0)
     }
 
     /// Applies the shared attack/release smoothing to RPM and speed. Short time
     /// constants (attack 40 ms, release 150 ms) so the pitch snaps onto the RPM
-    /// needle; the resampler interpolates continuously, so no stepping returns.
+    /// needle without clicks; the oscillator phases accumulate continuously, so
+    /// frequency changes glissando instead of stepping.
     fn advance(&mut self) {
         let rpm = f32::from_bits(self.params.rpm.load(Ordering::Relaxed));
         let speed = f32::from_bits(self.params.speed.load(Ordering::Relaxed));
@@ -264,47 +172,33 @@ impl LoopEngineSound {
         self.smooth_speed += (speed - self.smooth_speed) * speed_alpha;
     }
 
-    /// Advances the engine and returns the raw (unmixed, unamplified) loop
-    /// sample, linearly interpolated at the current playback rate, then run
-    /// through the slow-AGC de-pump. Kept separate from the final mix so tests
-    /// can measure pitch and envelope without the noise layers.
-    fn next_loop(&mut self) -> f32 {
+    /// Advances the engine and returns the raw harmonic-stack sample (before
+    /// the noise layers and final mix), so tests can measure pitch directly.
+    fn next_osc(&mut self) -> f32 {
         self.advance();
-        let rate = Self::playback_rate(self.smooth_rpm) as f64;
-        let n = self.samples.len() as f64;
-        let pos = if self.pos >= n { self.pos - n } else { self.pos };
-        let i0 = pos.floor();
-        let i1 = if i0 + 1.0 < n { i0 + 1.0 } else { 0.0 };
-        let frac = (pos - i0) as f32;
-        let a = self.samples[i0 as usize];
-        let b = self.samples[i1 as usize];
-        self.pos = pos + rate;
-        let raw = a + (b - a) * frac;
-
-        // De-pump: track the slow level and normalize it toward the loop's own
-        // average, so the recording's baked-in breathing and the seam step no
-        // longer stretch into audible pumping when pitched down.
-        let rms_alpha = 1.0 - (-1.0 / (SAMPLE_RATE as f32 * AGC_TIME_S)).exp();
-        self.env_rms += (raw * raw - self.env_rms) * rms_alpha;
-        let gain =
-            (self.rms_ref / (self.env_rms.sqrt().max(1e-6))).clamp(AGC_GAIN_MIN, AGC_GAIN_MAX);
-        let g_alpha = 1.0 - (-1.0 / (SAMPLE_RATE as f32 * AGC_GAIN_SMOOTH_S)).exp();
-        self.smooth_gain += (gain - self.smooth_gain) * g_alpha;
-        raw * self.smooth_gain
+        let hz = Self::base_hz(self.smooth_rpm);
+        let mut v = 0.0f32;
+        for n in 1..=HARMONIC_COUNT {
+            let i = n - 1;
+            self.phases[i] += (hz * n as f32) / SAMPLE_RATE as f32;
+            if self.phases[i] >= 1.0 {
+                self.phases[i] -= 1.0;
+            }
+            v += (self.phases[i] * std::f32::consts::TAU).sin() * (1.0 / n as f32);
+        }
+        v
     }
 
     fn next_value(&mut self) -> f32 {
-        let loop_sample = self.next_loop();
+        let osc = self.next_osc();
         let revs = self.smooth_rpm;
         let blown = self.params.blown.load(Ordering::Relaxed);
         // A touch of roughness keeps it organic; wind rises with road speed.
-        let roughness = self.next_noise() * 0.03;
+        let roughness = self.next_noise() * if blown { 0.12 } else { 0.03 };
         let wind = self.next_noise() * (self.smooth_speed / 340.0).clamp(0.0, 1.0) * 0.2;
-        // Near-constant level: volume shouldn't chase the revs (that felt like
-        // lag). The AGC already keeps the loop level steady.
-        let amp = if blown { 0.04 } else { 0.6 + 0.25 * revs };
+        let amp = if blown { 0.05 } else { 0.5 + 0.3 * revs };
 
-        (loop_sample * amp + wind + roughness).tanh()
+        (osc * amp + wind + roughness).tanh()
     }
 
     fn next_noise(&mut self) -> f32 {
@@ -317,7 +211,7 @@ impl LoopEngineSound {
     }
 }
 
-impl Iterator for LoopEngineSound {
+impl Iterator for EngineSound {
     type Item = f32;
 
     fn next(&mut self) -> Option<f32> {
@@ -325,7 +219,7 @@ impl Iterator for LoopEngineSound {
     }
 }
 
-impl Source for LoopEngineSound {
+impl Source for EngineSound {
     fn current_span_len(&self) -> Option<usize> {
         None
     }
@@ -390,9 +284,8 @@ fn mix(a: &[f32], b: &[f32]) -> Vec<f32> {
     out
 }
 
-/// One-shot effects. Wreck, Blow, Gear and PerfectShift are embedded recordings;
-/// each falls back to its old synthesized shape if the file cannot be decoded.
-/// Test stays synthesized (it is a UI confirm beep).
+/// All one-shot effects are synthesized in code, so they are trivial to tune.
+/// `Test` is the UI confirm beep.
 struct SfxBuffers {
     wreck: Vec<f32>,
     perfect: Vec<f32>,
@@ -403,20 +296,19 @@ struct SfxBuffers {
 
 impl SfxBuffers {
     fn new() -> Self {
-        let wreck = load_wav(WAV_WRECK).unwrap_or_else(|| filtered_noise(0.7, 2600.0, 10.0, 0.9));
-        let perfect = load_wav(WAV_PERFECT).unwrap_or_else(|| {
-            mix(
-                &sweep(0.28, 880.0, 1760.0, 3.0, 0.35),
-                &sweep(0.28, 1760.0, 2640.0, 3.0, 0.18),
-            )
-        });
-        let blow = load_wav(WAV_BLOW).unwrap_or_else(|| {
-            mix(
-                &sweep(1.1, 140.0, 24.0, 2.2, 0.8),
-                &filtered_noise(1.1, 900.0, 3.0, 0.45),
-            )
-        });
-        let gear = load_wav(WAV_GEAR).unwrap_or_else(|| filtered_noise(0.05, 4000.0, 60.0, 0.4));
+        let wreck = mix(
+            &sweep(0.6, 180.0, 45.0, 5.0, 0.7),
+            &filtered_noise(0.6, 3200.0, 8.0, 0.55),
+        );
+        let perfect = mix(
+            &sweep(0.28, 880.0, 1760.0, 3.0, 0.35),
+            &sweep(0.28, 1760.0, 2640.0, 3.0, 0.18),
+        );
+        let blow = mix(
+            &sweep(1.1, 140.0, 24.0, 2.2, 0.8),
+            &filtered_noise(1.1, 900.0, 3.0, 0.45),
+        );
+        let gear = filtered_noise(0.07, 4000.0, 60.0, 0.4);
         let test = sweep(0.14, 880.0, 880.0, 3.0, 0.5);
         SfxBuffers {
             wreck,
@@ -460,7 +352,7 @@ fn open_players(
 ) -> (Player, Player, Player) {
     let mixer = stream.mixer();
     let engine = Player::connect_new(mixer);
-    engine.append(LoopEngineSound::new(params.clone()).repeat_infinite());
+    engine.append(EngineSound::new(params.clone()).repeat_infinite());
     let sfx = Player::connect_new(mixer);
     let music = Player::connect_new(mixer);
 
@@ -632,12 +524,11 @@ mod tests {
             .rpm
             .store(f32::to_bits(0.5), Ordering::Relaxed);
         params.speed.store(f32::to_bits(120.0), Ordering::Relaxed);
-        let mut engine = LoopEngineSound::new(params);
+        let mut engine = EngineSound::new(params);
         assert_eq!(engine.current_span_len(), None);
         assert_eq!(engine.channels().get(), 1);
         assert_eq!(engine.sample_rate().get(), SAMPLE_RATE);
         assert_eq!(engine.total_duration(), None);
-        assert_eq!(engine.samples.len(), SAMPLE_RATE as usize * 4);
         for _ in 0..4096 {
             let s = engine.next();
             assert!(s.is_some());
@@ -648,10 +539,10 @@ mod tests {
     }
 
     #[test]
-    fn playback_rate_maps_idle_to_redline() {
-        assert!((LoopEngineSound::playback_rate(0.0) - MIN_PLAYBACK_RATE).abs() < 1e-6);
-        assert!((LoopEngineSound::playback_rate(1.0) - 1.0).abs() < 1e-6);
-        assert!((LoopEngineSound::playback_rate(0.5) - 0.625).abs() < 1e-6);
+    fn engine_fundamental_maps_idle_to_redline() {
+        assert!((EngineSound::base_hz(0.0) - 55.0).abs() < 1e-5);
+        assert!((EngineSound::base_hz(1.0) - 165.0).abs() < 1e-5);
+        assert!((EngineSound::base_hz(0.5) - 110.0).abs() < 1e-5);
     }
 
     #[test]
@@ -659,11 +550,11 @@ mod tests {
         let crossings = |rpm: f32| {
             let params = Arc::new(EngineParams::default());
             params.rpm.store(f32::to_bits(rpm), Ordering::Relaxed);
-            let mut engine = LoopEngineSound::new(params);
+            let mut engine = EngineSound::new(params);
             let mut count = 0usize;
-            let mut prev = engine.next_loop();
+            let mut prev = engine.next_osc();
             for _ in 1..SAMPLE_RATE as usize {
-                let v = engine.next_loop();
+                let v = engine.next_osc();
                 if (prev < 0.0) != (v < 0.0) {
                     count += 1;
                 }
@@ -674,72 +565,9 @@ mod tests {
         let idle = crossings(0.0);
         let redline = crossings(1.0);
         assert!(
-            redline > idle * 3,
+            redline > idle * 2,
             "redline ({redline}) should cross zero far more often than idle ({idle})"
         );
-    }
-
-    #[test]
-    fn engine_loop_de_pumps_slow_amplitude_modulation() {
-        // A 200 Hz tone whose level breathes 0..=1 over a 4 s cycle, standing in
-        // for the recording's baked-in level drift.
-        let n = SAMPLE_RATE as usize * 8;
-        let tau = std::f32::consts::TAU;
-        let am: Vec<f32> = (0..n)
-            .map(|i| {
-                let t = i as f32 / SAMPLE_RATE as f32;
-                (t * 200.0 * tau).sin() * (0.5 + 0.5 * (t * 0.25 * tau).sin())
-            })
-            .collect();
-
-        let input_p2p = {
-            let mut out = Vec::new();
-            let win = SAMPLE_RATE as usize / 20;
-            for chunk in am.chunks(win) {
-                let rms = (chunk.iter().map(|s| s * s).sum::<f32>() / chunk.len() as f32).sqrt();
-                out.push(rms);
-            }
-            let min = out.iter().cloned().fold(f32::INFINITY, f32::min);
-            let max = out.iter().cloned().fold(0.0f32, f32::max);
-            (max - min) / ((max + min) / 2.0)
-        };
-        assert!(input_p2p > 1.5, "test fixture must breathe hard (got {input_p2p})");
-
-        let params = Arc::new(EngineParams::default());
-        let mut engine = LoopEngineSound::new(params);
-        engine.samples = am;
-        engine.rms_ref = (engine.samples.iter().map(|s| s * s).sum::<f32>()
-            / engine.samples.len() as f32)
-            .sqrt();
-        engine.env_rms = engine.rms_ref * engine.rms_ref;
-        engine.smooth_gain = 1.0;
-
-        let mut out = Vec::with_capacity(n);
-        for _ in 0..n {
-            out.push(engine.next_loop());
-        }
-        let win = SAMPLE_RATE as usize / 20;
-        let mut env = Vec::new();
-        for chunk in out.chunks(win) {
-            let rms = (chunk.iter().map(|s| s * s).sum::<f32>() / chunk.len() as f32).sqrt();
-            env.push(rms);
-        }
-        let min = env.iter().cloned().fold(f32::INFINITY, f32::min);
-        let max = env.iter().cloned().fold(0.0f32, f32::max);
-        let output_p2p = (max - min) / ((max + min) / 2.0);
-        assert!(
-            output_p2p < input_p2p * 0.5,
-            "AGC should halve the level drift (input {input_p2p}, output {output_p2p})"
-        );
-    }
-
-    #[test]
-    fn wav_assets_decode_to_embedded_buffers() {
-        let sfx = SfxBuffers::new();
-        for kind in [Sfx::Wreck, Sfx::Blow, Sfx::Gear, Sfx::PerfectShift] {
-            let buffer = sfx.get(kind);
-            assert!(buffer.len() > SAMPLE_RATE as usize / 20, "{kind:?} too short");
-        }
     }
 
     #[test]
@@ -750,6 +578,18 @@ mod tests {
             assert!(!buffer.is_empty(), "{kind:?} must synthesize samples");
             assert!(buffer.iter().all(|v| v.is_finite()));
             assert!(buffer.iter().all(|v| v.abs() <= 1.5));
+        }
+    }
+
+    #[test]
+    fn sfx_buffers_have_sensible_lengths() {
+        let sfx = SfxBuffers::new();
+        for kind in [Sfx::Wreck, Sfx::PerfectShift, Sfx::Blow, Sfx::Gear, Sfx::Test] {
+            let secs = sfx.get(kind).len() as f32 / SAMPLE_RATE as f32;
+            assert!(
+                (0.03..=2.0).contains(&secs),
+                "{kind:?} should be a short one-shot, got {secs}s"
+            );
         }
     }
 }

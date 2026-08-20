@@ -255,11 +255,10 @@ LANE_SNAPSHOT_TESTS=1 cargo test        # + GPU probes (needs a Vulkan device)
 ```
 assets/models/       Embedded 3D models + textures (GLB, PNG)
 assets/fonts/        Embedded HUD font (TTF + OFL license)
-assets/sfx/          Embedded sound effects (WAV + SOURCES.md)
 shaders/*.glsl       GLSL shader sources (compiled to SPIR-V at build time)
 src/
   app.rs             Window, event loop, input handling, audio event wiring
-  audio/             Audio output: device enumeration, engine loop + SFX playback
+  audio/             Audio output: device enumeration, procedural engine + SFX synthesis
   game/              Game state: vehicle physics, traffic AI, difficulty
   render/            Renderer: Vulkan pipelines, camera, texture uploads
   mesh.rs            Procedural road/world geometry
@@ -280,9 +279,6 @@ so the golden baselines stay deterministic.
 ## 📜 Credits
 
 - Car models & textures: [Kenney](https://kenney.nl/) (see `assets/models/KENNEY_LICENSE.txt`)
-- Engine loop: [qubodup](https://opengameart.org/users/qubodup) — "Car Engine Loop 96kHz, 4s", [CC-BY 3.0](https://creativecommons.org/licenses/by/3.0/) (`assets/sfx/engine_loop.wav`)
-- Metal impact / chime SFX: BMacZero (Brian MacIntosh) — "Metal Impact Sounds", [CC0](https://creativecommons.org/publicdomain/zero/1.0/) (`assets/sfx/wreck.wav`, `gear.wav`, `perfect_shift.wav`)
-- Explosion SFX: [Listener](https://opengameart.org/users/listener) — "Dynamite sound effect", [CC0](https://creativecommons.org/publicdomain/zero/1.0/) (`assets/sfx/blow.wav`)
 - Built on [vulkano](https://github.com/vulkano-rs/vulkano), [winit](https://github.com/rust-windowing/winit),
   [shaderc](https://github.com/google/shaderc-rs), [fontdue](https://github.com/mooman219/fontdue),
   [rodio](https://github.com/RustAudio/rodio), [cpal](https://github.com/RustAudio/cpal)
@@ -294,8 +290,6 @@ so the golden baselines stay deterministic.
 - **Code** (Rust source + GLSL shaders): [MIT](LICENSE) — Copyright (c) 2026 Lane Lunacy contributors.
 - **Original art/audio** (added by the project): [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/).
 - **Kenney car models & textures**: [CC0](https://creativecommons.org/publicdomain/zero/1.0/) public domain.
-- **Engine loop** (`assets/sfx/engine_loop.wav`): [CC-BY 3.0](https://creativecommons.org/licenses/by/3.0/), © qubodup.
-- **One-shot SFX** (`assets/sfx/wreck.wav`, `gear.wav`, `perfect_shift.wav`, `blow.wav`): [CC0](https://creativecommons.org/publicdomain/zero/1.0/) public domain.
 - **HUD font** (Maple Mono Nerd Font): bundled under the [SIL OFL 1.1](assets/fonts/OFL-MapleMono-NF.txt).
 
 See [LICENSE-ASSETS](LICENSE-ASSETS) for the full asset breakdown.
