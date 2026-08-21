@@ -433,7 +433,7 @@ impl EngineSound {
         // Wind rises with road speed.
         let wind = self.next_noise() * (self.smooth_speed / 340.0).clamp(0.0, 1.0) * 0.2;
 
-        let amp = if blown { 0.05 } else { 0.5 + 0.3 * revs };
+        let amp = if blown { 0.05 } else { 0.25 + 0.15 * revs };
 
         (osc * amp * lope + wind).tanh()
     }
