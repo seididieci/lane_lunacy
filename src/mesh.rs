@@ -7,9 +7,9 @@ use crate::road::{road_curve, road_tangent, ROAD_HALF};
 /// its outer edge (foothills ~20m up) sits at the fully-opaque fog distance, so
 /// the terrain reads as a mountain backdrop instead of ending in a cutoff.
 const GROUND_HALF_W: f32 = 600.0;
-use crate::surface::{material_at, SurfaceMaterial};
+use crate::surface::{material_at, SurfaceMaterial, ROCK_SLOPE};
 use crate::vertex::Vertex3d;
-use crate::world::terrain::{terrain_height, terrain_slope};
+use crate::world::terrain::{terrain_height, terrain_slope, RISE_START};
 
 /// Shortcuts for the ribbon cross-section's fixed surfaces. The asphalt slots
 /// and UV scales live in `surface.rs` so the mesh and gameplay agree.
@@ -118,6 +118,31 @@ fn terrain_normal(s: f32, lateral: f32) -> [f32; 3] {
     }
 }
 
+/// Along-road tessellation step at `s`: the base `step` on gentle ground, a
+/// finer `step * STEP_FINE_FACTOR` (floored at `STEP_FINE_MIN`) where the
+/// off-road terrain climbs steeply enough to read as rock. Denser tessellation
+/// on rock faces stops the fixed 1.0m grid from showing as visible stepped
+/// slices on the wall; gentle ground keeps the cheaper coarse grid. The blend
+/// ramps over a slope band so there is no visible tessellation seam at the
+/// grass/rock boundary.
+const STEP_FINE_FACTOR: f32 = 0.4;
+const STEP_FINE_MIN: f32 = 0.5;
+const STEP_SLOPE_LO: f32 = ROCK_SLOPE * 0.6;
+const STEP_SLOPE_HI: f32 = ROCK_SLOPE * 1.6;
+
+fn terrain_step(s: f32, step: f32) -> f32 {
+    // Representative steepness: the max slope on either side at the typical
+    // lateral band where hills/mountains rise off the road (terrain_gradient
+    // samples the same zone). Degenerates to 0 (base step) on open ground.
+    let mut sl = 0.0f32;
+    for d in [RISE_START + 0.5, RISE_START + 2.0, RISE_START + 4.0] {
+        sl = sl.max(terrain_slope(s, d)).max(terrain_slope(s, -d));
+    }
+    let t = ((sl - STEP_SLOPE_LO) / (STEP_SLOPE_HI - STEP_SLOPE_LO)).clamp(0.0, 1.0);
+    let fine = (step * STEP_FINE_FACTOR).max(STEP_FINE_MIN);
+    step - (step - fine) * t
+}
+
 /// Pushes one terrain cell as two triangles. Each corner gets its own smooth
 /// normal (recovered from its world position via `terrain_normal`), so hills
 /// read as rounded slopes rather than flat-shaded facets.
@@ -179,7 +204,7 @@ pub fn build_world_chunk(
     let mut s_ground = start_s;
     while s_ground < end_s {
         let s0 = s_ground;
-        let s1 = (s_ground + step).min(end_s);
+        let s1 = (s_ground + terrain_step(s_ground, step)).min(end_s);
         let s_mid = (s0 + s1) * 0.5;
         let z0 = -s0;
         let z1 = -s1;
@@ -221,7 +246,7 @@ pub fn build_world_chunk(
                 );
             }
         }
-        s_ground += step;
+        s_ground += terrain_step(s_ground, step);
     }
 
     // road ribbon along -Z
@@ -482,6 +507,61 @@ mod tests {
             s += 260.0;
         }
         assert!(found, "some chunk must contain rock mountain faces");
+    }
+
+    #[test]
+    fn steep_chunks_tessellate_denser_than_flat() {
+        // The adaptive along-road step must densify on steep rock faces (finer
+        // grid -> no visible stepped slices on the wall) while keeping the
+        // cheaper coarse grid on open ground. Find a chunk with rock mountain
+        // faces and one that is flat, then compare their along-road density.
+        let mut steep_s = None;
+        let mut s = 0.0;
+        while s < 5200.0 {
+            let (v, _) = build_world_chunk(s, 260.0, TerrainDetail::Medium);
+            if v.iter()
+                .any(|vert| vert.material == SurfaceMaterial::Rock.atlas_slot())
+            {
+                steep_s = Some(s);
+                break;
+            }
+            s += 260.0;
+        }
+        let steep_s = steep_s.expect("some chunk must contain rock mountain faces");
+        let (sv, _) = build_world_chunk(steep_s, 260.0, TerrainDetail::Medium);
+
+        // A flat chunk: terrain that never rises above the rock threshold.
+        let mut flat_s = None;
+        s = 0.0;
+        while s < 5200.0 {
+            let (v, _) = build_world_chunk(s, 260.0, TerrainDetail::Medium);
+            let flat = v
+                .iter()
+                .all(|vert| vert.material != SurfaceMaterial::Rock.atlas_slot());
+            if flat {
+                flat_s = Some(s);
+                break;
+            }
+            s += 260.0;
+        }
+        let flat_s = flat_s.expect("some chunk must be flat");
+        let (fv, _) = build_world_chunk(flat_s, 260.0, TerrainDetail::Medium);
+
+        // Terrain-only triangle density: exclude road/scenery by counting only
+        // vertices whose material is off-road (grass slot 3 / rock slot 5).
+        let terrain_tris = |v: &[Vertex3d]| {
+            v.iter()
+                .filter(|vert| vert.material >= 3.0 && vert.material < 6.0)
+                .count()
+                / 4
+                * 2
+        };
+        assert!(
+            terrain_tris(&sv) > terrain_tris(&fv),
+            "steep chunk must tessellate denser ({} vs {})",
+            terrain_tris(&sv),
+            terrain_tris(&fv)
+        );
     }
 }
 

@@ -12,6 +12,8 @@ pub const PARTICLE_VERT_SPV: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/spv/particle.vert.spv"));
 pub const PARTICLE_FRAG_SPV: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/spv/particle.frag.spv"));
+pub const RT_PARTICLE_FRAG_SPV: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/spv/rt_particle.frag.spv"));
 pub const FLARE_VERT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spv/flare.vert.spv"));
 pub const FLARE_FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spv/flare.frag.spv"));
 pub const POST_VERT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spv/post.vert.spv"));
@@ -25,6 +27,10 @@ pub const RAYTRACE_RCHIT_SPV: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/spv/raytrace.rchit.spv"));
 pub const RAYTRACE_RMISS_SPV: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/spv/raytrace.rmiss.spv"));
+pub const RAYTRACE_RSMISS_SPV: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/spv/raytrace.rsmiss.spv"));
+pub const RAYTRACE_RSHAD_SPV: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/spv/raytrace.rshad.spv"));
 
 pub fn spv_words(bytes: &[u8]) -> Vec<u32> {
     bytes

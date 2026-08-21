@@ -16,7 +16,16 @@
 #define INDEX_CAP 7000000
 #define SLOT_CAP 256
 
-layout(location = 0) rayPayloadEXT vec4 rtp;
+struct RTShade {
+    vec4 color;
+    vec4 normal;
+    vec4 world_pos;
+    vec4 albedo;
+    vec4 uv;
+    vec4 extra;
+};
+
+layout(location = 0) rayPayloadInEXT RTShade rtp;
 
 layout(set = 0, binding = 1, std140) uniform MVP {
     mat4 model;
@@ -55,10 +64,110 @@ layout(set = 0, binding = 5, std430) readonly buffer SlotBuf {
     RtSlot slots[SLOT_CAP];
 };
 
-layout(set = 0, binding = 2, rgba16f) uniform image2D rt_out;
-
 layout(set = 0, binding = 6) uniform sampler2D world_tex;
 layout(set = 0, binding = 7) uniform sampler2D car_tex;
+// Pre-filtered atlas levels for the RT hit shader's software mip chain:
+// binding 11 = mip 2, binding 12 = mip 5 (the base atlas is binding 6 = mip 0).
+// Explicit-LOD sampling is not honoured in ray-tracing stages on this driver
+// (always mip 0), so the shader blends these levels by the computed distance
+// LOD instead of using `textureLod`.
+layout(set = 0, binding = 11) uniform sampler2D world_mid;
+layout(set = 0, binding = 12) uniform sampler2D world_far;
+
+// Deterministic value noise (quintic interpolation over the hash grid), so the
+// puddle patches are continuous blobs instead of a hard-edged cell checkerboard.
+// Mirrors `post.frag.glsl` exactly so the RT puddles line up with the raster
+// composite's screen-space puddle mask.
+float hash12(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+float value_noise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    vec2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    vec2 a = i + vec2(0.0, 0.0);
+    vec2 b = i + vec2(1.0, 0.0);
+    vec2 c = i + vec2(0.0, 1.0);
+    vec2 d = i + vec2(1.0, 1.0);
+    float v = mix(
+        mix(hash12(a * 7.13 + vec2(1.7, 3.1)), hash12(b * 7.13 + vec2(1.7, 3.1)), u.x),
+        mix(hash12(c * 7.13 + vec2(1.7, 3.1)), hash12(d * 7.13 + vec2(1.7, 3.1)), u.x),
+        u.y);
+    return v;
+}
+
+// Fractal sum of `value_noise` (2 octaves), normalized to ~[0, 1].
+float puddle_noise(vec2 p, int oct) {
+    float amp = 0.55;
+    float v = 0.0;
+    float norm = 0.0;
+    vec2 q = p;
+    for (int i = 0; i < 3; ++i) {
+        v += amp * value_noise(q);
+        norm += amp;
+        q = q * 2.13 + vec2(7.3, 3.7);
+        if (i + 1 >= oct) {
+            break;
+        }
+    }
+    return v / norm;
+}
+
+const float ROAD_HALF = 4.8;
+const float SHOULDER_W = 0.55;
+
+float road_center_x(float s) {
+    return 12.0 * sin(s * 0.02);
+}
+
+float road_lateral(float x, float s) {
+    return x - road_center_x(s);
+}
+
+float road_surface_height(float s, float lat) {
+    float d = abs(lat);
+    if (d <= ROAD_HALF) {
+        return 0.015;
+    }
+    if (d <= ROAD_HALF + SHOULDER_W) {
+        return 0.021;
+    }
+    return 0.0;
+}
+
+// Deterministic puddle patches on the asphalt ribbon, driven by the wet factor.
+// Mirrors `road_curve` (12 * sin(0.02 * s)) and ROAD_HALF + shoulder from the
+// Rust side so the mask lines up with the actual road geometry.
+float puddle_mask(vec3 world_pos, float wet) {
+    if (wet <= 0.001) {
+        return 0.0;
+    }
+    float s = -world_pos.z;
+    float lat = road_lateral(world_pos.x, s);
+    float half_road = ROAD_HALF + SHOULDER_W;
+    if (abs(lat) > half_road) {
+        return 0.0;
+    }
+    float road_y = road_surface_height(s, lat);
+    if (abs(world_pos.y - road_y) > 0.065) {
+        return 0.0;
+    }
+    vec2 q = vec2(s * 0.11, lat * 0.45);
+    float warp_amp = 0.35;
+    vec2 w = warp_amp * vec2(
+        puddle_noise(q + vec2(0.0, 1.7), 2),
+        puddle_noise(q + vec2(5.3, 2.9), 2));
+    float n = puddle_noise(q + w, 2);
+    float pat = smoothstep(0.48, 0.60, n);
+    if (pat <= 0.001) {
+        return 0.0;
+    }
+    float edge = smoothstep(half_road, half_road - 0.7, abs(lat));
+    return clamp(pat * edge * wet, 0.0, 1.0);
+}
 
 void main() {
     uint slot = gl_InstanceCustomIndexEXT;
@@ -91,13 +200,20 @@ void main() {
     float m1 = verts[s.vertex_base + i1 * 3u + 1u].w;
     float m2 = verts[s.vertex_base + i2 * 3u + 1u].w;
 
-    // Barycentric coordinates, computed geometrically in object space (the
-    // vertex pool stores object-space positions; the default hit attribute
-    // built-in is not exposed as a bare expression by this glslang).
-    vec3 h = gl_ObjectRayOriginEXT + gl_HitTEXT * gl_ObjectRayDirectionEXT;
-    vec3 e1 = p1 - p0;
-    vec3 e2 = p2 - p0;
-    vec3 h0 = h - p0;
+    // Barycentric coordinates, computed in ray-local space to avoid float32
+    // cancellation: world-space chunk coordinates are hundreds of metres out,
+    // and subtracting two large positions (hit - vertex, vertex - vertex) loses
+    // precision, which makes the interpolated normal/uv wiggle per-pixel (the
+    // RT "grain" the raster path never has). Subtracting the object-space ray
+    // origin first keeps every vector ~hit-distance magnitude, so the weights
+    // are exact and interpolation matches the GPU's attribute interpolation.
+    vec3 p0l = p0 - gl_ObjectRayOriginEXT;
+    vec3 p1l = p1 - gl_ObjectRayOriginEXT;
+    vec3 p2l = p2 - gl_ObjectRayOriginEXT;
+    vec3 hl = gl_HitTEXT * gl_ObjectRayDirectionEXT;
+    vec3 e1 = p1l - p0l;
+    vec3 e2 = p2l - p0l;
+    vec3 h0 = hl - p0l;
     float d00 = dot(e1, e1);
     float d01 = dot(e1, e2);
     float d11 = dot(e2, e2);
@@ -109,9 +225,30 @@ void main() {
     float w = (d00 * d21 - d01 * d20) / denom;
     float w0 = 1.0 - v - w;
 
+    // Numerical guard: keep barycentrics in the triangle and renormalize.
+    // RT hit-point reconstruction is sensitive to float error on large world
+    // coordinates; tiny weight drift can shift interpolated material/UV enough
+    // to show repeating wall bands that raster interpolation does not.
+    w0 = max(w0, 0.0);
+    v = max(v, 0.0);
+    w = max(w, 0.0);
+    float wsum = w0 + v + w;
+    if (wsum > 0.0) {
+        float inv = 1.0 / wsum;
+        w0 *= inv;
+        v *= inv;
+        w *= inv;
+    }
+
     vec3 v_color = c0 * w0 + c1 * v + c2 * w;
     vec2 v_uv = uv0 * w0 + uv1 * v + uv2 * w;
     float v_material = m0 * w0 + m1 * v + m2 * w;
+    // Terrain/world triangles carry a constant slot id per primitive. Quantize
+    // to the nearest slot to prevent tiny interpolation drift from sampling the
+    // wrong atlas column in RT (visible as striped repetition on rock walls).
+    if (v_material < 90.0) {
+        v_material = floor(v_material + 0.5);
+    }
     vec3 v_world_pos = gl_WorldRayOriginEXT + gl_HitTEXT * gl_WorldRayDirectionEXT;
     // Rigid (unscaled) instances only, so the upper-left 3x3 of the instance
     // transform is the rotation alone.
@@ -130,9 +267,36 @@ void main() {
     if (v_material >= 90.0) {
         tex_col = texture(car_tex, v_uv).rgb;
     } else {
-        float atlas_u = v_material * (1.0 / 6.0);
-        vec2 uv = vec2(fract(v_uv.x) * (1.0 / 6.0) + atlas_u, fract(v_uv.y));
-        tex_col = texture(world_tex, uv).rgb;
+        // World texture atlas, one row of 6 slots; each slot is padded with an
+        // 8px gutter of cloned edge columns (see `scene.rs`) so mip filtering
+        // never bleeds the neighbouring slot's color; the UV is inset past it.
+        const float SLOT_W = 512.0;
+        const float GUTTER = 8.0;
+        const float SLOT_STRIDE = 528.0; // SLOT_W + 2 * GUTTER
+        const float ATLAS_W = 3168.0;    // 6 * SLOT_STRIDE
+        float atlas_u = (v_material * SLOT_STRIDE + GUTTER) / ATLAS_W;
+        float slot_w = SLOT_W / ATLAS_W;
+        vec2 uv = vec2(fract(v_uv.x) * slot_w + atlas_u, fract(v_uv.y));
+        // Ray-tracing stages have no implicit screen derivatives, so pick the
+        // mip level from the ray geometry to match the raster footprint: the
+        // world-space pixel size on the surface is `d * pixel_angle / cos_i`
+        // (hit distance × one pixel's angular size ÷ the incidence cosine). The
+        // raygen supplies `pixel_angle` (rtp.extra.z); `cos_i` handles any
+        // surface orientation — grazing ground foreshortens (large footprint),
+        // face-on rock walls do not. `uv_scale` = tiles/metre per material
+        // (surface.rs): asphalt 0.32, grass 0.10, rock 0.05.
+        float uv_scale = v_material < 3.0 ? 0.32 : (v_material < 4.0 ? 0.10 : 0.05);
+        float d = gl_HitTEXT;
+        vec3 ray_dir = normalize(gl_ObjectRayDirectionEXT);
+        float cos_i = max(abs(dot(n, -ray_dir)), 0.05);
+        float lod = log2(max(d * uv_scale * 512.0 * rtp.extra.z / cos_i, 1.0));
+        // Software mip chain: blend the sharp atlas (mip 0), the mid level
+        // (mip 2) and the far level (mip 5) by the distance LOD, because the
+        // driver ignores explicit LOD in the ray-tracing stage.
+        vec3 c0 = texture(world_tex, uv).rgb;
+        vec3 c1 = texture(world_mid, uv).rgb;
+        vec3 c2 = texture(world_far, uv).rgb;
+        tex_col = mix(mix(c0, c1, smoothstep(1.0, 3.0, lod)), c2, smoothstep(3.0, 5.5, lod));
         float luma = dot(tex_col, vec3(0.299, 0.587, 0.114));
         tex_col = mix(tex_col, vec3(luma), 0.35);
         if (v_material >= 3.0 && v_material < 4.0) {
@@ -146,7 +310,13 @@ void main() {
     if (v_material >= 3.0 && v_material < 90.0) {
         albedo *= terrain_state.xyz;
     }
-    vec3 lit = albedo * (ambient + diff * sun_intensity * 0.85);
+    // Solar base BEFORE the artificial lights are added: the raygen shadows the
+    // sun/moon (and the ambient that accompanies it) only, so this part is
+    // carried out in `rtp.albedo` and recombined as `lit - sun_base +
+    // sun_base * occluded`. The headlight/traffic/lamp additions below are added
+    // to `lit` but never to `sun_base`, so they stay unshadowed.
+    vec3 sun_base = albedo * (ambient + diff * sun_intensity * 0.85);
+    vec3 lit = sun_base;
 
     // Wet asphalt: darken + glossy sun/moon sheen (mirrors mesh.frag).
     float wet_look = 0.0;
@@ -252,6 +422,20 @@ void main() {
     float fog = smoothstep(100.0, 600.0, dist);
     vec3 final_col = mix(lit, fog_color.rgb, fog);
 
-    rtp = vec4(0.0, 0.0, 1.0, 1.0);
-    imageStore(rt_out, ivec2(gl_LaunchIDEXT.xy), vec4(0.0, 1.0, 0.0, 1.0));
+    rtp.color = vec4(final_col, 1.0);
+    rtp.normal = vec4(n, 1.0);
+    rtp.world_pos = vec4(v_world_pos, 1.0);
+    // The sun+ambient lighting base (pre-artificial-lights, pre-fog). `albedo`
+    // keeps this exact 3-vector instead of the raw texture albedo so the raygen
+    // can apply the shadow mask to just the solar term and leave the light pools
+    // untouched.
+    rtp.albedo = vec4(sun_base, 1.0);
+    rtp.uv = vec4(v_uv, 0.0, 0.0);
+    // `extra.x` carries the wet reflectivity so the raygen can decide whether
+    // to fire a reflected ray and how strongly to mix it in. Reflections are
+    // gated by the same deterministic puddle mask the raster composite uses, so
+    // only puddle patches mirror the scene; the rest of the road keeps the
+    // matte wet sheen (darkening + sun specular) from above.
+    float pm = puddle_mask(v_world_pos, wet_fac);
+    rtp.extra = vec4(wet_look * pm * 0.72, 0.0, 0.0, 0.0);
 }

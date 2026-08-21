@@ -37,6 +37,7 @@ use crate::profiler::SessionProfiler;
 use crate::render::daynight;
 use crate::render::{FxSettings, Renderer};
 use crate::ui::Ui;
+use crate::world::terrain::{terrain_height, terrain_slope, RISE_START};
 
 enum AppMode {
     Menu,
@@ -108,6 +109,9 @@ pub struct App {
     window_capture: Option<PathBuf>,
     window_capture_armed: bool,
     capture_dir: Option<PathBuf>,
+    rockwall_view: bool,
+    auto_start: bool,
+    forced_camera_heading: Option<f32>,
     capture_seq: u64,
     /// Monotonic frame counter for the profiler rows.
     profile_frame_idx: u64,
@@ -136,6 +140,8 @@ impl App {
         audio_capture: Option<PathBuf>,
         auto_drive: Option<f32>,
         audio_device: Option<usize>,
+        rockwall_view: bool,
+        auto_start: bool,
     ) -> Self {
         let mut game = Game::new();
         game.set_weather(weather);
@@ -154,7 +160,7 @@ impl App {
                 "--time {hour}: sun azimuth {az:.0}°, elevation {elev:.0}° (az 0° = +Z, 90° = +X)"
             );
         }
-        Self {
+        let mut app = Self {
             instance,
             window: None,
             surface: None,
@@ -219,9 +225,55 @@ impl App {
             window_capture,
             window_capture_armed: false,
             capture_dir,
+            rockwall_view,
+            auto_start,
+            forced_camera_heading: None,
             capture_seq: 0,
             profile_frame_idx: 0,
             profile_frame_end: None,
+        };
+        if app.auto_start {
+            // `--auto-start`: skip the menu and start the session at the spawn
+            // (normal chase camera, deterministic world from the seed). Lets
+            // capture/profile runs hit the live scene instead of the title.
+            app.mode = AppMode::Playing;
+        }
+        if app.rockwall_view {
+            app.activate_rockwall_view();
+        }
+        app
+    }
+
+    fn activate_rockwall_view(&mut self) {
+        // Deterministic A/B probe: skip the menu, park the car at the steepest
+        // nearby roadside wall, and yaw 90° toward it so captures frame the
+        // rock face directly (isolates wall-tiling/relief artifacts quickly).
+        self.mode = AppMode::Playing;
+
+        let (target_s, side) = pick_rockwall_probe();
+        let old_s = self.game.vehicle.distance;
+        self.game.vehicle.distance = target_s;
+        let shoulder = crate::road::ROAD_HALF - crate::road::CAR_HALF_W - 0.25;
+        self.game.vehicle.offset = side * shoulder.max(0.0) * 0.8;
+        self.game.vehicle.heading = side * std::f32::consts::FRAC_PI_2;
+        self.forced_camera_heading = Some(self.game.vehicle.heading);
+        self.game.vehicle.speed = 0.0;
+        self.game.vehicle.steer = 0.0;
+        self.game.vehicle.boost = 0.0;
+        self.game.vehicle.throttle = false;
+        self.game.vehicle.height = terrain_height(self.game.vehicle.distance, 0.0);
+
+        println!(
+            "rockwall-view: s={:.1}, side={}, heading={:.0}deg",
+            target_s,
+            if side >= 0.0 { "right" } else { "left" },
+            self.game.vehicle.heading.to_degrees()
+        );
+
+        // Keep traffic around the probe location instead of the spawn origin.
+        let delta = target_s - old_s;
+        for t in &mut self.game.traffic {
+            t.distance += delta;
         }
     }
 
@@ -298,6 +350,9 @@ impl App {
 
         self.active_gpu_index = self.menu.settings.gpu_index;
         self.renderer = Some(renderer);
+        if let (Some(renderer), Some(heading)) = (&mut self.renderer, self.forced_camera_heading) {
+            renderer.set_camera_heading(heading);
+        }
         if let (Some(renderer), Some(path)) = (&mut self.renderer, self.window_capture.clone()) {
             renderer.request_window_capture(path);
             self.window_capture_armed = true;
@@ -528,6 +583,9 @@ impl App {
         );
         self.active_gpu_index = chosen;
         self.renderer = Some(renderer);
+        if let (Some(renderer), Some(heading)) = (&mut self.renderer, self.forced_camera_heading) {
+            renderer.set_camera_heading(heading);
+        }
     }
 
     fn handle_menu_key(&mut self, event_loop: &ActiveEventLoop, kb: &KeyEvent, press: bool) {
@@ -687,6 +745,33 @@ impl App {
             AudioRow::Apply | AudioRow::Back => {}
         }
     }
+}
+
+fn pick_rockwall_probe() -> (f32, f32) {
+    let mut best_s = 260.0f32;
+    let mut best_side = 1.0f32;
+    let mut best = -1.0f32;
+    let mut s = 80.0f32;
+    while s <= 5200.0 {
+        for side in [-1.0f32, 1.0f32] {
+            let mut score = 0.0f32;
+            for d in [RISE_START + 1.0, RISE_START + 3.0, RISE_START + 6.0, RISE_START + 9.0] {
+                // Average across a short forward/backward window to avoid
+                // one-sample spikes and favor persistent steep walls.
+                let s0 = terrain_slope((s - 3.0).max(0.0), side * d);
+                let s1 = terrain_slope(s, side * d);
+                let s2 = terrain_slope(s + 3.0, side * d);
+                score = score.max((s0 + s1 + s2) / 3.0);
+            }
+            if score > best {
+                best = score;
+                best_s = s;
+                best_side = side;
+            }
+        }
+        s += 4.0;
+    }
+    (best_s, best_side)
 }
 
 impl ApplicationHandler for App {

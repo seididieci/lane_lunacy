@@ -83,6 +83,8 @@ pub fn run(
     audio_capture: Option<PathBuf>,
     auto_drive: Option<f32>,
     audio_device: Option<usize>,
+    rockwall_view: bool,
+    auto_start: bool,
 ) {
     let event_loop = EventLoop::new().expect("failed to create event loop");
     let instance = create_surface_instance(&event_loop);
@@ -113,6 +115,8 @@ pub fn run(
         audio_capture,
         auto_drive,
         audio_device,
+        rockwall_view,
+        auto_start,
     );
     event_loop.run_app(&mut app).expect("event loop failed");
 }

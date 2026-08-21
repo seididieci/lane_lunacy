@@ -103,9 +103,11 @@ pub fn generate_foliage_tile(size: u32, seed: u64) -> Vec<u8> {
 
 /// Bakes a `size`×`size` opaque RGBA rock tile for the world atlas (slot 5).
 ///
-/// Neutral grey rock with coarse horizontal strata bands plus a little mid and
-/// fine speckle, so cliff faces get organic banding without strong color. The
-/// lattice is periodic, so the tile tiles seamlessly over large cliff faces.
+/// Neutral grey rock with gentle, wide horizontal strata and very little
+/// speckle, so cliff faces read as smooth stone instead of a grainy/banded
+/// tile. Amplitudes are kept low (the mesh shader also desaturates toward local
+/// luma). The lattice is periodic, so the tile tiles seamlessly over large
+/// cliff faces.
 pub fn generate_rock_tile(size: u32, seed: u64) -> Vec<u8> {
     let n = size as usize;
     let mut out = Vec::with_capacity(n * n * 4);
@@ -113,18 +115,11 @@ pub fn generate_rock_tile(size: u32, seed: u64) -> Vec<u8> {
         let y = py as f32;
         for px in 0..n {
             let x = px as f32;
-            let strata = fbm(seed, size, x * 0.4 + 3.0, y * 1.3 + 11.0, 4, 3);
-            let n1 = fbm(seed ^ 0x9E3779B9, size, x + 17.0, y + 3.0, 8, 3);
-            let n2 = fbm(
-                seed ^ 0x5DEECE66D,
-                size,
-                x * 2.3 + 5.0,
-                y * 2.3 + 7.0,
-                14,
-                2,
-            );
-            // Neutral grey with slight warm/cool variation from the bands.
-            let g = 0.44 + 0.10 * (strata - 0.5) + 0.05 * (n1 - 0.5) + 0.04 * (n2 - 0.5);
+            let strata = fbm(seed, size, x * 0.4 + 3.0, y * 1.3 + 11.0, 3, 3);
+            let n1 = fbm(seed ^ 0x9E3779B9, size, x + 17.0, y + 3.0, 6, 3);
+            let n2 = fbm(seed ^ 0x5DEECE66D, size, x * 2.3 + 5.0, y * 2.3 + 7.0, 10, 2);
+            // Neutral grey with soft warm/cool variation from the wide bands.
+            let g = 0.44 + 0.06 * (strata - 0.5) + 0.03 * (n1 - 0.5) + 0.02 * (n2 - 0.5);
             let r = g + 0.02 * (n1 - 0.5);
             let b = g - 0.02 * (n2 - 0.5);
             out.push((r * 255.0).clamp(0.0, 255.0) as u8);

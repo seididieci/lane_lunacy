@@ -21,6 +21,8 @@ fn main() {
             audio_capture,
             auto_drive,
             audio_device,
+            rockwall_view,
+            auto_start,
         } => lane_lunacy::run(
             gpu,
             weather,
@@ -37,6 +39,8 @@ fn main() {
             audio_capture,
             auto_drive,
             audio_device,
+            rockwall_view,
+            auto_start,
         ),
         RunMode::Snapshot(opts) => lane_lunacy::run_snapshot(opts),
         RunMode::Report(csv) => lane_lunacy::run_report(csv),

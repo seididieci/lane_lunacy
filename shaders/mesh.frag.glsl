@@ -52,9 +52,16 @@ void main() {
     } else {
         // World texture atlas, one row of 6 slots:
         // 0=asphalt base, 1=asphalt worn, 2=asphalt cracked, 3=grass,
-        // 4=foliage, 5=rock.
-        float atlas_u = v_material * (1.0 / 6.0);
-        vec2 uv = vec2(fract(v_uv.x) * (1.0 / 6.0) + atlas_u, fract(v_uv.y));
+        // 4=foliage, 5=rock. Each slot carries an 8px gutter of cloned edge
+        // columns so the mip chain never bleeds the neighbouring slot's color
+        // across the boundary; the sampled UV is inset past it.
+        const float SLOT_W = 512.0;
+        const float GUTTER = 8.0;
+        const float SLOT_STRIDE = 528.0; // SLOT_W + 2 * GUTTER
+        const float ATLAS_W = 3168.0;    // 6 * SLOT_STRIDE
+        float atlas_u = (v_material * SLOT_STRIDE + GUTTER) / ATLAS_W;
+        float slot_w = SLOT_W / ATLAS_W;
+        vec2 uv = vec2(fract(v_uv.x) * slot_w + atlas_u, fract(v_uv.y));
         tex_col = texture(tex, uv).rgb;
         // Reduce noisy contrast around local luma (keeps overall brightness).
         float luma = dot(tex_col, vec3(0.299, 0.587, 0.114));
@@ -78,6 +85,8 @@ void main() {
         albedo *= terrain_state.xyz;
     }
     vec3 lit = albedo * (ambient + diff * sun_intensity * 0.85);
+
+    // Wet asphalt: darken + glossy sun/moon sheen (mirrors mesh.frag).
 
     // Wet asphalt: darken the tarmac and add a glossy sun/moon specular with a
     // broad low-exponent sheen, so rain-soaked asphalt glints under any light.

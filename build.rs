@@ -58,14 +58,24 @@ fn patch_ray_payload_locations(spv: &[u8]) -> Vec<u8> {
         return spv.to_vec();
     }
 
-    // `OpDecorate <id> Location 0` per payload variable, inserted at the start
-    // of the types section (the end of the annotations section).
+    // `OpDecorate <id> Location N` per payload variable, all inserted at the
+    // start of the types section (the end of the annotations section) BEFORE
+    // the type declarations (inserting before the type section header would
+    // shift the type IDs every decoration references). Every RT stage declares
+    // exactly one `RTShade` payload variable, so each module gets a single
+    // `Location 0` decoration and the driver links them all to the raygen's
+    // `layout(location = 0)`. The shadow any-hit/miss stages compile with the
+    // same struct, so glslang links the shared payload without explicit
+    // locations (glslang rejects `layout(location=...)` on `rayPayloadEXT` in
+    // non-raygen stages). Discovery order in the module matches declaration
+    // order in the source; numbered per ID so a future multi-payload shader
+    // still gets distinct, deterministic locations.
     let mut decorations: Vec<u32> = Vec::new();
-    for id in payload_ids {
+    for (idx, id) in payload_ids.iter().enumerate() {
         decorations.push((4u32 << 16) | SPV_OP_DECORATE as u32);
-        decorations.push(id);
+        decorations.push(*id);
         decorations.push(SPV_DECORATION_LOCATION);
-        decorations.push(0);
+        decorations.push(idx as u32);
     }
     let mut out = Vec::with_capacity(words.len() + decorations.len());
     out.extend_from_slice(&words[..first_type]);
@@ -105,6 +115,8 @@ fn main() {
             Some("rgen") => (ShaderKind::RayGeneration, "ray generation"),
             Some("rchit") => (ShaderKind::ClosestHit, "closest hit"),
             Some("rmiss") => (ShaderKind::Miss, "miss"),
+            Some("rsmiss") => (ShaderKind::Miss, "shadow miss"),
+            Some("rshad") => (ShaderKind::AnyHit, "shadow any-hit"),
             Some("rahit") => (ShaderKind::AnyHit, "any hit"),
             other => panic!(
                 "unrecognized shader stage in {}: {:?}",
@@ -121,7 +133,12 @@ fn main() {
         // default so the existing binary snapshot doesn't shift.
         let is_rt = matches!(
             stem.rsplit_once('.').map(|(_, s)| s),
-            Some("rgen") | Some("rchit") | Some("rmiss") | Some("rahit")
+            Some("rgen")
+                | Some("rchit")
+                | Some("rmiss")
+                | Some("rsmiss")
+                | Some("rshad")
+                | Some("rahit")
         );
         if is_rt {
             options.set_target_spirv(shaderc::SpirvVersion::V1_6);

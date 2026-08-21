@@ -125,6 +125,12 @@ pub enum RunMode {
         /// `--audio-device <idx>`: initial audio output device index to use
         /// (index into the enumerated device list; default 0).
         audio_device: Option<usize>,
+        /// `--rockwall-view`: skip the menu and spawn the camera at a
+        /// deterministic roadside rock wall for visual A/B debugging.
+        rockwall_view: bool,
+        /// `--auto-start`: skip the menu and start the session at the spawn
+        /// (normal chase camera), so capture/profile runs hit the live scene.
+        auto_start: bool,
     },
     Snapshot(SnapshotOptions),
     /// `--report <path.csv>`: re-read an existing profiling session and
@@ -154,6 +160,8 @@ pub fn parse(args: &[String]) -> RunMode {
     let mut audio_wav: Option<PathBuf> = None;
     let mut auto_drive: Option<f32> = None;
     let mut audio_device: Option<usize> = None;
+    let mut rockwall_view = false;
+    let mut auto_start = false;
 
     let mut snapshot: Option<PathBuf> = None;
     let mut report: Option<PathBuf> = None;
@@ -334,6 +342,14 @@ pub fn parse(args: &[String]) -> RunMode {
                     i += 1;
                 }
             }
+            "--rockwall-view" => {
+                rockwall_view = true;
+                i += 1;
+            }
+            "--auto-start" => {
+                auto_start = true;
+                i += 1;
+            }
             "--report" => {
                 if let Some(v) = args.get(i + 1).filter(|v| !v.starts_with("--")) {
                     report = Some(PathBuf::from(v));
@@ -416,6 +432,8 @@ pub fn parse(args: &[String]) -> RunMode {
             audio_capture,
             auto_drive,
             audio_device,
+            rockwall_view,
+            auto_start,
         },
     }
 }
@@ -461,6 +479,8 @@ mod tests {
                 audio_capture,
                 auto_drive,
                 audio_device,
+                rockwall_view,
+                auto_start,
             } => {
                 assert_eq!(gpu, 0);
                 assert_eq!(weather, Weather::Auto);
@@ -477,6 +497,8 @@ mod tests {
                 assert_eq!(audio_capture, None);
                 assert_eq!(auto_drive, None);
                 assert_eq!(audio_device, None);
+                assert!(!rockwall_view);
+                assert!(!auto_start);
             }
             _ => panic!("expected interactive mode"),
         }
@@ -634,6 +656,14 @@ mod tests {
     }
 
     #[test]
+    fn rockwall_view_flag_is_parsed() {
+        match parse_args(&["--rockwall-view"]) {
+            RunMode::Interactive { rockwall_view, .. } => assert!(rockwall_view),
+            _ => panic!("expected interactive mode"),
+        }
+    }
+
+    #[test]
     fn audio_capture_without_value_is_ignored() {
         match parse_args(&["--audio-capture"]) {
             RunMode::Interactive { audio_capture, .. } => assert_eq!(audio_capture, None),
@@ -665,6 +695,14 @@ mod tests {
     fn audio_device_flag_is_parsed() {
         match parse_args(&["--audio-device", "2"]) {
             RunMode::Interactive { audio_device, .. } => assert_eq!(audio_device, Some(2)),
+            _ => panic!("expected interactive mode"),
+        }
+    }
+
+    #[test]
+    fn auto_start_flag_is_parsed() {
+        match parse_args(&["--auto-start"]) {
+            RunMode::Interactive { auto_start, .. } => assert!(auto_start),
             _ => panic!("expected interactive mode"),
         }
     }

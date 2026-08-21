@@ -24,12 +24,15 @@ pub const RISE_START: f32 = ROAD_HALF + 1.9;
 /// Lateral band over which the valley wall (hill ramp) goes 0 → 1.
 const RISE_SPAN: f32 = 10.0;
 /// Full rolling-hill amplitude (metres), reached where the ramp saturates.
-const HILL_AMP: f32 = 5.0;
-/// Lattice cell sizes (metres) of the two hill-noise octaves.
-const NOISE_CELL: f32 = 14.0;
-const NOISE_CELL_2: f32 = 28.0;
+const HILL_AMP: f32 = 4.2;
+/// Lattice cell sizes (metres) of the two hill-noise octaves. Kept wide so
+/// rock faces read as broad smooth slopes instead of a repeating bumpy grid;
+/// see `value_noise` (quintic, C²) and the mesh's adaptive step on steep
+/// slopes for the rest of the smoothing.
+const NOISE_CELL: f32 = 18.0;
+const NOISE_CELL_2: f32 = 36.0;
 /// Weight of the second (broader) hill octave; the rest is the first octave.
-const HILL_OCTAVE_2: f32 = 0.5;
+const HILL_OCTAVE_2: f32 = 0.4;
 /// Metres the ground gains toward the horizon, turning the sides into a
 /// mountain backdrop instead of flat land.
 const FOOTHILL_RISE: f32 = 18.0;
@@ -193,13 +196,24 @@ fn value_noise(s: f32, d: f32, cell: f32, xsalt: f32, ysalt: f32) -> f32 {
     let y0 = y.floor();
     let fx = x - x0;
     let fy = y - y0;
+    // Quintic interpolation (C²): the height field's curvature is continuous
+    // across lattice walls, so directional light doesn't crease the surface
+    // into a regular grid of facets (cubic smoothstep leaves a second-derivative
+    // jump at every wall, which reads as the blocky relief on rock faces).
+    let sx = smoothstep5(fx);
+    let sy = smoothstep5(fy);
     let a = hash01(x0 * xsalt + y0 * ysalt);
     let b = hash01((x0 + 1.0) * xsalt + y0 * ysalt);
     let c = hash01(x0 * xsalt + (y0 + 1.0) * ysalt);
     let e = hash01((x0 + 1.0) * xsalt + (y0 + 1.0) * ysalt);
-    let sx = smoothstep(0.0, 1.0, fx);
-    let sy = smoothstep(0.0, 1.0, fy);
     mix(mix(a, b, sx), mix(c, e, sx), sy)
+}
+
+/// Smoothstep with zero first AND second derivative at both ends (quintic
+/// Hermite), used to interpolate the noise lattice smoothly.
+fn smoothstep5(t: f32) -> f32 {
+    let x = t.clamp(0.0, 1.0);
+    x * x * x * (x * (x * 6.0 - 15.0) + 10.0)
 }
 
 #[cfg(test)]

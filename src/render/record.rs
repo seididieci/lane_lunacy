@@ -115,6 +115,7 @@ pub fn record_frame_posted(
     world_chunks: &[WorldChunk],
     chunk_indices: &[i32],
     scene_framebuffer: Arc<Framebuffer>,
+    particle_framebuffer: Arc<Framebuffer>,
     post_framebuffer: Arc<Framebuffer>,
     hud_framebuffer: Arc<Framebuffer>,
     bloom_fbs: &[Arc<Framebuffer>],
@@ -152,6 +153,69 @@ pub fn record_frame_posted(
                 offscreen_view.clone(),
                 [w as u32, h as u32],
             );
+
+            // ---- Particle overlay (rain / mist / drift dust / night glows) ----
+            // The RT backend writes the scene color directly into the offscreen
+            // and has no depth buffer, so the CPU particle quads are composited
+            // in a dedicated color-only pass that *loads* the RT output. The
+            // shader occludes per-pixel against the raygen's linear-depth image
+            // (discards fragments behind geometry), so particles never overdraw
+            // cars while rain still shows over sky and road. Same draw order as
+            // the raster path: mist, then dust (alpha), then rain+lights
+            // (additive).
+            builder
+                .begin_render_pass(
+                    RenderPassBeginInfo {
+                        // The color attachment is `Load`: keep the RT image.
+                        clear_values: vec![None],
+                        ..RenderPassBeginInfo::framebuffer(particle_framebuffer)
+                    },
+                    SubpassBeginInfo {
+                        contents: SubpassContents::Inline,
+                        ..Default::default()
+                    },
+                )
+                .expect("begin rt particle render pass")
+                .set_viewport(0, [viewport.clone()].into_iter().collect())
+                .expect("set rt particle viewport");
+            let rt_depth = rt.depth_view();
+            let depth_sampler = post.depth_sampler.clone();
+            if !frame.mist_verts.is_empty() {
+                scene.draw_rt_particles(
+                    &mut builder,
+                    &scene.rt_dust_pipeline,
+                    &frame.mist_verts,
+                    &frame.uniforms,
+                    &frame.headlights,
+                    rt_depth.clone(),
+                    depth_sampler.clone(),
+                );
+            }
+            if !frame.dust_verts.is_empty() {
+                scene.draw_rt_particles(
+                    &mut builder,
+                    &scene.rt_dust_pipeline,
+                    &frame.dust_verts,
+                    &frame.uniforms,
+                    &frame.headlights,
+                    rt_depth.clone(),
+                    depth_sampler.clone(),
+                );
+            }
+            if !frame.particle_verts.is_empty() {
+                scene.draw_rt_particles(
+                    &mut builder,
+                    &scene.rt_particle_pipeline,
+                    &frame.particle_verts,
+                    &frame.uniforms,
+                    &frame.headlights,
+                    rt_depth,
+                    depth_sampler,
+                );
+            }
+            builder
+                .end_render_pass(SubpassEndInfo::default())
+                .expect("end rt particle render pass");
         }
         None => {
             // One clear value per attachment: the color and depth are `Clear`,
