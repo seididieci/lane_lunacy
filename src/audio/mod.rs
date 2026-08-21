@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: MIT
 
+mod capture;
+pub use capture::{AudioCapture, SharedCapture, TraceSample};
+
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use rodio::buffer::SamplesBuffer;
@@ -109,10 +112,10 @@ pub enum Sfx {
 /// Parameters shared between the game thread and the engine-sound source.
 ///
 /// The game publishes the raw vehicle state (`speed_mps`, `gear`, `dt`,
-/// `frame`) once per frame; a dedicated param thread re-samples that state at
-/// ~480 Hz, reconstructing the continuous rev curve with a first-order hold, so
-/// the audio never sees the render loop's 60 Hz quantization. `rpm` and `speed`
-/// are the thread's outputs; the engine source reads only those.
+/// `frame`) once per frame. The engine source itself reconstructs the
+/// continuous rev curve with a sample-accurate first-order hold (clocked by the
+/// audio sample counter, not a wall-clock thread), so the pitch never sees the
+/// render loop's quantization and cannot be starved into stepping.
 struct EngineParams {
     /// Published by the game: road speed in m/s.
     speed_mps: AtomicU32,
@@ -122,11 +125,13 @@ struct EngineParams {
     dt: AtomicU32,
     /// Published by the game: monotonic frame counter (bumped every frame).
     frame: AtomicU32,
-    /// Written by the param thread: revs fraction in 0..=1.
-    rpm: AtomicU32,
-    /// Written by the param thread: road speed in km/h (drives wind).
-    speed: AtomicU32,
-    /// Written by the game: engine blown flag.
+    /// Written by the engine when capturing: the fundamental actually used (Hz).
+    audio_hz: AtomicU32,
+    /// Written by the engine when capturing: the smoothed revs used for pitch.
+    audio_smooth_rpm: AtomicU32,
+    /// Written by the engine when capturing: absolute sample index.
+    audio_sample_idx: AtomicU64,
+    /// Published by the game: engine blown flag.
     blown: AtomicBool,
 }
 
@@ -137,17 +142,68 @@ impl Default for EngineParams {
             gear: AtomicU32::new(1),
             dt: AtomicU32::new(f32::to_bits(1.0 / 60.0)),
             frame: AtomicU32::new(0),
-            rpm: AtomicU32::new(f32::to_bits(0.0)),
-            speed: AtomicU32::new(f32::to_bits(0.0)),
+            audio_hz: AtomicU32::new(f32::to_bits(0.0)),
+            audio_smooth_rpm: AtomicU32::new(f32::to_bits(0.0)),
+            audio_sample_idx: AtomicU64::new(0),
             blown: AtomicBool::new(false),
         }
     }
 }
 
+/// Push a high-rate capture sample every this many engine samples (48 = 1 kHz
+/// at 48 kHz).
+const TRACE_EVERY_SAMPLES: u64 = 48;
+
 const SAMPLE_RATE: u32 = 48_000;
 
-/// How many harmonics the procedural engine stacks up (sawtooth-ish timbre).
-const HARMONIC_COUNT: usize = 6;
+/// Output stream period size in frames (double-buffered by cpal).
+/// Debug builds run the unoptimized audio callback too slowly for a tight
+/// buffer, so keep a generous period there to avoid underruns/stepping;
+/// release keeps a low-latency buffer so the pitch stays glued to the needle.
+#[cfg(debug_assertions)]
+const OUTPUT_PERIOD_FRAMES: u32 = 2400; // ~50 ms
+#[cfg(not(debug_assertions))]
+const OUTPUT_PERIOD_FRAMES: u32 = 1024; // ~21 ms
+
+/// Reference fundamental of the pre-rendered engine loop (Hz). Midpoint of the
+/// 55..165 base range, so runtime resampling stays within 0.55..=1.65x.
+const LOOP_F0: f32 = 100.0;
+/// Duration of the pre-rendered engine loop (seconds). 1.5 s at f0 = 100 Hz is
+/// 150 integer cycles, so the loop wraps seamlessly.
+const LOOP_DURATION_S: f32 = 1.5;
+/// How many harmonics are baked into the loop. At redline the top harmonic
+/// (128 * 165 Hz) stays just under Nyquist.
+const LOOP_HARMONICS: usize = 128;
+/// High-harmonic rolloff: harmonics above this frequency get an extra -6 dB/oct
+/// so the tone stays warm instead of buzzing like a plain sawtooth.
+const LOOP_ROLLOFF_HZ: f32 = 2000.0;
+/// Exhaust formant: a gentle mid-band boost so the tone reads as an engine
+/// rather than an oscillator.
+const FORMANT_CENTER_HZ: f32 = 1200.0;
+const FORMANT_WIDTH_HZ: f32 = 600.0;
+const FORMANT_GAIN: f32 = 1.5;
+
+/// Gain of the sub-harmonic (fundamental / 2) for the deep V8-style rumble.
+const SUB_HARMONIC_GAIN: f32 = 0.6;
+
+/// Fractional amplitude boost applied at each combustion pulse.
+const PULSE_DEPTH: f32 = 0.2;
+
+/// Combustion-pulse envelope decay time constant, in seconds.
+const PULSE_DECAY_S: f32 = 0.008;
+
+/// Exhaust noise level (broadband "air"/hiss) baked into the loop.
+const EXHAUST_LEVEL: f32 = 0.09;
+
+/// Low-pass cutoff of the baked exhaust noise, in Hz.
+const EXHAUST_CUTOFF_HZ: f32 = 1600.0;
+
+/// Level of the brief noise burst fired alongside each combustion pulse.
+const FIRE_NOISE_LEVEL: f32 = 0.10;
+
+/// Idle "lope": amplitude-wobble depth and rate that fade out as revs rise.
+const LOPE_DEPTH: f32 = 0.05;
+const LOPE_RATE_HZ: f32 = 7.0;
 
 /// First-order-hold reconstruction of the rev curve: interpolate the road speed
 /// between the previous and current frame's published samples, then map it
@@ -163,68 +219,120 @@ fn interpolated_rpm_frac(speed_prev: f32, speed_now: f32, frac: f32, gear: u32) 
     }
 }
 
-/// Re-samples the game's per-frame vehicle state at ~480 Hz and publishes fresh
-/// `rpm`/`speed` to the engine source. Between game frames the road speed is
-/// linearly interpolated, so the pitch glides continuously instead of stepping
-/// at the render loop's cadence. The thread is fire-and-forget; it shares the
-/// same `EngineParams` Arc across device switches.
-fn spawn_param_thread(params: Arc<EngineParams>) {
-    std::thread::spawn(move || {
-        let mut prev_speed = 0.0f32;
-        let mut prev_frame = 0u32;
-        let mut frame_start = std::time::Instant::now();
-        let mut frame_dt = 1.0 / 60.0;
-        let mut last_speed = 0.0f32;
-        loop {
-            std::thread::sleep(std::time::Duration::from_micros(2_000));
-            let frame = params.frame.load(Ordering::Relaxed);
-            let speed = f32::from_bits(params.speed_mps.load(Ordering::Relaxed));
-            let gear = params.gear.load(Ordering::Relaxed);
-            if frame != prev_frame {
-                prev_speed = last_speed;
-                prev_frame = frame;
-                frame_start = std::time::Instant::now();
-                frame_dt = f32::from_bits(params.dt.load(Ordering::Relaxed))
-                    .clamp(1.0 / 240.0, 1.0 / 15.0);
-            }
-            last_speed = speed;
-            let elapsed = (std::time::Instant::now() - frame_start).as_secs_f32();
-            let frac = if frame_dt > 0.0 {
-                (elapsed / frame_dt).clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-            let rpm_frac = interpolated_rpm_frac(prev_speed, speed, frac, gear);
-            params.rpm.store(rpm_frac.to_bits(), Ordering::Relaxed);
-            let interp = prev_speed + (speed - prev_speed) * frac;
-            params
-                .speed
-                .store((interp * 3.6).max(0.0).to_bits(), Ordering::Relaxed);
+/// Renders the reference engine loop: a dense `LOOP_HARMONICS` harmonic body at
+/// `f0`, a sub-harmonic rumble at f0/2, a per-cycle combustion pulse, and a
+/// baked low-passed exhaust noise bed with a burst per firing. `duration_s` must
+/// contain an integer number of cycles at `f0` so the loop wraps seamlessly.
+/// This is the "loop + resample" engine pattern used by TORCS/SuperTuxKart:
+/// runtime pitch is a phase ramp over this dense spectrum, so it glides
+/// smoothly with no sparse-line "steps".
+fn render_engine_loop(f0: f32, duration_s: f32) -> Vec<f32> {
+    let len = (SAMPLE_RATE as f32 * duration_s) as usize;
+    let mut out = Vec::with_capacity(len);
+    let mut seed = 0x1234_5678_9ABC_DEF0u64;
+    let lp_alpha = std::f32::consts::TAU * EXHAUST_CUTOFF_HZ / SAMPLE_RATE as f32;
+    let pulse_decay = (-1.0 / (SAMPLE_RATE as f32 * PULSE_DECAY_S)).exp();
+    let mut exhaust_lp = 0.0f32;
+    let mut pulse = 0.0f32;
+    let mut prev_phase = 0.0f32;
+    for i in 0..len {
+        let t = i as f32 / SAMPLE_RATE as f32;
+        let phase = (t * f0) % 1.0;
+        // Dense harmonic body with a high-end rolloff and a mid-band formant.
+        let mut v = 0.0f32;
+        for n in 1..=LOOP_HARMONICS {
+            let f = f0 * n as f32;
+            let amp = (1.0 / n as f32)
+                * (LOOP_ROLLOFF_HZ / f).min(1.0)
+                * (1.0
+                    + FORMANT_GAIN
+                        * (-((f - FORMANT_CENTER_HZ) / FORMANT_WIDTH_HZ).powi(2)).exp());
+            v += (std::f32::consts::TAU * phase * n as f32).sin() * amp;
         }
-    });
+        // Normalize to ~a unit sawtooth peak, then add the sub-harmonic rumble.
+        v /= std::f32::consts::FRAC_PI_2;
+        v += (std::f32::consts::TAU * t * f0 * 0.5).sin() * SUB_HARMONIC_GAIN;
+
+        // Combustion pulse at each cycle start.
+        if phase < prev_phase {
+            pulse = 1.0;
+        }
+        let pulse_env = 1.0 + PULSE_DEPTH * pulse;
+        pulse *= pulse_decay;
+
+        // Exhaust: low-passed noise bed plus a noise burst on firing.
+        exhaust_lp += lp_alpha * (noise_rng(&mut seed) - exhaust_lp);
+        let exhaust = exhaust_lp * EXHAUST_LEVEL
+            + pulse * noise_rng(&mut seed) * FIRE_NOISE_LEVEL;
+
+        out.push(v * pulse_env + exhaust);
+        prev_phase = phase;
+    }
+    out
 }
 
-/// Procedural engine source. A harmonic stack whose fundamental tracks the
-/// (smoothed) RPM, layered with a touch of white-noise roughness and
-/// speed-proportional wind, then saturated with a soft tanh. Runs forever on
-/// the audio thread; the game writes `EngineParams`.
+/// Procedural engine source built from a pre-rendered dense loop. The loop is
+/// resampled with an `f64` phase accumulator so the pitch is a sample-accurate
+/// ramp (no stepping), and the baked-in dense spectrum glides smoothly instead
+/// of reading as discrete organ-like notes. An idle lope and speed-proportional
+/// wind are layered at runtime, then saturated with a soft tanh.
 struct EngineSound {
     params: Arc<EngineParams>,
-    /// Phase of each harmonic in 0..1.
-    phases: [f32; HARMONIC_COUNT],
+    /// Pre-rendered dense reference engine loop.
+    loop_buf: Arc<Vec<f32>>,
+    /// Reference fundamental the loop was rendered at.
+    f0: f32,
+    /// Fractional read position (in samples) into the loop.
+    read_pos: f64,
+    /// Idle-lope phase, in seconds.
+    lope_time: f32,
     noise_state: u64,
     smooth_rpm: f32,
     smooth_speed: f32,
+    /// Precomputed one-pole coefficients (no per-sample `exp`).
+    rpm_alpha: f32,
+    speed_alpha: f32,
+    /// Sample-accurate first-order hold state: last seen frame counter, the
+    /// previous frame's speed, and how many samples have elapsed in the frame.
+    last_frame: u32,
+    prev_speed: f32,
+    last_speed: f32,
+    samples_in_frame: u64,
+    /// Measured length (in samples) of the previous frame, used to size the
+    /// current ramp so it completes when the next frame arrives — regardless of
+    /// how fast the audio clock runs relative to the game.
+    prev_frame_len: u64,
+    /// Absolute sample counter (for the capture trace).
+    sample_count: u64,
+    /// Optional diagnostic capture sink (audio thread pushes only).
+    capture: Option<SharedCapture>,
 }
 
 impl EngineSound {
-    fn new(params: Arc<EngineParams>) -> Self {
+    fn new(
+        params: Arc<EngineParams>,
+        loop_buf: Arc<Vec<f32>>,
+        f0: f32,
+        capture: Option<SharedCapture>,
+    ) -> Self {
         EngineSound {
             params,
-            phases: [0.0; HARMONIC_COUNT],
+            loop_buf,
+            f0,
+            read_pos: 0.0,
+            lope_time: 0.0,
             noise_state: 0x9E37_79B9_7F4A_7C15,
             smooth_rpm: 0.0,
             smooth_speed: 0.0,
+            rpm_alpha: 1.0 - (-1.0 / (SAMPLE_RATE as f32 * 0.012)).exp(),
+            speed_alpha: 1.0 - (-1.0 / (SAMPLE_RATE as f32 * 0.1)).exp(),
+            last_frame: 0,
+            prev_speed: 0.0,
+            last_speed: 0.0,
+            samples_in_frame: 0,
+            prev_frame_len: SAMPLE_RATE as u64 / 60,
+            sample_count: 0,
+            capture,
         }
     }
 
@@ -233,33 +341,80 @@ impl EngineSound {
         55.0 + 110.0 * revs.clamp(0.0, 1.0)
     }
 
-    /// One-pole smoothing of the thread-published revs and road speed. The param
-    /// thread already feeds ~480 Hz first-order-hold samples, so a short 20 ms
-    /// constant rounds the residual micro-steps and gear-shift jumps without
-    /// adding perceptible lag; speed (wind texture) keeps a gentler 100 ms.
+    /// Reconstructs the rev curve with a sample-accurate first-order hold,
+    /// clocked by the audio sample counter (not a wall-clock thread, so it can
+    /// never be starved into stepping). Between the game's per-frame samples the
+    /// road speed is linearly interpolated over the *measured* length of the
+    /// previous frame, so the ramp always completes when the next frame arrives
+    /// — whether the audio clock runs real-time, faster, or slower than the
+    /// game. The result is one-pole smoothed into `smooth_rpm` (pitch) and
+    /// `smooth_speed` (wind).
     fn advance(&mut self) {
-        let rpm = f32::from_bits(self.params.rpm.load(Ordering::Relaxed));
-        let alpha = 1.0 - (-1.0 / (SAMPLE_RATE as f32 * 0.02)).exp();
-        self.smooth_rpm += (rpm - self.smooth_rpm) * alpha;
-        let speed = f32::from_bits(self.params.speed.load(Ordering::Relaxed));
-        let speed_alpha = 1.0 - (-1.0 / (SAMPLE_RATE as f32 * 0.1)).exp();
-        self.smooth_speed += (speed - self.smooth_speed) * speed_alpha;
+        let frame = self.params.frame.load(Ordering::Relaxed);
+        let speed = f32::from_bits(self.params.speed_mps.load(Ordering::Relaxed));
+        let gear = self.params.gear.load(Ordering::Relaxed);
+        if frame != self.last_frame {
+            self.prev_speed = self.last_speed;
+            if self.samples_in_frame > 0 {
+                self.prev_frame_len = self.samples_in_frame;
+            }
+            self.last_frame = frame;
+            self.samples_in_frame = 0;
+        }
+        self.last_speed = speed;
+
+        let frac = (self.samples_in_frame as f32 / self.prev_frame_len as f32).clamp(0.0, 1.0);
+        self.samples_in_frame += 1;
+
+        let rpm_frac = interpolated_rpm_frac(self.prev_speed, speed, frac, gear);
+        self.smooth_rpm += (rpm_frac - self.smooth_rpm) * self.rpm_alpha;
+        let interp = self.prev_speed + (speed - self.prev_speed) * frac;
+        self.smooth_speed += (interp * 3.6 - self.smooth_speed) * self.speed_alpha;
     }
 
-    /// Advances the engine and returns the raw harmonic-stack sample (before
-    /// the noise layers and final mix), so tests can measure pitch directly.
+    /// Advances the engine and returns the interpolated loop sample at the
+    /// current pitch (before the runtime noise layers), so tests can measure
+    /// pitch directly. The read position is a continuous `f64` phase ramp, so
+    /// the pitch cannot quantize to discrete steps.
     fn next_osc(&mut self) -> f32 {
         self.advance();
         let hz = Self::base_hz(self.smooth_rpm);
-        let mut v = 0.0f32;
-        for n in 1..=HARMONIC_COUNT {
-            let i = n - 1;
-            self.phases[i] += (hz * n as f32) / SAMPLE_RATE as f32;
-            if self.phases[i] >= 1.0 {
-                self.phases[i] -= 1.0;
-            }
-            v += (self.phases[i] * std::f32::consts::TAU).sin() * (1.0 / n as f32);
+        let len = self.loop_buf.len() as f64;
+        self.read_pos += (hz / self.f0) as f64 * (len / SAMPLE_RATE as f64);
+        if self.read_pos >= len {
+            self.read_pos -= len;
         }
+        let i = self.read_pos.floor() as usize;
+        let frac = (self.read_pos - i as f64) as f32;
+        let a = self.loop_buf[i];
+        let b = self.loop_buf[(i + 1) % self.loop_buf.len()];
+        let v = a + (b - a) * frac;
+
+        // Diagnostic capture: publish the live pitch/revs and a 1 kHz trace.
+        // All gated by one Relaxed load; no I/O or allocation happens here.
+        if let Some(cap) = &self.capture {
+            if cap.is_enabled() {
+                self.params
+                    .audio_hz
+                    .store(hz.to_bits(), Ordering::Relaxed);
+                self.params
+                    .audio_smooth_rpm
+                    .store(self.smooth_rpm.to_bits(), Ordering::Relaxed);
+                self.params
+                    .audio_sample_idx
+                    .store(self.sample_count, Ordering::Relaxed);
+                if self.sample_count.is_multiple_of(TRACE_EVERY_SAMPLES) {
+                    cap.push(TraceSample {
+                        sample_idx: self.sample_count,
+                        frame: self.params.frame.load(Ordering::Relaxed),
+                        samples_in_frame: self.samples_in_frame,
+                        smooth_rpm: self.smooth_rpm,
+                        hz,
+                    });
+                }
+            }
+        }
+        self.sample_count += 1;
         v
     }
 
@@ -267,12 +422,20 @@ impl EngineSound {
         let osc = self.next_osc();
         let revs = self.smooth_rpm;
         let blown = self.params.blown.load(Ordering::Relaxed);
-        // A touch of roughness keeps it organic; wind rises with road speed.
-        let roughness = self.next_noise() * if blown { 0.12 } else { 0.03 };
+
+        // Idle lope: a slow amplitude wobble that fades out as revs rise.
+        self.lope_time += 1.0 / SAMPLE_RATE as f32;
+        let lope = 1.0
+            + LOPE_DEPTH
+                * (std::f32::consts::TAU * LOPE_RATE_HZ * self.lope_time).sin()
+                * (1.0 - revs);
+
+        // Wind rises with road speed.
         let wind = self.next_noise() * (self.smooth_speed / 340.0).clamp(0.0, 1.0) * 0.2;
+
         let amp = if blown { 0.05 } else { 0.5 + 0.3 * revs };
 
-        (osc * amp + wind + roughness).tanh()
+        (osc * amp * lope + wind).tanh()
     }
 
     fn next_noise(&mut self) -> f32 {
@@ -422,11 +585,16 @@ fn resolve_device(device_index: usize) -> Option<Device> {
 fn open_players(
     stream: &MixerDeviceSink,
     params: &Arc<EngineParams>,
+    loop_buf: &Arc<Vec<f32>>,
+    capture: Option<SharedCapture>,
     settings: AudioSettings,
 ) -> (Player, Player, Player) {
     let mixer = stream.mixer();
     let engine = Player::connect_new(mixer);
-    engine.append(EngineSound::new(params.clone()).repeat_infinite());
+    engine.append(
+        EngineSound::new(params.clone(), loop_buf.clone(), LOOP_F0, capture)
+            .repeat_infinite(),
+    );
     let sfx = Player::connect_new(mixer);
     let music = Player::connect_new(mixer);
 
@@ -454,31 +622,48 @@ pub struct AudioEngine {
     sfx: Player,
     music: Option<Player>,
     params: Arc<EngineParams>,
+    loop_buf: Arc<Vec<f32>>,
+    capture: Option<SharedCapture>,
     sfx_buffers: SfxBuffers,
     applied: AudioSettings,
 }
 
 impl AudioEngine {
-    pub fn init(settings: AudioSettings) -> Option<AudioEngine> {
+    pub fn init(settings: AudioSettings, capture: Option<SharedCapture>) -> Option<AudioEngine> {
         let device = resolve_device(settings.device_index)?;
         let mut stream = DeviceSinkBuilder::from_device(device)
             .ok()?
+            .with_buffer_size(cpal::BufferSize::Fixed(OUTPUT_PERIOD_FRAMES))
             .with_error_callback(ignore_benign_alsa_errors)
             .open_sink_or_fallback()
             .ok()?;
         stream.log_on_drop(false);
         let params = Arc::new(EngineParams::default());
-        let (engine, sfx, music) = open_players(&stream, &params, settings);
-        spawn_param_thread(params.clone());
+        let loop_buf = Arc::new(render_engine_loop(LOOP_F0, LOOP_DURATION_S));
+        let (engine, sfx, music) = open_players(&stream, &params, &loop_buf, capture.clone(), settings);
         Some(AudioEngine {
             _stream: stream,
             engine,
             sfx,
             music: Some(music),
             params,
+            loop_buf,
+            capture,
             sfx_buffers: SfxBuffers::new(),
             applied: settings,
         })
+    }
+
+    /// Current engine pitch state for the diagnostic capture: (smooth_rpm, hz).
+    pub fn engine_state(&self) -> (f32, f32) {
+        let rpm = f32::from_bits(self.params.audio_smooth_rpm.load(Ordering::Relaxed));
+        let hz = f32::from_bits(self.params.audio_hz.load(Ordering::Relaxed));
+        (rpm, hz)
+    }
+
+    /// Absolute sample index of the engine source (for capture alignment).
+    pub fn engine_sample_idx(&self) -> u64 {
+        self.params.audio_sample_idx.load(Ordering::Relaxed)
     }
 
     /// The device index currently in effect.
@@ -519,11 +704,13 @@ impl AudioEngine {
         let device = resolve_device(device_index).ok_or(())?;
         let mut stream = DeviceSinkBuilder::from_device(device)
             .map_err(|_| ())?
+            .with_buffer_size(cpal::BufferSize::Fixed(OUTPUT_PERIOD_FRAMES))
             .with_error_callback(ignore_benign_alsa_errors)
             .open_sink_or_fallback()
             .map_err(|_| ())?;
         stream.log_on_drop(false);
-        let (engine, sfx, music) = open_players(&stream, &self.params, self.applied);
+        let (engine, sfx, music) =
+            open_players(&stream, &self.params, &self.loop_buf, self.capture.clone(), self.applied);
         self._stream = stream;
         self.engine = engine;
         self.sfx = sfx;
@@ -532,9 +719,10 @@ impl AudioEngine {
         Ok(())
     }
 
-    /// Publishes the live vehicle state for the param thread. `speed_mps`/`gear`
-    /// are the raw physics values, `dt` the frame duration, and `frame` a
-    /// monotonically increasing per-frame counter (bumped once per frame).
+    /// Publishes the live vehicle state for the engine source. `speed_mps`/`gear`
+    /// are the raw physics values, `dt` the (physics-clamped) frame duration,
+    /// and `frame` a monotonically increasing per-frame counter (bumped once per
+    /// frame). The engine source reconstructs the rev curve itself.
     pub fn set_engine(&self, speed_mps: f32, gear: u32, dt: f32, frame: u32, blown: bool) {
         self.params
             .speed_mps
@@ -556,6 +744,74 @@ impl AudioEngine {
             buffer,
         );
         self.sfx.append(source);
+    }
+}
+
+/// Sample-space engine runner for the headless `--drive --audio-capture` path.
+///
+/// Reproduces the interactive audio pipeline faithfully without a cpal device:
+/// the game publishes state once per frame and the runner advances the engine
+/// by exactly `dt * SAMPLE_RATE` samples per frame — the same sample-per-frame
+/// ratio a real-time 48 kHz stream under a 60 Hz game would see. This keeps the
+/// capture's timing identical to what the player hears, even when the host has
+/// no real-time output device.
+pub struct EngineRunner {
+    params: Arc<EngineParams>,
+    engine: EngineSound,
+}
+
+impl EngineRunner {
+    pub fn new(capture: Option<SharedCapture>) -> EngineRunner {
+        let params = Arc::new(EngineParams::default());
+        let loop_buf = Arc::new(render_engine_loop(LOOP_F0, LOOP_DURATION_S));
+        let engine = EngineSound::new(params.clone(), loop_buf, LOOP_F0, capture);
+        EngineRunner { params, engine }
+    }
+
+    /// Publishes the live vehicle state (mirrors `AudioEngine::set_engine`).
+    pub fn set_engine(&self, speed_mps: f32, gear: u32, dt: f32, frame: u32, blown: bool) {
+        self.params
+            .speed_mps
+            .store(speed_mps.max(0.0).to_bits(), Ordering::Relaxed);
+        self.params.gear.store(gear, Ordering::Relaxed);
+        self.params
+            .dt
+            .store(dt.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+        self.params.frame.store(frame, Ordering::Relaxed);
+        self.params.blown.store(blown, Ordering::Relaxed);
+    }
+
+    /// Advances one game frame's worth of samples at 48 kHz.
+    pub fn advance_frame(&mut self) {
+        let dt = f32::from_bits(self.params.dt.load(Ordering::Relaxed))
+            .clamp(1.0 / 240.0, 1.0 / 15.0);
+        let samples = (dt * SAMPLE_RATE as f32).round().max(1.0) as usize;
+        for _ in 0..samples {
+            self.engine.next_osc();
+        }
+    }
+
+    /// Advances one frame, pushing the final output samples (after tanh) into
+    /// `out` so the actual audible signal can be rendered to a WAV.
+    pub fn advance_frame_into(&mut self, out: &mut Vec<f32>) {
+        let dt = f32::from_bits(self.params.dt.load(Ordering::Relaxed))
+            .clamp(1.0 / 240.0, 1.0 / 15.0);
+        let samples = (dt * SAMPLE_RATE as f32).round().max(1.0) as usize;
+        for _ in 0..samples {
+            out.push(self.engine.next_value());
+        }
+    }
+
+    /// Current pitch state as (smooth_rpm, hz).
+    pub fn state(&self) -> (f32, f32) {
+        let rpm = f32::from_bits(self.params.audio_smooth_rpm.load(Ordering::Relaxed));
+        let hz = f32::from_bits(self.params.audio_hz.load(Ordering::Relaxed));
+        (rpm, hz)
+    }
+
+    /// Absolute sample index of the engine source.
+    pub fn sample_idx(&self) -> u64 {
+        self.params.audio_sample_idx.load(Ordering::Relaxed)
     }
 }
 
@@ -600,10 +856,12 @@ mod tests {
     fn engine_source_always_yields_and_never_ends() {
         let params = Arc::new(EngineParams::default());
         params
-            .rpm
-            .store(f32::to_bits(0.5), Ordering::Relaxed);
-        params.speed.store(f32::to_bits(120.0), Ordering::Relaxed);
-        let mut engine = EngineSound::new(params);
+            .speed_mps
+            .store(f32::to_bits(30.0), Ordering::Relaxed);
+        params.gear.store(2, Ordering::Relaxed);
+        params.dt.store(f32::to_bits(1.0 / 60.0), Ordering::Relaxed);
+        params.frame.store(1, Ordering::Relaxed);
+        let mut engine = EngineSound::new(params, test_loop(), 100.0, None);
         assert_eq!(engine.current_span_len(), None);
         assert_eq!(engine.channels().get(), 1);
         assert_eq!(engine.sample_rate().get(), SAMPLE_RATE);
@@ -624,28 +882,53 @@ mod tests {
         assert!((EngineSound::base_hz(0.5) - 110.0).abs() < 1e-5);
     }
 
+    /// A small engine loop for tests (5 cycles, cheap to render).
+    fn test_loop() -> Arc<Vec<f32>> {
+        Arc::new(render_engine_loop(100.0, 0.05))
+    }
+
     #[test]
-    fn engine_pitch_tracks_the_revs() {
-        let crossings = |rpm: f32| {
+    fn engine_loop_is_seamless() {
+        let loop_buf = render_engine_loop(100.0, 0.05);
+        // Integer number of cycles at f0, so the loop wraps seamlessly.
+        let cycles = (LOOP_F0 * 0.05).fract().abs();
+        assert!(cycles < 1e-4, "loop must contain whole cycles");
+        assert!(!loop_buf.is_empty());
+        assert!(loop_buf.iter().all(|v| v.is_finite()));
+        // The waveform is non-trivial: it both crosses zero and has energy.
+        assert!(loop_buf.iter().any(|&v| v > 0.5));
+        assert!(loop_buf.iter().any(|&v| v < -0.5));
+    }
+
+    #[test]
+    fn engine_loop_resample_tracks_revs() {
+        // The read position advances in proportion to the fundamental (55 vs
+        // 165 Hz => exactly 3x), so the pitch is a smooth, sample-accurate ramp.
+        let measure = |rpm: f32| {
             let params = Arc::new(EngineParams::default());
-            params.rpm.store(f32::to_bits(rpm), Ordering::Relaxed);
-            let mut engine = EngineSound::new(params);
-            let mut count = 0usize;
-            let mut prev = engine.next_osc();
-            for _ in 1..SAMPLE_RATE as usize {
-                let v = engine.next_osc();
-                if (prev < 0.0) != (v < 0.0) {
-                    count += 1;
-                }
-                prev = v;
+            let redline = crate::game::vehicle::redline_speed(1);
+            params
+                .speed_mps
+                .store(f32::to_bits(redline * rpm), Ordering::Relaxed);
+            params.gear.store(1, Ordering::Relaxed);
+            params.dt.store(f32::to_bits(1.0 / 60.0), Ordering::Relaxed);
+            params.frame.store(1, Ordering::Relaxed);
+            let mut engine = EngineSound::new(params, test_loop(), 100.0, None);
+            for _ in 0..(SAMPLE_RATE as f32 * 0.15) as usize {
+                engine.next_osc();
             }
-            count
+            let start = engine.read_pos;
+            for _ in 0..(SAMPLE_RATE as f32 * 0.1) as usize {
+                engine.next_osc();
+            }
+            engine.read_pos - start
         };
-        let idle = crossings(0.0);
-        let redline = crossings(1.0);
+        let idle = measure(0.0);
+        let redline = measure(1.0);
+        let ratio = redline / idle;
         assert!(
-            redline > idle * 2,
-            "redline ({redline}) should cross zero far more often than idle ({idle})"
+            (ratio - 3.0).abs() < 0.05,
+            "revs ratio should be 3x, got {ratio}"
         );
     }
 
@@ -655,8 +938,14 @@ mod tests {
         // ~100 ms (5x the 20 ms constant) it should be within 1% of target, and
         // mid-way it must still be moving (monotonic, bounded) — not snapped.
         let params = Arc::new(EngineParams::default());
-        params.rpm.store(1.0_f32.to_bits(), Ordering::Relaxed);
-        let mut engine = EngineSound::new(params);
+        let redline = crate::game::vehicle::redline_speed(1);
+        params
+            .speed_mps
+            .store(f32::to_bits(redline), Ordering::Relaxed);
+        params.gear.store(1, Ordering::Relaxed);
+        params.dt.store(f32::to_bits(1.0 / 60.0), Ordering::Relaxed);
+        params.frame.store(1, Ordering::Relaxed);
+        let mut engine = EngineSound::new(params, test_loop(), 100.0, None);
         let mid = (SAMPLE_RATE as f32 * 0.02) as usize;
         for _ in 0..mid {
             engine.next_osc();
@@ -672,6 +961,46 @@ mod tests {
         assert!(
             (engine.smooth_rpm - 1.0).abs() < 0.01,
             "one-pole should converge within ~100 ms, got {}",
+            engine.smooth_rpm
+        );
+    }
+
+    #[test]
+    fn engine_revs_rise_monotonically_under_constant_accel() {
+        // Publish speed rising linearly (constant accel) across several frames
+        // and confirm the sample-accurate hold yields a smoothly rising revs
+        // curve with no frame-quantized zigzag or dip.
+        let params = Arc::new(EngineParams::default());
+        let redline = crate::game::vehicle::redline_speed(1);
+        params.gear.store(1, Ordering::Relaxed);
+        params.dt.store(f32::to_bits(1.0 / 60.0), Ordering::Relaxed);
+        let mut engine = EngineSound::new(params.clone(), test_loop(), 100.0, None);
+        let frame_len = (SAMPLE_RATE as f32 / 60.0) as usize;
+        let mut prev = engine.smooth_rpm;
+        for f in 1..=6u32 {
+            let speed = redline * (f as f32 / 6.0);
+            params.speed_mps.store(f32::to_bits(speed), Ordering::Relaxed);
+            params.frame.store(f, Ordering::Relaxed);
+            for _ in 0..frame_len {
+                engine.next_osc();
+                assert!(
+                    engine.smooth_rpm >= prev - 1e-4,
+                    "smooth_rpm must not fall during acceleration"
+                );
+                prev = engine.smooth_rpm;
+            }
+        }
+        // Settle at the redline so the one-pole fully converges.
+        params.speed_mps.store(f32::to_bits(redline), Ordering::Relaxed);
+        for f in 7..=12u32 {
+            params.frame.store(f, Ordering::Relaxed);
+            for _ in 0..frame_len {
+                engine.next_osc();
+            }
+        }
+        assert!(
+            (engine.smooth_rpm - 1.0).abs() < 0.02,
+            "revs should converge to the redline, got {}",
             engine.smooth_rpm
         );
     }

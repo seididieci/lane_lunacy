@@ -19,7 +19,9 @@ use vulkano::image::{SampleCount, SampleCounts};
 use vulkano::instance::Instance;
 use vulkano::swapchain::Surface;
 
-use crate::audio::{enumerate_output_devices, AudioEngine, Sfx};
+use crate::audio::{
+    enumerate_output_devices, AudioCapture, AudioEngine, AudioSettings, SharedCapture, Sfx,
+};
 use crate::cli::PresentMode;
 use crate::debug::DebugStats;
 use crate::font::FontAtlas;
@@ -75,6 +77,11 @@ pub struct App {
     audio_prev_gear: u32,
     /// Monotonically increasing frame counter for the audio param thread.
     audio_frame: u32,
+    /// `--audio-capture <path.csv>`: per-frame game RPM vs audio pitch capture.
+    audio_capture: Option<SharedCapture>,
+    /// `--auto-drive <seconds>`: remaining seconds of scripted driving; the app
+    /// exits when it reaches zero.
+    auto_drive_remaining: Option<f32>,
     seed: u64,
     menu: MenuState,
     mode: AppMode,
@@ -126,6 +133,9 @@ impl App {
         fps_limit: Option<u32>,
         window_capture: Option<PathBuf>,
         capture_dir: Option<PathBuf>,
+        audio_capture: Option<PathBuf>,
+        auto_drive: Option<f32>,
+        audio_device: Option<usize>,
     ) -> Self {
         let mut game = Game::new();
         game.set_weather(weather);
@@ -166,10 +176,23 @@ impl App {
             audio_prev_perfect_timer: 0.0,
             audio_prev_gear: 1,
             audio_frame: 0,
+            audio_capture: audio_capture.and_then(|p| {
+                AudioCapture::open(&p)
+                    .inspect_err(|e| {
+                        eprintln!("audio capture: failed to open {}: {e}", p.display());
+                    })
+                    .ok()
+                    .map(Arc::new)
+            }),
+            auto_drive_remaining: auto_drive,
             seed,
             menu: MenuState {
                 settings: SettingsState {
                     raytrace,
+                    audio: AudioSettings {
+                        device_index: audio_device.unwrap_or(0),
+                        ..AudioSettings::default()
+                    },
                     ..SettingsState::default()
                 },
                 ..MenuState::new(gpu_index, weather)
@@ -288,7 +311,7 @@ impl App {
         let (audio_devices, audio_default) = enumerate_output_devices();
         self.audio_devices = audio_devices;
         self.audio_default = audio_default;
-        let audio = AudioEngine::init(self.menu.settings.audio);
+        let audio = AudioEngine::init(self.menu.settings.audio, self.audio_capture.clone());
         match &audio {
             Some(_) => {
                 for (i, name) in self.audio_devices.iter().enumerate() {
@@ -299,6 +322,9 @@ impl App {
             None => {
                 println!("audio: no output device available; running silent");
             }
+        }
+        if let Some(cap) = &self.audio_capture {
+            println!("audio capture enabled: {}", cap.path().display());
         }
         self.audio = audio;
 
@@ -435,6 +461,25 @@ impl App {
             self.audio_prev_gear = self.game.vehicle.gear;
         } else {
             audio.set_engine(0.0, 1, dt, self.audio_frame, self.game.engine_blown);
+        }
+
+        // Diagnostic capture: pair this frame's game state with the audio
+        // engine's live pitch, and drain the audio-thread trace into the CSV.
+        if let Some(cap) = &self.audio_capture {
+            if cap.is_enabled() {
+                let (arpm, ahz) = audio.engine_state();
+                cap.record_frame(
+                    self.ui_clock,
+                    self.audio_frame,
+                    dt,
+                    self.game.vehicle.speed,
+                    self.game.vehicle.gear,
+                    self.game.vehicle.rpm_frac(),
+                    arpm,
+                    ahz,
+                    audio.engine_sample_idx(),
+                );
+            }
         }
     }
 
@@ -764,13 +809,40 @@ impl ApplicationHandler for App {
             .unwrap_or(0.0);
         self.profile_frame_idx += 1;
 
+        // `--auto-drive`: script the driver and start/keep playing so the real
+        // vsync-paced render loop and cpal audio drive the capture, then exit.
+        if self.auto_drive_remaining.is_some() {
+            if matches!(self.mode, AppMode::Menu) {
+                self.game.set_difficulty(crate::game::DifficultyLevel::EasyArcade);
+                self.resume_game();
+            }
+            self.input.throttle = true;
+            self.input.brake = false;
+            self.input.steer = 0.0;
+            // Shift up only when the current gear has revved into the perfect
+            // shift band (0.78..0.90), so each gear sweeps the high-RPM range.
+            let gear = self.game.vehicle.gear;
+            self.input.gear_up = gear < 5
+                && self.game.vehicle.rpm_frac_for(gear) >= crate::game::vehicle::PERFECT_LO;
+            self.input.gear_down = false;
+            if let Some(remaining) = &mut self.auto_drive_remaining {
+                *remaining -= dt.as_secs_f32();
+                if *remaining <= 0.0 {
+                    _event_loop.exit();
+                }
+            }
+        }
+
         let sim_started = Instant::now();
         if matches!(self.mode, AppMode::Playing) {
             self.game.update(dt, &self.input);
             self.input.gear_up = false;
             self.input.gear_down = false;
         }
-        self.update_audio(dt.as_secs_f32());
+        // Publish the same dt the physics used (clamped to 50 ms) so the audio's
+        // first-order hold interpolates the actual speed trajectory.
+        let dt_secs = dt.as_secs_f32().min(0.05);
+        self.update_audio(dt_secs);
         timings.sim_ms = sim_started.elapsed().as_secs_f32() * 1000.0;
 
         let Some(renderer) = &mut self.renderer else {
@@ -871,6 +943,10 @@ impl ApplicationHandler for App {
             for f in &files {
                 println!("  {}", f.display());
             }
+        }
+        if let Some(cap) = &self.audio_capture {
+            let path = cap.close();
+            println!("audio capture closed; wrote {}", path.display());
         }
     }
 }

@@ -43,6 +43,12 @@ pub struct DriveOptions {
     pub gpu: usize,
     /// Terrain ribbon density used to build the world chunks.
     pub terrain_detail: TerrainDetail,
+    /// `--audio-capture <path.csv>`: also open the engine sound and record the
+    /// per-frame game RPM vs audio pitch pairing.
+    pub audio_capture: Option<PathBuf>,
+    /// `--audio-wav <path.wav>`: render the engine sound output (the audible
+    /// samples) to a WAV so the timbre can be inspected/listened to in isolation.
+    pub audio_wav: Option<PathBuf>,
 }
 
 /// Swapchain present mode for the interactive window (`--present`), mapped to
@@ -108,6 +114,17 @@ pub enum RunMode {
         window_capture: Option<PathBuf>,
         /// `--capture-dir <dir>`: enable in-run captures (F10) while driving.
         capture_dir: Option<PathBuf>,
+        /// `--audio-capture <path.csv>`: record per-frame game RPM vs the engine
+        /// sound's actual output pitch to a CSV for offline analysis.
+        audio_capture: Option<PathBuf>,
+        /// `--auto-drive <seconds>`: run the real interactive render/audio loop
+        /// with scripted throttle/gear input and exit after `seconds`, so the
+        /// audio capture reflects the actual vsync-paced game (not a headless
+        /// simulation).
+        auto_drive: Option<f32>,
+        /// `--audio-device <idx>`: initial audio output device index to use
+        /// (index into the enumerated device list; default 0).
+        audio_device: Option<usize>,
     },
     Snapshot(SnapshotOptions),
     /// `--report <path.csv>`: re-read an existing profiling session and
@@ -133,6 +150,10 @@ pub fn parse(args: &[String]) -> RunMode {
     let mut fps_limit: Option<u32> = None;
     let mut window_capture: Option<PathBuf> = None;
     let mut capture_dir: Option<PathBuf> = None;
+    let mut audio_capture: Option<PathBuf> = None;
+    let mut audio_wav: Option<PathBuf> = None;
+    let mut auto_drive: Option<f32> = None;
+    let mut audio_device: Option<usize> = None;
 
     let mut snapshot: Option<PathBuf> = None;
     let mut report: Option<PathBuf> = None;
@@ -272,6 +293,47 @@ pub fn parse(args: &[String]) -> RunMode {
                     i += 1;
                 }
             }
+            "--audio-capture" => {
+                if let Some(v) = args.get(i + 1).filter(|v| !v.starts_with("--")) {
+                    audio_capture = Some(PathBuf::from(v));
+                    i += 2;
+                } else {
+                    eprintln!("invalid value for --audio-capture (missing output CSV path)");
+                    i += 1;
+                }
+            }
+            "--audio-wav" => {
+                if let Some(v) = args.get(i + 1).filter(|v| !v.starts_with("--")) {
+                    audio_wav = Some(PathBuf::from(v));
+                    i += 2;
+                } else {
+                    eprintln!("invalid value for --audio-wav (missing output WAV path)");
+                    i += 1;
+                }
+            }
+            "--auto-drive" => {
+                if let Some(v) = args.get(i + 1).and_then(|v| v.parse::<f32>().ok()) {
+                    if v > 0.0 {
+                        auto_drive = Some(v);
+                        i += 2;
+                    } else {
+                        eprintln!("invalid value for --auto-drive (positive seconds)");
+                        i += 1;
+                    }
+                } else {
+                    eprintln!("invalid value for --auto-drive (missing positive seconds)");
+                    i += 1;
+                }
+            }
+            "--audio-device" => {
+                if let Some(v) = args.get(i + 1).and_then(|v| v.parse::<usize>().ok()) {
+                    audio_device = Some(v);
+                    i += 2;
+                } else {
+                    eprintln!("invalid value for --audio-device (a non-negative index)");
+                    i += 1;
+                }
+            }
             "--report" => {
                 if let Some(v) = args.get(i + 1).filter(|v| !v.starts_with("--")) {
                     report = Some(PathBuf::from(v));
@@ -335,6 +397,8 @@ pub fn parse(args: &[String]) -> RunMode {
             seed: seed.unwrap_or(1),
             gpu,
             terrain_detail,
+            audio_capture,
+            audio_wav,
         }),
         (None, None, None) => RunMode::Interactive {
             gpu,
@@ -349,6 +413,9 @@ pub fn parse(args: &[String]) -> RunMode {
             fps_limit,
             window_capture,
             capture_dir,
+            audio_capture,
+            auto_drive,
+            audio_device,
         },
     }
 }
@@ -391,6 +458,9 @@ mod tests {
                 fps_limit,
                 window_capture,
                 capture_dir,
+                audio_capture,
+                auto_drive,
+                audio_device,
             } => {
                 assert_eq!(gpu, 0);
                 assert_eq!(weather, Weather::Auto);
@@ -404,6 +474,9 @@ mod tests {
                 assert_eq!(fps_limit, None);
                 assert_eq!(window_capture, None);
                 assert_eq!(capture_dir, None);
+                assert_eq!(audio_capture, None);
+                assert_eq!(auto_drive, None);
+                assert_eq!(audio_device, None);
             }
             _ => panic!("expected interactive mode"),
         }
@@ -551,6 +624,52 @@ mod tests {
     }
 
     #[test]
+    fn audio_capture_flag_is_parsed() {
+        match parse_args(&["--audio-capture", "audio.csv"]) {
+            RunMode::Interactive { audio_capture, .. } => {
+                assert_eq!(audio_capture.as_deref(), Some(Path::new("audio.csv")))
+            }
+            _ => panic!("expected interactive mode"),
+        }
+    }
+
+    #[test]
+    fn audio_capture_without_value_is_ignored() {
+        match parse_args(&["--audio-capture"]) {
+            RunMode::Interactive { audio_capture, .. } => assert_eq!(audio_capture, None),
+            _ => panic!("expected interactive mode"),
+        }
+    }
+
+    #[test]
+    fn auto_drive_flag_is_parsed() {
+        match parse_args(&["--auto-drive", "20"]) {
+            RunMode::Interactive { auto_drive, .. } => assert_eq!(auto_drive, Some(20.0)),
+            _ => panic!("expected interactive mode"),
+        }
+    }
+
+    #[test]
+    fn auto_drive_zero_or_missing_is_ignored() {
+        match parse_args(&["--auto-drive", "0"]) {
+            RunMode::Interactive { auto_drive, .. } => assert_eq!(auto_drive, None),
+            _ => panic!("expected interactive mode"),
+        }
+        match parse_args(&["--auto-drive"]) {
+            RunMode::Interactive { auto_drive, .. } => assert_eq!(auto_drive, None),
+            _ => panic!("expected interactive mode"),
+        }
+    }
+
+    #[test]
+    fn audio_device_flag_is_parsed() {
+        match parse_args(&["--audio-device", "2"]) {
+            RunMode::Interactive { audio_device, .. } => assert_eq!(audio_device, Some(2)),
+            _ => panic!("expected interactive mode"),
+        }
+    }
+
+    #[test]
     fn zero_fps_limit_ignored() {
         match parse_args(&["--fps-limit", "0"]) {
             RunMode::Interactive { fps_limit, .. } => assert_eq!(fps_limit, None),
@@ -582,6 +701,17 @@ mod tests {
                 assert_eq!(o.seconds, 30);
                 assert_eq!(o.seed, 7);
                 assert_eq!(o.terrain_detail, TerrainDetail::Medium);
+                assert_eq!(o.audio_capture, None);
+            }
+            _ => panic!("expected drive mode"),
+        }
+    }
+
+    #[test]
+    fn drive_mode_accepts_audio_capture() {
+        match parse_args(&["--drive", "drive.csv", "30", "--audio-capture", "audio.csv"]) {
+            RunMode::Drive(o) => {
+                assert_eq!(o.audio_capture.as_deref(), Some(Path::new("audio.csv")));
             }
             _ => panic!("expected drive mode"),
         }

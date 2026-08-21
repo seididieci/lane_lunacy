@@ -80,6 +80,9 @@ pub fn run(
     fps_limit: Option<u32>,
     window_capture: Option<PathBuf>,
     capture_dir: Option<PathBuf>,
+    audio_capture: Option<PathBuf>,
+    auto_drive: Option<f32>,
+    audio_device: Option<usize>,
 ) {
     let event_loop = EventLoop::new().expect("failed to create event loop");
     let instance = create_surface_instance(&event_loop);
@@ -107,6 +110,9 @@ pub fn run(
         fps_limit,
         window_capture,
         capture_dir,
+        audio_capture,
+        auto_drive,
+        audio_device,
     );
     event_loop.run_app(&mut app).expect("event loop failed");
 }
