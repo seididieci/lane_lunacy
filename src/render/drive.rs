@@ -12,8 +12,10 @@
 //! background pool shows up as `rebuild_ms ≈ 0`; before the pool, every
 //! crossing rebuilt in-line at 120–160 ms (windowed sessions).
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::audio::{AudioCapture, EngineRunner, SharedCapture};
 use crate::cli::DriveOptions;
 use crate::font::FontAtlas;
 use crate::game::{DifficultyLevel, Game};
@@ -98,9 +100,29 @@ pub fn run_drive(opts: DriveOptions) {
     let frames = (opts.seconds * 60) as usize;
     let ui = Ui::new();
 
-    // Scripted driver: full throttle from the first frame, gear up every half
-    // second until 5th gear, straight steering (the road is road-aligned, so a
-    // centred heading stays on it).
+    // Optional audio: run the engine sound in sample-space (no output device)
+    // and either capture the per-frame game RPM vs audio pitch pairing and/or
+    // render the audible output to a WAV.
+    let capture: Option<SharedCapture> = opts.audio_capture.as_deref().and_then(|p| {
+        AudioCapture::open(p)
+            .inspect_err(|e| eprintln!("audio capture: failed to open {}: {e}", p.display()))
+            .ok()
+            .map(Arc::new)
+    });
+    let want_audio = capture.is_some() || opts.audio_wav.is_some();
+    let mut runner = want_audio.then(|| EngineRunner::new(capture.clone()));
+    let mut wav: Option<Vec<f32>> = opts.audio_wav.as_ref().map(|_| Vec::new());
+    if let Some(cap) = &capture {
+        println!("audio capture enabled: {}", cap.path().display());
+    }
+    if let Some(p) = &opts.audio_wav {
+        println!("audio wav render: {}", p.display());
+    }
+    let mut audio_frame = 0u32;
+
+    // Scripted driver: full throttle from the first frame, shifting up only
+    // when the current gear revs into the perfect-shift band, straight steering
+    // (the road is road-aligned, so a centred heading stays on it).
     let mut input = Input {
         throttle: true,
         ..Default::default()
@@ -116,12 +138,48 @@ pub fn run_drive(opts: DriveOptions) {
     let mut next_frame = Instant::now();
 
     for frame_idx in 0..frames {
-        input.gear_up = frame_idx % 30 == 0 && frame_idx < 240; // 1st -> 5th by ~2 s
+        // Shift up when the current gear has revved into the perfect-shift band.
+        let gear = game.vehicle.gear;
+        input.gear_up =
+            gear < 5 && game.vehicle.rpm_frac_for(gear) >= crate::game::vehicle::PERFECT_LO;
+        input.gear_down = false;
         input.steer = 0.0;
 
         let sim_started = Instant::now();
         game.update(dt, &input);
         let sim_ms = sim_started.elapsed().as_secs_f32() * 1000.0;
+
+        // Publish the vehicle state to the engine sound and record the
+        // rpm-vs-pitch pairing, mirroring the interactive `update_audio`.
+        if let Some(runner) = &mut runner {
+            let dt_secs = dt.as_secs_f32();
+            audio_frame += 1;
+            runner.set_engine(
+                game.vehicle.speed,
+                game.vehicle.gear,
+                dt_secs,
+                audio_frame,
+                game.engine_blown,
+            );
+            match &mut wav {
+                Some(buf) => runner.advance_frame_into(buf),
+                None => runner.advance_frame(),
+            }
+            if let Some(cap) = &capture {
+                let (arpm, ahz) = runner.state();
+                cap.record_frame(
+                    frame_idx as f32 * dt_secs,
+                    audio_frame,
+                    dt_secs,
+                    game.vehicle.speed,
+                    game.vehicle.gear,
+                    game.vehicle.rpm_frac(),
+                    arpm,
+                    ahz,
+                    runner.sample_idx(),
+                );
+            }
+        }
 
         if frame_idx % 300 == 0 {
             let ws = frame_builder.world_stats();
@@ -181,6 +239,17 @@ pub fn run_drive(opts: DriveOptions) {
     println!("profiler wrote: {}", files[0].display());
     println!("report wrote:   {}", files[1].display());
 
+    if let Some(cap) = &capture {
+        let path = cap.close();
+        println!("audio capture closed; wrote {}", path.display());
+    }
+    if let (Some(buf), Some(path)) = (&wav, &opts.audio_wav) {
+        match write_wav_mono(path, buf) {
+            Ok(()) => println!("audio wav wrote {} ({} samples)", path.display(), buf.len()),
+            Err(e) => eprintln!("audio wav: failed to write {}: {e}", path.display()),
+        }
+    }
+
     println!(
         "\nchunk crossings: {} (rebuild_ms = render-thread stall, pending = queued builds)\n    idx  rebuild_ms  chunks  pending  cached",
         crossings.len()
@@ -197,4 +266,28 @@ pub fn run_drive(opts: DriveOptions) {
             max
         );
     }
+}
+
+/// Writes mono 16-bit PCM WAV at 48 kHz.
+fn write_wav_mono(path: &std::path::Path, samples: &[f32]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
+    let data_len = (samples.len() * 2) as u32;
+    f.write_all(b"RIFF")?;
+    f.write_all(&(36 + data_len).to_le_bytes())?;
+    f.write_all(b"WAVEfmt ")?;
+    f.write_all(&16u32.to_le_bytes())?;
+    f.write_all(&1u16.to_le_bytes())?; // PCM
+    f.write_all(&1u16.to_le_bytes())?; // mono
+    f.write_all(&48_000u32.to_le_bytes())?;
+    f.write_all(&(48_000u32 * 2).to_le_bytes())?; // byte rate
+    f.write_all(&2u16.to_le_bytes())?; // block align
+    f.write_all(&16u16.to_le_bytes())?; // bits per sample
+    f.write_all(b"data")?;
+    f.write_all(&data_len.to_le_bytes())?;
+    for s in samples {
+        let v = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
+        f.write_all(&v.to_le_bytes())?;
+    }
+    f.flush()
 }
