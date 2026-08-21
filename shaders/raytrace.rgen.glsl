@@ -79,6 +79,13 @@ float shadow_hash(vec2 p) {
 // geometry blocks it. The cull mask strips the car statics (their instance mask
 // clears bit 0), so player/traffic cars never cast a shadow. Result is carried
 // in `rtp.albedo.x` (the probe is the last trace before `main` reads it back).
+//
+// SBT indexing note: vulkano's `ShaderBindingTable` re-packs the pipeline groups
+// into per-section tables, so records are NOT addressed by group index. With our
+// group order [0 rgen | 1 rmiss, 2 shadow-miss | 3 rchit, 4 shadow-anyhit] the
+// miss section is [rmiss=0, shadow-miss=1] and the hit section is
+// [rchit=0, shadow-anyhit=1]. Every TLAS instance leaves its SBT record offset
+// at 0, so `sbtRecordOffset` selects the hit record directly.
 float shadow_factor(vec3 pos, vec3 normal, vec2 jitter) {
     vec3 l = normalize(light_dir.xyz);
     vec3 t = normalize(cross(normal, l));
@@ -90,9 +97,9 @@ float shadow_factor(vec3 pos, vec3 normal, vec2 jitter) {
         tlas,
         gl_RayFlagsSkipClosestHitShaderEXT,
         SHADOW_RAY_MASK,      // cull statics (cars never cast shadows)
-        2,                    // miss-record offset: group 2 = shadow miss
-        1,                    // hit-record offset: group 4 = shadow any-hit
-        0,                    // shader binding table record offset
+        1,                    // hit record 1 in the hit section = shadow any-hit
+        1,                    // stride (instances use SBT record offset 0)
+        1,                    // miss record 1 in the miss section = shadow miss
         pos + normal * 0.05,
         0.001,
         soft,

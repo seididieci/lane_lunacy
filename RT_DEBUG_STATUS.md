@@ -6,49 +6,48 @@ FIXED (road is no longer a flat mirror), the ray-traced render now produces
 a correct, stable image, and **sun/moon shadows are FIXED** via a dedicated
 shadow any-hit shader (world geometry only — cars deliberately never cast).
 
-## Shadows (FIXED: RT shadow any-hit pass)
+## Shadows (FIXED twice: SBT record indexing + ambient-preserving shade)
 
-Symptom: under `--raytrace` nothing cast a shadow; the scene lit flat even with
-the sun high. The raster backend has no shadow maps either, so RT was the first
-backend with any occlusion.
+Symptom (first attempt): nothing cast a shadow. Second symptom after wiring the
+shadow stages: **inverted** shading — ground darkened exactly where the sun
+reached, relatively bright where shade should be — plus a uniformly gloomy look.
 
-Design (user-confirmed scope): sun/moon + traffic-lamp light only, world
-geometry (terrain, walls, rock faces) casts; the player car and traffic car
-meshes are permanently excluded from casting. Raster shadow-mapping is deferred
-as a follow-up; RT is the only backend with real shadows today.
+Root cause of the inversion: **vulkano's `ShaderBindingTable` does not index
+records by pipeline group**. It re-packs groups into per-section tables (raygen |
+miss | hit | callable), each numbered from 0. With group order
+`[0 rgen | 1 rmiss, 2 shadow-miss | 3 rchit, 4 shadow-anyhit]`, the miss section
+is `[rmiss=0, shadow-miss=1]` and the hit section is `[rchit=0,
+shadow-anyhit=1]`. The probe traced with `sbtRecordOffset=2, missIndex=0`:
+- hit record 2 → out of range (hit section holds records 0-1) → every probe
+  behaved as a miss;
+- missIndex 0 → the PRIMARY sky miss shader, which zeroes the whole payload
+  (`rtp.albedo = vec4(0)`).
 
-Implementation (`src/render/raytrace.rs`, 5 SBT groups):
-- New stages: shadow miss (`raytrace.rsmiss.glsl`, group 2) and shadow any-hit
-  (`raytrace.rshad.glsl`, group 4). Miss sets `rtp.albedo.x = 1.0` (lit); on any
-  hit the shader sets `rtp.albedo.x = 0.0` (occluded) and calls `terminateRayEXT`.
-- A single shared 96-byte `RTShade` payload is reused for primary, reflection AND
-  shadow rays (an earlier separate 4-byte shadow payload was abandoned because
-  glslang/ASM ordered the variables with the shadow flag first, swapping the
-  patched locations). Shadow result rides in `rtp.albedo.x`.
-- Shadow suppression via instance cull masks: statics (player + traffic, slots
-  0..4) get `STATIC_INSTANCE_MASK 0xFE` (bit 0 clear), chunk geometry gets
-  `CHUNK_INSTANCE_MASK 0x01` (bit 0 set); the shadow probes trace with cull mask
-  `0x01`, so the shadow rays / miss / any-hit never even see the cars, while the
-  primary and reflection rays use cull mask `0xFF` and see everything.
-- `raytrace.rgen.glsl` gained `shadow_factor()`: gates on `sun_state.x > 0.001`
-  (ambient-only nights skip shadow work), jitters the shadow ray origin
-  (`SHADOW_SOFT_RADIUS 0.006`) for soft penumbras, and traces toward `light_dir`
-  with `gl_RayFlagsSkipClosestHitShaderEXT`, shadow-miss group 2 / shadow-any-hit
-  group 4, SBT record offsets 2/1.
-- Split lighting formula: the closest-hit shader now computes `sun_base`
-  (`albedo * (ambient + diff * sun_intensity * 0.85)`), stashes it in
-  `rtp.albedo`, and the raygen combines
-  `lit = rtp.color - sun_base + sun_base * occluded` so artificial lights are
-  untouched and only the sun contribution is attenuated. Reflection rays are
-  shadowed too.
+So every daytime probe returned `shadow_vis = 0` and the raygen applied
+`color - sun_base` to ALL geometry pixels: a uniform darkening proportional to
+`sun_base`, which is largest on sun-facing slopes → darkest exactly where lit.
+The shadow any-hit/miss shaders never executed. (The first "vision-verified"
+shadow pass was this artifact misread as soft shadows.)
 
-Verified (vision + numeric on deterministic `--seed 420 --weather clear`
-captures): RT now shows soft ground shadows under trees and streetlights
-matching the raster sky/road/texture pixel-for-pixel, direction consistent with
-the sun; no car shadow appears in RT while the raster composite keeps its
-traditional car blob shadow. Profile (6300+ frames, ~100.6 fps idle / ~88 fps
-driven) shows RT `scene_ms` ≈ 10.0 ms vs ~10.2 ms before shadows — no regression.
-`cargo test` (171 pass) and `cargo clippy` clean.
+Fixes (`shaders/raytrace.rgen.glsl`, `shaders/raytrace.rchit.glsl`):
+- Probe now traces with `sbtRecordOffset=1, sbtRecordStride=1, missIndex=1`
+  (hit record 1 = shadow any-hit, miss record 1 = shadow miss), with comments
+  documenting vulkano's section-based SBT addressing (all TLAS instances leave
+  their per-instance SBT record offset at 0).
+- `sun_base` no longer folds in ambient: `sun_base = albedo * (diff *
+  sun_intensity * 0.85)` and `lit = albedo * ambient + sun_base`. Occluded
+  pixels keep skylight/ambient plus all artificial lights, so shadows read as
+  shade instead of black holes.
+
+Design scope (user-confirmed): sun/moon light only, world geometry (terrain,
+walls, rock faces) casts; player/traffic cars are permanently excluded via
+instance cull masks (statics `0xfe`, chunks `0x01`, probe cull mask `0x01`).
+Raster shadow-mapping remains a deferred follow-up.
+
+Verified (vision on deterministic `--seed 420 --weather clear --auto-start`
+captures): sun-facing sides bright, far sides dark with correct direction;
+brightness matches raster; no car shadow in RT (raster keeps its blob); no acne,
+stripes or splotches. `cargo test` (199 pass) clean.
 
 New CLI flag `--auto-start` added to skip the menu and land directly in the
 driving scene at init, so `--window-capture` grabs a gameplay frame instead of
