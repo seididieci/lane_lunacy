@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use rodio::buffer::SamplesBuffer;
-use rodio::cpal::{self, traits::{DeviceTrait, HostTrait}, Device};
+use rodio::cpal::{self, traits::{DeviceTrait, HostTrait}, Device, Host, HostId};
 use rodio::source::Source;
 use rodio::{
     ChannelCount, DeviceSinkBuilder, MixerDeviceSink, Player, SampleRate,
@@ -17,7 +17,9 @@ use rodio::{
 /// Audio channel volumes and toggles, staged in the menu and committed on APPLY.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AudioSettings {
-    /// Index into the enumerated output-device list.
+    /// Index into the available backend (host) list.
+    pub backend: usize,
+    /// Index into the enumerated output-device list of the selected backend.
     pub device_index: usize,
     /// Master volume in 0..=100.
     pub master: u8,
@@ -34,6 +36,7 @@ pub struct AudioSettings {
 impl Default for AudioSettings {
     fn default() -> Self {
         AudioSettings {
+            backend: 0,
             device_index: 0,
             master: 80,
             music: 70,
@@ -74,14 +77,75 @@ fn ignore_benign_alsa_errors(err: cpal::StreamError) {
     }
 }
 
-/// Lists every output device the host exposes, plus the index of the default
-/// output device (when the host has one). Used to populate the AUDIO > DEVICE row.
-pub fn enumerate_output_devices() -> (Vec<String>, Option<usize>) {
-    let host = cpal::default_host();
-    let devices: Vec<Device> = host
+/// Indices of the first occurrence of each distinct name, order preserved.
+/// ALSA exposes the same physical output several times (`default`, `sysdefault`,
+/// `hw:0,0`, `plughw:0,0`, ...) often under identical description names; this
+/// collapses those duplicates so the DEVICE row lists each name once.
+fn unique_name_indices(names: &[String]) -> Vec<usize> {
+    let mut seen = std::collections::HashSet::new();
+    names
+        .iter()
+        .enumerate()
+        .filter(|(_, name)| seen.insert((*name).clone()))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// The audio backends (cpal hosts) compiled into this build, as
+/// `(HostId, display name)` pairs. On a stock Linux build this is just ALSA;
+/// JACK appears automatically when the `jack` cargo feature is enabled.
+pub fn available_backends() -> Vec<(HostId, String)> {
+    cpal::available_hosts()
+        .into_iter()
+        .map(|id| {
+            let name = format!("{:?}", id).to_uppercase();
+            (id, name)
+        })
+        .collect()
+}
+
+/// The host for backend index `backend`, falling back to the platform default
+/// when the index is out of range or the host cannot be constructed.
+fn host_for(backend: usize) -> Host {
+    available_backends()
+        .get(backend)
+        .and_then(|(id, _)| cpal::host_from_id(*id).ok())
+        .unwrap_or_else(cpal::default_host)
+}
+
+/// Lists every output device the given backend exposes, deduplicated by
+/// description name (first occurrence wins, order preserved).
+fn output_devices(backend: usize) -> Vec<Device> {
+    let devices: Vec<Device> = host_for(backend)
         .output_devices()
         .map(|iter| iter.collect())
         .unwrap_or_default();
+    let names: Vec<String> = devices
+        .iter()
+        .map(|d| {
+            d.description()
+                .map(|desc| desc.name().to_string())
+                .unwrap_or_else(|_| "Unknown device".to_string())
+        })
+        .collect();
+    unique_name_indices(&names)
+        .into_iter()
+        .map(|i| devices[i].clone())
+        .collect()
+}
+
+/// Lists the deduplicated output-device names of the selected backend, plus
+/// the index of that backend's default output device (when it has one). Used
+/// to populate the AUDIO > DEVICE row.
+pub fn enumerate_output_devices(backend: usize) -> (Vec<String>, Option<usize>) {
+    let host = host_for(backend);
+    let devices = output_devices(backend);
+    let default_id = host.default_output_device().and_then(|d| d.id().ok());
+    let default = default_id.and_then(|id| {
+        devices
+            .iter()
+            .position(|d| d.id().ok().as_ref() == Some(&id))
+    });
     let names = devices
         .iter()
         .map(|d| {
@@ -89,11 +153,7 @@ pub fn enumerate_output_devices() -> (Vec<String>, Option<usize>) {
                 .map(|desc| desc.name().to_string())
                 .unwrap_or_else(|_| "Unknown device".to_string())
         })
-        .collect::<Vec<_>>();
-    let default = host
-        .default_output_device()
-        .and_then(|d| d.id().ok())
-        .and_then(|id| devices.iter().position(|d| d.id().ok().as_ref() == Some(&id)));
+        .collect();
     (names, default)
 }
 
@@ -567,18 +627,13 @@ impl SfxBuffers {
     }
 }
 
-fn output_devices() -> Vec<Device> {
-    cpal::default_host()
-        .output_devices()
-        .map(|iter| iter.collect())
-        .unwrap_or_default()
-}
-
-fn resolve_device(device_index: usize) -> Option<Device> {
-    output_devices()
+/// The device at `device_index` of backend `backend`, falling back to that
+/// backend's default output device.
+fn resolve_device(backend: usize, device_index: usize) -> Option<Device> {
+    output_devices(backend)
         .get(device_index)
         .cloned()
-        .or_else(|| cpal::default_host().default_output_device())
+        .or_else(|| host_for(backend).default_output_device())
 }
 
 /// Builds the per-stream players and applies the initial volume/toggle state.
@@ -630,7 +685,7 @@ pub struct AudioEngine {
 
 impl AudioEngine {
     pub fn init(settings: AudioSettings, capture: Option<SharedCapture>) -> Option<AudioEngine> {
-        let device = resolve_device(settings.device_index)?;
+        let device = resolve_device(settings.backend, settings.device_index)?;
         let mut stream = DeviceSinkBuilder::from_device(device)
             .ok()?
             .with_buffer_size(cpal::BufferSize::Fixed(OUTPUT_PERIOD_FRAMES))
@@ -671,6 +726,11 @@ impl AudioEngine {
         self.applied.device_index
     }
 
+    /// The backend index currently in effect.
+    pub fn active_backend(&self) -> usize {
+        self.applied.backend
+    }
+
     /// Applies new volumes/toggles without touching the output device.
     pub fn apply(&mut self, settings: AudioSettings) {
         let e = settings.sfx_gain();
@@ -697,11 +757,12 @@ impl AudioEngine {
         self.applied = settings;
     }
 
-    /// Reopens the output stream on `device_index`, falling back to the default
-    /// device when the chosen one cannot be opened. Preserves the active
-    /// settings (volumes/toggles) and the current engine parameters.
-    pub fn switch_device(&mut self, device_index: usize) -> Result<(), ()> {
-        let device = resolve_device(device_index).ok_or(())?;
+    /// Reopens the output stream on `device_index` of backend `backend`,
+    /// falling back to the backend's default device when the chosen one cannot
+    /// be opened. Preserves the active settings (volumes/toggles) and the
+    /// current engine parameters.
+    pub fn switch_output(&mut self, backend: usize, device_index: usize) -> Result<(), ()> {
+        let device = resolve_device(backend, device_index).ok_or(())?;
         let mut stream = DeviceSinkBuilder::from_device(device)
             .map_err(|_| ())?
             .with_buffer_size(cpal::BufferSize::Fixed(OUTPUT_PERIOD_FRAMES))
@@ -715,6 +776,7 @@ impl AudioEngine {
         self.engine = engine;
         self.sfx = sfx;
         self.music = Some(music);
+        self.applied.backend = backend;
         self.applied.device_index = device_index;
         Ok(())
     }
@@ -822,6 +884,7 @@ mod tests {
     #[test]
     fn audio_defaults_are_sane() {
         let a = AudioSettings::default();
+        assert_eq!(a.backend, 0);
         assert_eq!(a.device_index, 0);
         assert_eq!(a.master, 80);
         assert_eq!(a.music, 70);
@@ -1021,6 +1084,18 @@ mod tests {
         // Excessive speed (redline past) clamps to 1.0, negative to 0.0.
         assert_eq!(interpolated_rpm_frac(0.0, 10_000.0, 1.0, 1), 1.0);
         assert_eq!(interpolated_rpm_frac(-5.0, -10.0, 0.5, 1), 0.0);
+    }
+
+    #[test]
+    fn unique_names_keep_first_occurrence_in_order() {
+        let names: Vec<String> = ["hw:0", "plughw:0", "hw:0", "USB Headset", "plughw:0"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(unique_name_indices(&names), vec![0, 1, 3]);
+        assert!(unique_name_indices(&[]).is_empty());
+        let single = vec!["only".to_string()];
+        assert_eq!(unique_name_indices(&single), vec![0]);
     }
 
     #[test]

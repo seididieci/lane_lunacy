@@ -159,9 +159,12 @@ impl GraphicsRow {
     }
 }
 
-/// Rows of the audio submenu.
+/// Rows of the audio submenu. `Backend` sits above `Device` but only exists
+/// when more than one audio backend is compiled in; the cursor navigation
+/// takes the backend count and skips it otherwise.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AudioRow {
+    Backend,
     Device,
     Master,
     Music,
@@ -173,9 +176,13 @@ pub enum AudioRow {
 }
 
 impl AudioRow {
-    /// The row above this one (clamped at the top).
-    pub fn previous(self) -> Self {
+    /// The row above this one (clamped at the top). `backends` is the number
+    /// of available audio backends; with a single backend the BACKEND row is
+    /// hidden and DEVICE is the top row.
+    pub fn previous(self, backends: usize) -> Self {
         match self {
+            AudioRow::Backend => AudioRow::Backend,
+            AudioRow::Device if backends > 1 => AudioRow::Backend,
             AudioRow::Device => AudioRow::Device,
             AudioRow::Master => AudioRow::Device,
             AudioRow::Music => AudioRow::Master,
@@ -187,9 +194,11 @@ impl AudioRow {
         }
     }
 
-    /// The row below this one (clamped at the bottom).
-    pub fn next(self) -> Self {
+    /// The row below this one (clamped at the bottom). `backends` is unused
+    /// today but kept for symmetry with [`Self::previous`].
+    pub fn next(self, _backends: usize) -> Self {
         match self {
+            AudioRow::Backend => AudioRow::Device,
             AudioRow::Device => AudioRow::Master,
             AudioRow::Master => AudioRow::Music,
             AudioRow::Music => AudioRow::Sfx,
@@ -525,6 +534,16 @@ impl MenuState {
         self.settings.puddles = levels[next];
     }
 
+    /// Cycles the BACKEND row over the available audio backends. No-op when
+    /// only one backend exists (the row is hidden).
+    pub fn cycle_audio_backend(&mut self, delta: i32, backend_count: usize) {
+        if backend_count <= 1 {
+            return;
+        }
+        self.settings.audio.backend = (self.settings.audio.backend as i32 + delta)
+            .rem_euclid(backend_count as i32) as usize;
+    }
+
     /// Cycles the DEVICE row over the enumerated output devices. No-op when
     /// there are none (no audio hardware).
     pub fn cycle_audio_device(&mut self, delta: i32, device_count: usize) {
@@ -572,6 +591,11 @@ fn gpu_label(index: usize, names: &[String]) -> String {
     }
 }
 
+fn audio_backend_label(index: usize, names: &[String]) -> String {
+    let name = names.get(index).map(|s| s.as_str()).unwrap_or("?");
+    format!("BACKEND  [{}]  {}", index, name)
+}
+
 fn audio_device_label(index: usize, names: &[String], default: Option<usize>) -> String {
     let name = names.get(index).map(|s| s.as_str()).unwrap_or("NO AUDIO DEVICE");
     const MAX_CHARS: usize = 40;
@@ -597,6 +621,7 @@ pub(crate) fn build_menu_tree(
     menu: &MenuState,
     gpu_names: &[String],
     supported_aa: &[AaMode],
+    backend_names: &[String],
     audio_devices: &[String],
     audio_default: Option<usize>,
     graphics_dirty: bool,
@@ -606,7 +631,9 @@ pub(crate) fn build_menu_tree(
         MenuScreen::Main => build_main_tree(menu),
         MenuScreen::Settings => build_settings_tree(menu),
         MenuScreen::Graphics => build_graphics_tree(menu, gpu_names, supported_aa, graphics_dirty),
-        MenuScreen::Audio => build_audio_tree(menu, audio_devices, audio_default, audio_dirty),
+        MenuScreen::Audio => {
+            build_audio_tree(menu, backend_names, audio_devices, audio_default, audio_dirty)
+        }
     }
 }
 
@@ -818,6 +845,7 @@ fn build_graphics_tree(
 
 fn build_audio_tree(
     menu: &MenuState,
+    backend_names: &[String],
     audio_devices: &[String],
     audio_default: Option<usize>,
     dirty: bool,
@@ -828,52 +856,62 @@ fn build_audio_tree(
     let apply_color = if dirty { ROW_COLOR } else { DIM_COLOR };
 
     let focused = |row: AudioRow| menu.audio_cursor == row;
-    let rows = Column::new(
-        vec![
-            Node::new(Button::new(device_t, ROW_EM, ROW_COLOR, 40).focused(focused(AudioRow::Device))),
-            Node::new(
-                Button::new(format!("MASTER  {}%", s.master), ROW_EM, ROW_COLOR, 41)
-                    .focused(focused(AudioRow::Master)),
-            ),
-            Node::new(
-                Button::new(
-                    format!("{}  MUSIC  {}%", ICON_MUSIC, s.music),
-                    ROW_EM,
-                    ROW_COLOR,
-                    42,
-                )
-                .focused(focused(AudioRow::Music)),
-            ),
-            Node::new(
-                Button::new(format!("SFX  {}%", s.sfx), ROW_EM, ROW_COLOR, 43)
-                    .focused(focused(AudioRow::Sfx)),
-            ),
-            Node::new(
-                Button::new(
-                    format!("SOUND FX  {}", on_off(s.fx_enabled)),
-                    ROW_EM,
-                    ROW_COLOR,
-                    44,
-                )
-                .focused(focused(AudioRow::FxEnabled)),
-            ),
-            Node::new(
-                Button::new(
-                    format!("{}  ON  {}", ICON_MUSIC, on_off(s.music_enabled)),
-                    ROW_EM,
-                    ROW_COLOR,
-                    45,
-                )
-                .focused(focused(AudioRow::MusicEnabled)),
-            ),
-            Node::new(
-                Button::new("APPLY", ROW_EM, apply_color, 46).focused(focused(AudioRow::Apply)),
-            ),
-            Node::new(Button::new("BACK", ROW_EM, ROW_COLOR, 47).focused(focused(AudioRow::Back))),
-        ],
-        ROW_GAP,
-        HAlign::Center,
-    );
+    // The BACKEND row only exists when more than one backend is compiled in.
+    let mut rows = Vec::new();
+    if backend_names.len() > 1 {
+        rows.push(Node::new(
+            Button::new(
+                audio_backend_label(s.backend, backend_names),
+                ROW_EM,
+                ROW_COLOR,
+                39,
+            )
+            .focused(focused(AudioRow::Backend)),
+        ));
+    }
+    rows.extend([
+        Node::new(Button::new(device_t, ROW_EM, ROW_COLOR, 40).focused(focused(AudioRow::Device))),
+        Node::new(
+            Button::new(format!("MASTER  {}%", s.master), ROW_EM, ROW_COLOR, 41)
+                .focused(focused(AudioRow::Master)),
+        ),
+        Node::new(
+            Button::new(
+                format!("{}  MUSIC  {}%", ICON_MUSIC, s.music),
+                ROW_EM,
+                ROW_COLOR,
+                42,
+            )
+            .focused(focused(AudioRow::Music)),
+        ),
+        Node::new(
+            Button::new(format!("SFX  {}%", s.sfx), ROW_EM, ROW_COLOR, 43)
+                .focused(focused(AudioRow::Sfx)),
+        ),
+        Node::new(
+            Button::new(
+                format!("SOUND FX  {}", on_off(s.fx_enabled)),
+                ROW_EM,
+                ROW_COLOR,
+                44,
+            )
+            .focused(focused(AudioRow::FxEnabled)),
+        ),
+        Node::new(
+            Button::new(
+                format!("{}  ON  {}", ICON_MUSIC, on_off(s.music_enabled)),
+                ROW_EM,
+                ROW_COLOR,
+                45,
+            )
+            .focused(focused(AudioRow::MusicEnabled)),
+        ),
+        Node::new(
+            Button::new("APPLY", ROW_EM, apply_color, 46).focused(focused(AudioRow::Apply)),
+        ),
+        Node::new(Button::new("BACK", ROW_EM, ROW_COLOR, 47).focused(focused(AudioRow::Back))),
+    ]);
+    let rows = Column::new(rows, ROW_GAP, HAlign::Center);
 
     card(title, rows)
 }
@@ -915,6 +953,7 @@ mod tests {
             menu,
             &names(),
             &supported,
+            &["ALSA".to_string()],
             &audio_names(),
             Some(0),
             graphics_dirty,
@@ -1049,15 +1088,37 @@ mod tests {
 
     #[test]
     fn audio_cursor_clamps_at_ends() {
-        assert_eq!(AudioRow::Device.previous(), AudioRow::Device);
-        assert_eq!(AudioRow::Back.next(), AudioRow::Back);
-        assert_eq!(AudioRow::Back.previous(), AudioRow::Apply);
-        assert_eq!(AudioRow::Device.next(), AudioRow::Master);
-        assert_eq!(AudioRow::Master.next(), AudioRow::Music);
-        assert_eq!(AudioRow::Music.next(), AudioRow::Sfx);
-        assert_eq!(AudioRow::Sfx.next(), AudioRow::FxEnabled);
-        assert_eq!(AudioRow::FxEnabled.next(), AudioRow::MusicEnabled);
-        assert_eq!(AudioRow::MusicEnabled.next(), AudioRow::Apply);
+        // Single backend: the BACKEND row is hidden and DEVICE is the top row.
+        assert_eq!(AudioRow::Device.previous(1), AudioRow::Device);
+        assert_eq!(AudioRow::Back.next(1), AudioRow::Back);
+        assert_eq!(AudioRow::Back.previous(1), AudioRow::Apply);
+        assert_eq!(AudioRow::Device.next(1), AudioRow::Master);
+        assert_eq!(AudioRow::Master.next(1), AudioRow::Music);
+        assert_eq!(AudioRow::Music.next(1), AudioRow::Sfx);
+        assert_eq!(AudioRow::Sfx.next(1), AudioRow::FxEnabled);
+        assert_eq!(AudioRow::FxEnabled.next(1), AudioRow::MusicEnabled);
+        assert_eq!(AudioRow::MusicEnabled.next(1), AudioRow::Apply);
+
+        // Multiple backends: BACKEND sits above DEVICE in the chain.
+        assert_eq!(AudioRow::Backend.previous(2), AudioRow::Backend);
+        assert_eq!(AudioRow::Backend.next(2), AudioRow::Device);
+        assert_eq!(AudioRow::Device.previous(2), AudioRow::Backend);
+        assert_eq!(AudioRow::Back.previous(2), AudioRow::Apply);
+    }
+
+    #[test]
+    fn audio_backend_cycle_is_noop_with_single_backend() {
+        let mut menu = MenuState::new(0, Weather::Auto);
+        menu.cycle_audio_backend(1, 1);
+        menu.cycle_audio_backend(-1, 0);
+        assert_eq!(menu.settings.audio.backend, 0);
+
+        menu.cycle_audio_backend(1, 2);
+        assert_eq!(menu.settings.audio.backend, 1);
+        menu.cycle_audio_backend(1, 2);
+        assert_eq!(menu.settings.audio.backend, 0);
+        menu.cycle_audio_backend(-1, 2);
+        assert_eq!(menu.settings.audio.backend, 1);
     }
 
     #[test]

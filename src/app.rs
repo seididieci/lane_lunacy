@@ -20,7 +20,8 @@ use vulkano::instance::Instance;
 use vulkano::swapchain::Surface;
 
 use crate::audio::{
-    enumerate_output_devices, AudioCapture, AudioEngine, AudioSettings, SharedCapture, Sfx,
+    available_backends, enumerate_output_devices, AudioCapture, AudioEngine, AudioSettings,
+    SharedCapture, Sfx,
 };
 use crate::cli::PresentMode;
 use crate::debug::DebugStats;
@@ -65,9 +66,11 @@ pub struct App {
     applied: SettingsState,
     /// Antialiasing modes the currently-applied GPU supports.
     supported_aa: Vec<AaMode>,
-    /// Names of the audio output devices enumerated at startup.
+    /// Names of the audio backends (cpal hosts) compiled into this build.
+    audio_backends: Vec<String>,
+    /// Names of the staged backend's output devices, deduplicated.
     audio_devices: Vec<String>,
-    /// Index of the host's default output device, if any.
+    /// Index of the staged backend's default output device, if any.
     audio_default: Option<usize>,
     /// Audio backend. `None` when no usable output device exists.
     audio: Option<AudioEngine>,
@@ -174,6 +177,7 @@ impl App {
                 ..SettingsState::default()
             },
             supported_aa: vec![AaMode::Off],
+            audio_backends: available_backends().into_iter().map(|(_, n)| n).collect(),
             audio_devices: Vec::new(),
             audio_default: None,
             audio: None,
@@ -361,9 +365,11 @@ impl App {
         self.window = Some(window);
         self.previous = Instant::now();
 
-        // Audio: enumerate the output devices and open the selected one. The
-        // engine is optional -- no device means the game runs silently.
-        let (audio_devices, audio_default) = enumerate_output_devices();
+        // Audio: enumerate the staged backend's output devices and open the
+        // selected one. The engine is optional -- no device means the game
+        // runs silently.
+        let (audio_devices, audio_default) =
+            enumerate_output_devices(self.menu.settings.audio.backend);
         self.audio_devices = audio_devices;
         self.audio_default = audio_default;
         let audio = AudioEngine::init(self.menu.settings.audio, self.audio_capture.clone());
@@ -457,24 +463,28 @@ impl App {
         self.applied.copy_graphics_from(&self.menu.settings);
     }
 
-    /// Commits the staged audio settings. A different DEVICE reopens the output
-    /// stream; volumes/toggles are applied to the live players. A short test
-    /// tone confirms the new device/volume took effect.
+    /// Commits the staged audio settings. A different BACKEND or DEVICE
+    /// reopens the output stream; volumes/toggles are applied to the live
+    /// players. A short test tone confirms the new device/volume took effect.
     fn apply_audio_settings(&mut self) {
         if self.menu.settings.audio_equal(&self.applied) {
             return;
         }
         let mut audio = self.menu.settings.audio;
         if let Some(engine) = &mut self.audio {
-            let device_changed = audio.device_index != engine.active_device();
-            if device_changed {
-                if engine.switch_device(audio.device_index).is_err() {
-                    println!(
-                        "audio: failed to open device [{}], keeping the current one",
-                        audio.device_index
-                    );
-                    audio.device_index = engine.active_device();
-                }
+            let output_changed =
+                audio.backend != engine.active_backend() || audio.device_index != engine.active_device();
+            if output_changed
+                && engine
+                    .switch_output(audio.backend, audio.device_index)
+                    .is_err()
+            {
+                println!(
+                    "audio: failed to open backend {} device [{}], keeping the current one",
+                    audio.backend, audio.device_index
+                );
+                audio.backend = engine.active_backend();
+                audio.device_index = engine.active_device();
             }
             engine.apply(audio);
             engine.play_sfx(Sfx::Test);
@@ -688,18 +698,19 @@ impl App {
 
     fn handle_audio_key(&mut self, kb: &KeyEvent) {
         let device_count = self.audio_devices.len();
+        let backend_count = self.audio_backends.len();
         match kb.physical_key {
             PhysicalKey::Code(KeyCode::ArrowUp) | PhysicalKey::Code(KeyCode::KeyW) => {
-                self.menu.audio_cursor = self.menu.audio_cursor.previous();
+                self.menu.audio_cursor = self.menu.audio_cursor.previous(backend_count);
             }
             PhysicalKey::Code(KeyCode::ArrowDown) | PhysicalKey::Code(KeyCode::KeyS) => {
-                self.menu.audio_cursor = self.menu.audio_cursor.next();
+                self.menu.audio_cursor = self.menu.audio_cursor.next(backend_count);
             }
             PhysicalKey::Code(KeyCode::ArrowLeft) | PhysicalKey::Code(KeyCode::KeyA) => {
-                self.cycle_audio_row(-1, device_count);
+                self.cycle_audio_row(-1, backend_count, device_count);
             }
             PhysicalKey::Code(KeyCode::ArrowRight) | PhysicalKey::Code(KeyCode::KeyD) => {
-                self.cycle_audio_row(1, device_count);
+                self.cycle_audio_row(1, backend_count, device_count);
             }
             PhysicalKey::Code(KeyCode::Enter) => match self.menu.audio_cursor {
                 AudioRow::Apply => self.apply_audio_settings(),
@@ -730,11 +741,22 @@ impl App {
         }
     }
 
-    /// Left/Right handler for the audio rows: cycles the device, steps the
-    /// volume sliders and toggles the FX/music switches. APPLY/BACK have no
-    /// value to cycle.
-    fn cycle_audio_row(&mut self, delta: i32, device_count: usize) {
+    /// Left/Right handler for the audio rows: cycles the backend/device, steps
+    /// the volume sliders and toggles the FX/music switches. Cycling the
+    /// backend re-enumerates its devices and clamps the staged device index.
+    /// APPLY/BACK have no value to cycle.
+    fn cycle_audio_row(&mut self, delta: i32, backend_count: usize, device_count: usize) {
         match self.menu.audio_cursor {
+            AudioRow::Backend => {
+                self.menu.cycle_audio_backend(delta, backend_count);
+                let (devices, default) =
+                    enumerate_output_devices(self.menu.settings.audio.backend);
+                self.audio_devices = devices;
+                self.audio_default = default;
+                if self.menu.settings.audio.device_index >= self.audio_devices.len() {
+                    self.menu.settings.audio.device_index = 0;
+                }
+            }
             AudioRow::Device => self.menu.cycle_audio_device(delta, device_count),
             AudioRow::Master | AudioRow::Music | AudioRow::Sfx => {
                 self.menu.adjust_volume(self.menu.audio_cursor, delta)
@@ -950,6 +972,7 @@ impl ApplicationHandler for App {
                     &self.menu,
                     &self.gpu_names,
                     &self.supported_aa,
+                    &self.audio_backends,
                     &self.audio_devices,
                     self.audio_default,
                     graphics_dirty,
