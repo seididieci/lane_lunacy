@@ -662,12 +662,23 @@ impl Renderer {
         self.post_clock += dt.as_secs_f32();
 
         let record_started = std::time::Instant::now();
+        // Only hand the RT backend to the recorder while ray tracing is actually
+        // enabled: `record_frame_posted` switches on this argument, so passing
+        // the cached backend unconditionally would latch RT on forever after
+        // the first enabled frame. The resources stay cached while off (they
+        // re-sync chunk geometry from live game state on every `record`), so
+        // toggling back on is instant.
+        let rt_backend = if rt_on {
+            self.raytrace.as_mut().and_then(Arc::get_mut)
+        } else {
+            None
+        };
         let command_buffer = record_frame_posted(
             &self.scene,
             &self.post,
             &self.reflection,
             &self.puddle_mask,
-            self.raytrace.as_mut().and_then(Arc::get_mut),
+            rt_backend,
             should_record_reflection,
             game,
             &frame,
