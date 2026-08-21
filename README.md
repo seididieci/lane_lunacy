@@ -74,6 +74,9 @@ category screen / main menu without committing.
 | GRAIN             | ON / OFF — animated film grain                        |
 | SATURATION        | ON / OFF — boosted color saturation                   |
 | CHROMATIC         | ON / OFF — radial red/blue shift                      |
+| PUDDLES           | OFF / LOW / MED / HIGH — wet-road reflection quality  |
+| SHADOWS           | ON / OFF — raster sun shadows from walls & terrain     |
+| RAYTRACING        | ON / OFF — ray-traced lighting (GPU must support it)  |
 | APPLY / BACK      | Commit graphics / return to settings                  |
 
 Switching GPU re-uses the window and keeps your run going. Antialiasing and

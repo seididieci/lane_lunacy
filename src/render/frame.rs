@@ -22,6 +22,7 @@ use crate::render::particles::{
     build_headlights, build_lamp_glows, build_taillights, drift_intensity, DustSystem, MistSystem,
     RainSystem,
 };
+use crate::render::shadow_map::directional_light_view_proj;
 use crate::road::{road_curve, road_tangent, CAR_HALF_W, CAR_LEN};
 use crate::shaders::SkyUniform;
 use crate::surface::material_at;
@@ -48,6 +49,10 @@ pub struct FrameUniforms {
     /// Camera eye position in world space (drives the wet-road specular in the
     /// mesh shader and the post-pass puddle reflections).
     pub eye: Vec3,
+    /// `(view * proj)` of the sun ortho camera for raster shadow mapping,
+    /// centered on the player (see `render::shadow_map`). Shared by the shadow
+    /// pass and every mesh draw that samples the shadow map.
+    pub light_view_proj: Mat4,
 }
 
 /// Headlight projector payload for one frame: the player's cone plus the
@@ -461,6 +466,14 @@ pub fn build_frame(
             wet_fac,
             fog_color,
             eye,
+            light_view_proj: directional_light_view_proj(
+                Vec3::new(
+                    lights.light_dir[0],
+                    lights.light_dir[1],
+                    lights.light_dir[2],
+                ),
+                car_pos,
+            ),
         },
         eye,
         cam_forward,

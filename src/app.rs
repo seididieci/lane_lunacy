@@ -735,6 +735,7 @@ impl App {
             | GraphicsRow::Saturation
             | GraphicsRow::ChromaticAberration
             | GraphicsRow::RainFx
+            | GraphicsRow::Shadows
             | GraphicsRow::Raytrace => self.menu.toggle_fx(self.menu.graphics_cursor),
             GraphicsRow::Reflect => self.menu.cycle_puddles(delta),
             GraphicsRow::Apply | GraphicsRow::Back => {}
@@ -998,6 +999,7 @@ impl ApplicationHandler for App {
             chroma: self.applied.chroma,
             rain_fx: self.applied.rain_fx,
             puddle_quality: self.applied.puddles.uniform(),
+            shadows: self.applied.shadows,
             raytrace: self.applied.raytrace,
         };
         let render_started = Instant::now();

@@ -21,6 +21,8 @@ pub const POST_FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spv/p
 pub const BLOOM_FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spv/bloom.frag.spv"));
 pub const PUDDLE_MASK_FRAG_SPV: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/spv/puddle_mask.frag.spv"));
+pub const SHADOW_VERT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spv/shadow.vert.spv"));
+pub const SHADOW_FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spv/shadow.frag.spv"));
 pub const RAYTRACE_RGEN_SPV: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/spv/raytrace.rgen.spv"));
 pub const RAYTRACE_RCHIT_SPV: &[u8] =
@@ -70,6 +72,21 @@ pub struct MVP {
     /// correct for the ordinary scene and particle passes. Appended after
     /// `terrain_state` so the shorter particle MVP block is unaffected.
     pub clip_plane: [f32; 4],
+    /// Sun-ortho `(view * proj)` matrix: transforms a world point into the
+    /// shadow-map clip space, where the mesh shader converts the NDC to a
+    /// shadow-map UV and depth test (`mesh.frag.glsl`). Appended last so the
+    /// shorter particle/RT blocks keep their prefix offsets.
+    pub shadow_view_proj: [[f32; 4]; 4],
+    /// `[enabled, pad, pad, pad]`: `shadow_state.x` gates shadow-map sampling in
+    /// `mesh.frag.glsl` (0 = the map is cleared-to-far and never read).
+    pub shadow_state: [f32; 4],
+}
+
+/// Uniform block for the depth-only shadow pass (`shadow.vert.glsl` binding 0).
+#[derive(BufferContents, Clone, Copy, Debug)]
+#[repr(C)]
+pub struct ShadowVP {
+    pub view_proj: [[f32; 4]; 4],
 }
 
 #[derive(BufferContents, Clone, Copy, Debug)]

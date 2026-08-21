@@ -33,6 +33,7 @@ use crate::render::frame::Frame;
 use crate::render::frame_builder::FrameBuilder;
 use crate::render::record::record_frame;
 use crate::render::scene::SceneResources;
+use crate::render::shadow_map::ShadowMapResources;
 use crate::ui::Ui;
 
 /// Result of one offscreen render: the sRGB PNG pixels, the raw linear (HDR)
@@ -147,11 +148,16 @@ pub fn render_snapshot(
     frame_builder.set_terrain_detail(terrain_detail);
     let frame = frame_builder.build(&scene, game, Duration::ZERO, aspect, hud_verts);
 
+    // Raster sun shadows are on by default; the headless path has no settings,
+    // so it always renders with the user-facing default.
+    let shadow = ShadowMapResources::new(&device, &scene.memory_allocator);
     let command_buffer = record_frame(
         &scene,
         game,
         &frame,
         frame_builder.world_chunks(),
+        &shadow,
+        true,
         framebuffer,
         &viewport,
     );

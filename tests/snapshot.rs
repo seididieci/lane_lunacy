@@ -40,8 +40,8 @@ fn scenarios() -> [Scenario; 3] {
                 mist_fac: 0.0,
             },
             gpu: GpuProbe {
-                sky_top_lum: 0.446360,
-                road_center_lum: 0.157527,
+                sky_top_lum: 0.446195,
+                road_center_lum: 0.145266,
                 sun_disc_max_lum: 4.18458,
                 flare_bloom_lum: 4.003115,
             },
@@ -59,10 +59,10 @@ fn scenarios() -> [Scenario; 3] {
                 mist_fac: 0.5,
             },
             gpu: GpuProbe {
-                sky_top_lum: 0.079253,
-                road_center_lum: 0.110233,
-                sun_disc_max_lum: 0.331207,
-                flare_bloom_lum: 0.332588,
+                sky_top_lum: 0.079191,
+                road_center_lum: 0.110099,
+                sun_disc_max_lum: 0.335393,
+                flare_bloom_lum: 0.335466,
             },
         },
         Scenario {
@@ -78,8 +78,8 @@ fn scenarios() -> [Scenario; 3] {
                 mist_fac: 0.07413377,
             },
             gpu: GpuProbe {
-                sky_top_lum: 0.326593,
-                road_center_lum: 0.150075,
+                sky_top_lum: 0.326430,
+                road_center_lum: 0.138161,
                 sun_disc_max_lum: 0.0,
                 flare_bloom_lum: 0.0,
             },

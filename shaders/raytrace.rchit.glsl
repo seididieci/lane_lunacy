@@ -45,6 +45,11 @@ layout(set = 0, binding = 1, std140) uniform MVP {
     vec4 lamp_state[16];
     vec4 terrain_state;
     vec4 clip_plane;
+    // Layout-parity tail of the shared MVP block: the raster mesh shader reads
+    // these for shadow mapping, but the RT backend bakes its own shadows into
+    // the payload, so this shader never uses them.
+    mat4 shadow_view_proj;
+    vec4 shadow_state;
 };
 
 struct RtSlot {

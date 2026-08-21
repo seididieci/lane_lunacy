@@ -12,6 +12,7 @@ layout(location = 2) out vec2 v_uv;
 layout(location = 3) out float v_depth;
 layout(location = 4) out float v_material;
 layout(location = 5) out vec3 v_world_pos;
+layout(location = 6) out vec4 v_light_pos;
 
 layout(set = 0, binding = 0) uniform MVP {
     mat4 model;
@@ -31,6 +32,8 @@ layout(set = 0, binding = 0) uniform MVP {
     vec4 lamp_state[16];
     vec4 terrain_state;
     vec4 clip_plane;
+    mat4 shadow_view_proj;
+    vec4 shadow_state;
 };
 
 void main() {
@@ -40,6 +43,7 @@ void main() {
     v_material = material;
     vec4 world_pos = model * vec4(position, 1.0);
     v_world_pos = world_pos.xyz;
+    v_light_pos = shadow_view_proj * world_pos;
     vec4 view_pos = view * world_pos;
     v_depth = -view_pos.z;
     gl_Position = projection * view_pos;

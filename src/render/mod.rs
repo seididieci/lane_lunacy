@@ -33,6 +33,7 @@ use crate::render::raytrace::RayTraceResources;
 use crate::render::record::record_frame_posted;
 use crate::render::reflection::{reflected_view, ReflectionResources, REFLECTION_PLANE_Y};
 use crate::render::scene::SceneResources;
+use crate::render::shadow_map::ShadowMapResources;
 use crate::shaders::{
     PostSettings, POST_BLOOM, POST_CHROMA, POST_DEBUG_MASK, POST_DEBUG_PLANAR, POST_DEBUG_REFLTEX,
     POST_FXAA, POST_GRAIN, POST_RAINDROPS, REFLECT_OFF, REFLECT_PLANAR, REFLECT_RT, POST_REFLECT,
@@ -57,6 +58,7 @@ pub mod raytrace;
 pub mod record;
 pub mod reflection;
 pub mod scene;
+pub mod shadow_map;
 pub mod snapshot;
 pub mod texture;
 
@@ -65,7 +67,7 @@ pub(crate) const WORLD_CHUNKS_BEHIND: i32 = 1;
 pub(crate) const WORLD_CHUNKS_AHEAD: i32 = 6;
 
 /// Per-frame toggles for the post-processing composite.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FxSettings {
     pub fxaa: bool,
     pub bloom: bool,
@@ -78,10 +80,31 @@ pub struct FxSettings {
     /// Puddle-reflection quality uniform:
     /// 0 = off, 1 = low, 2 = medium, 3 = high.
     pub puddle_quality: f32,
+    /// Raster sun shadows (depth shadow map sampled by the mesh shader).
+    /// Independent of `raytrace`: when ray tracing is on, the RT backend's own
+    /// shadow probes take over and this flag is ignored.
+    pub shadows: bool,
     /// Ray-traced lighting + reflections: replaces the raster scene, the
     /// puddle mask and the planar-reflection pass. Requires a device with the
     /// ray-tracing extensions (see `gpu::ray_tracing_supported`).
     pub raytrace: bool,
+}
+
+impl Default for FxSettings {
+    fn default() -> Self {
+        FxSettings {
+            fxaa: true,
+            bloom: true,
+            vignette: true,
+            grain: true,
+            saturation: true,
+            chroma: true,
+            rain_fx: true,
+            puddle_quality: 3.0,
+            shadows: true,
+            raytrace: false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -191,6 +214,9 @@ pub struct Renderer {
     /// Dedicated puddle-mask pass: renders a stable asphalt mask texture from
     /// the main camera without relying on post depth reconstruction.
     puddle_mask: PuddleMaskResources,
+    /// Raster sun shadow map (depth-only pass sampled by the mesh shader).
+    /// Fixed 2048² resolution, so it never resizes with the window.
+    shadow_map: ShadowMapResources,
     /// Ray-traced backend, created lazily on the first frame it is enabled.
     /// Only present when the device supports the ray-tracing extensions.
     raytrace: Option<Arc<RayTraceResources>>,
@@ -339,6 +365,7 @@ impl Renderer {
             reflection_scale_div,
         );
         let puddle_mask = PuddleMaskResources::new(&device, &scene.memory_allocator, extent);
+        let shadow_map = ShadowMapResources::new(&device, &scene.memory_allocator);
         let post_framebuffers = create_post_framebuffers(&post.pass, &images);
         let hud_framebuffers = create_post_framebuffers(&post.hud_pass, &images);
         let frame_count = post_framebuffers.len();
@@ -364,6 +391,7 @@ impl Renderer {
             post,
             reflection,
             puddle_mask,
+            shadow_map,
             raytrace: None,
             ray_tracing_supported: crate::gpu::ray_tracing_supported(physical),
             frame_builder: FrameBuilder::new(),
@@ -679,6 +707,8 @@ impl Renderer {
             &self.reflection,
             &self.puddle_mask,
             rt_backend,
+            Some(&self.shadow_map),
+            fx.shadows,
             should_record_reflection,
             game,
             &frame,

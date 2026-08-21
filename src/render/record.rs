@@ -37,8 +37,9 @@ use crate::render::reflection::{
     reflected_view, ReflectionBackend, ReflectionResources, REFLECTION_CLIP_Y,
 };
 use crate::render::scene::SceneResources;
+use crate::render::shadow_map::{ShadowMapResources, SHADOW_MAP_SIZE};
 use crate::road::road_curve;
-use crate::shaders::{BloomParams, PostSettings};
+use crate::shaders::{BloomParams, PostSettings, ShadowVP};
 use crate::vertex::{HudVertex, Vertex3d};
 
 /// Linear-HDR luminance above which a source pixel contributes to the bloom
@@ -49,11 +50,14 @@ const BLOOM_KNEE: f32 = 0.12;
 /// Records every draw in the scene into a primary command buffer for the given
 /// framebuffer. The caller owns the render pass begin/end, the framebuffer,
 /// and the submit/present.
+#[allow(clippy::too_many_arguments)]
 pub fn record_frame(
     scene: &SceneResources,
     game: &Game,
     frame: &Frame,
     world_chunks: &[WorldChunk],
+    shadow: &ShadowMapResources,
+    shadows: bool,
     framebuffer: Arc<Framebuffer>,
     viewport: &Viewport,
 ) -> Arc<PrimaryAutoCommandBuffer> {
@@ -64,6 +68,7 @@ pub fn record_frame(
     )
     .expect("command buffer builder");
 
+    record_shadow_map(&mut builder, scene, shadow, frame, world_chunks, shadows);
     builder
         .begin_render_pass(
             RenderPassBeginInfo {
@@ -78,7 +83,7 @@ pub fn record_frame(
         .expect("begin render pass")
         .set_viewport(0, [viewport.clone()].into_iter().collect())
         .expect("set viewport");
-    record_scene_contents(&mut builder, scene, game, frame, world_chunks);
+    record_scene_contents(&mut builder, scene, game, frame, world_chunks, shadow, shadows);
     record_hud(
         &mut builder,
         scene,
@@ -109,6 +114,8 @@ pub fn record_frame_posted(
     reflection: &ReflectionResources,
     puddle_mask: &PuddleMaskResources,
     mut raytrace: Option<&mut RayTraceResources>,
+    shadow: Option<&ShadowMapResources>,
+    shadows: bool,
     should_record_reflection: bool,
     game: &Game,
     frame: &Frame,
@@ -133,6 +140,17 @@ pub fn record_frame_posted(
         CommandBufferUsage::MultipleSubmit,
     )
     .expect("command buffer builder");
+
+    // ---- Sun shadow map ----
+    // Written before the scene so the mesh pass can sample it. Skipped under
+    // ray tracing (the RT backend bakes its own shadows). In the raster path
+    // the map is cleared even when the sun is down or the toggle is off, so
+    // receivers always read a valid "lit" depth.
+    if raytrace.is_none() {
+        if let Some(shadow) = shadow {
+            record_shadow_map(&mut builder, scene, shadow, frame, world_chunks, shadows);
+        }
+    }
 
     // ---- Scene into offscreen ----
     // Under ray tracing the backend replaces the raster scene (and the puddle
@@ -189,6 +207,7 @@ pub fn record_frame_posted(
                     &frame.headlights,
                     rt_depth.clone(),
                     depth_sampler.clone(),
+                    shadows,
                 );
             }
             if !frame.dust_verts.is_empty() {
@@ -200,6 +219,7 @@ pub fn record_frame_posted(
                     &frame.headlights,
                     rt_depth.clone(),
                     depth_sampler.clone(),
+                    shadows,
                 );
             }
             if !frame.particle_verts.is_empty() {
@@ -211,6 +231,7 @@ pub fn record_frame_posted(
                     &frame.headlights,
                     rt_depth,
                     depth_sampler,
+                    shadows,
                 );
             }
             builder
@@ -245,7 +266,15 @@ pub fn record_frame_posted(
                 .expect("begin scene render pass")
                 .set_viewport(0, [viewport.clone()].into_iter().collect())
                 .expect("set viewport");
-            record_scene_contents(&mut builder, scene, game, frame, world_chunks);
+            record_scene_contents(
+                &mut builder,
+                scene,
+                game,
+                frame,
+                world_chunks,
+                shadow.expect("raster scene pass requires the shadow map"),
+                shadows,
+            );
             builder
                 .end_render_pass(SubpassEndInfo::default())
                 .expect("end scene render pass");
@@ -277,6 +306,7 @@ pub fn record_frame_posted(
             world_chunks,
             puddle_mask.framebuffer.clone(),
             &mask_viewport,
+            shadows,
         );
 
         if should_record_reflection {
@@ -296,6 +326,8 @@ pub fn record_frame_posted(
                 reflection.framebuffer.clone(),
                 &reflection_viewport,
                 settings.planar_plane_y,
+                shadow.expect("planar reflection requires the shadow map"),
+                shadows,
             );
         }
     }
@@ -502,6 +534,8 @@ fn record_scene_contents(
     game: &Game,
     frame: &Frame,
     world_chunks: &[WorldChunk],
+    shadow: &ShadowMapResources,
+    shadows: bool,
 ) {
     let Frame {
         uniforms,
@@ -583,7 +617,7 @@ fn record_scene_contents(
                 texture: Arc<ImageView>,
                 model: Mat4| {
         let index_count = indices.len() as u32;
-        let mvp = scene.mvp_buffer(model, uniforms, headlights, [0.0, 0.0, 0.0, -1.0]);
+        let mvp = scene.mvp_buffer(model, uniforms, headlights, [0.0, 0.0, 0.0, -1.0], shadows);
         let set_layout = scene.mesh_pipeline.layout().set_layouts()[0].clone();
         let set = DescriptorSet::new(
             scene.descriptor_set_allocator.clone(),
@@ -591,6 +625,11 @@ fn record_scene_contents(
             [
                 WriteDescriptorSet::buffer(0, mvp.clone()),
                 WriteDescriptorSet::image_view_sampler(1, texture, scene.mesh_sampler.clone()),
+                WriteDescriptorSet::image_view_sampler(
+                    2,
+                    shadow.depth_view.clone(),
+                    shadow.sampler.clone(),
+                ),
             ],
             [],
         )
@@ -666,6 +705,7 @@ fn record_scene_contents(
             mist_verts,
             uniforms,
             headlights,
+            shadows,
         );
     }
     if !dust_verts.is_empty() {
@@ -675,6 +715,7 @@ fn record_scene_contents(
             dust_verts,
             uniforms,
             headlights,
+            shadows,
         );
     }
     if !particle_verts.is_empty() {
@@ -684,6 +725,7 @@ fn record_scene_contents(
             particle_verts,
             uniforms,
             headlights,
+            shadows,
         );
     }
 
@@ -749,6 +791,96 @@ fn record_scene_contents(
     }
 }
 
+/// Records the depth-only sun shadow map: clears the 2048² depth target, then
+/// draws the world chunks (casters only — cars never cast, mirroring the
+/// ray-traced backend's cull masks) through the sun's ortho view-proj. When the
+/// sun is below the horizon or shadows are toggled off, the pass clears to far
+/// depth and draws nothing, so receivers sample "fully lit".
+fn record_shadow_map(
+    builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+    scene: &SceneResources,
+    shadow: &ShadowMapResources,
+    frame: &Frame,
+    world_chunks: &[WorldChunk],
+    shadows: bool,
+) {
+    let shadow_viewport = Viewport {
+        offset: [0.0, 0.0],
+        extent: [SHADOW_MAP_SIZE as f32, SHADOW_MAP_SIZE as f32],
+        depth_range: 0.0..=1.0,
+    };
+    builder
+        .begin_render_pass(
+            RenderPassBeginInfo {
+                // Depth-only: one clear value (far = "nothing occludes").
+                clear_values: vec![Some(1.0f32.into())],
+                ..RenderPassBeginInfo::framebuffer(shadow.framebuffer.clone())
+            },
+            SubpassBeginInfo {
+                contents: SubpassContents::Inline,
+                ..Default::default()
+            },
+        )
+        .expect("begin shadow render pass")
+        .set_viewport(0, [shadow_viewport].into_iter().collect())
+        .expect("set shadow viewport");
+
+    let sun_up = frame.sky_uniform.sun_state[0] > 0.001;
+    if shadows && sun_up {
+        let shadow_vp = ShadowVP {
+            view_proj: frame.uniforms.light_view_proj.to_cols_array_2d(),
+        };
+        let vp_buf = Buffer::from_data(
+            scene.memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::UNIFORM_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            shadow_vp,
+        )
+        .expect("shadow vp buffer");
+        let set_layout = shadow.pipeline.layout().set_layouts()[0].clone();
+        let set = DescriptorSet::new(
+            scene.descriptor_set_allocator.clone(),
+            set_layout,
+            [WriteDescriptorSet::buffer(0, vp_buf)],
+            [],
+        )
+        .expect("shadow descriptor set");
+        builder
+            .bind_pipeline_graphics(shadow.pipeline.clone())
+            .expect("bind shadow pipeline")
+            .bind_descriptor_sets(
+                PipelineBindPoint::Graphics,
+                shadow.pipeline.layout().clone(),
+                0,
+                set,
+            )
+            .expect("bind shadow descriptor sets");
+        for (world_vertices, world_indices) in world_chunks {
+            let index_count = world_indices.len() as u32;
+            builder
+                .bind_vertex_buffers(0, world_vertices.clone())
+                .expect("bind shadow vertex buffers")
+                .bind_index_buffer(world_indices.clone())
+                .expect("bind shadow index buffer");
+            unsafe {
+                builder
+                    .draw_indexed(index_count, 1, 0, 0, 0)
+                    .expect("draw shadow");
+            }
+        }
+    }
+
+    builder
+        .end_render_pass(SubpassEndInfo::default())
+        .expect("end shadow render pass");
+}
+
 /// Records the mirrored-camera planar reflection pass: sky dome + world
 /// chunks + player + traffic into the reflection target, with geometry below
 /// the road plane clipped out and culling disabled (mirroring flips winding).
@@ -766,6 +898,8 @@ fn record_reflection(
     framebuffer: Arc<Framebuffer>,
     viewport: &Viewport,
     plane_y: f32,
+    shadow: &ShadowMapResources,
+    shadows: bool,
 ) {
     let reflect_view = reflected_view(frame.uniforms.view, plane_y);
     let mut uniforms = frame.uniforms;
@@ -871,7 +1005,7 @@ fn record_reflection(
                 texture: Arc<ImageView>,
                 model: Mat4| {
         let index_count = indices.len() as u32;
-        let mvp = scene.mvp_buffer(model, &uniforms, &frame.headlights, clip_plane);
+        let mvp = scene.mvp_buffer(model, &uniforms, &frame.headlights, clip_plane, shadows);
         let set_layout = reflection.mesh_pipeline.layout().set_layouts()[0].clone();
         let set = DescriptorSet::new(
             scene.descriptor_set_allocator.clone(),
@@ -879,6 +1013,11 @@ fn record_reflection(
             [
                 WriteDescriptorSet::buffer(0, mvp),
                 WriteDescriptorSet::image_view_sampler(1, texture, scene.mesh_sampler.clone()),
+                WriteDescriptorSet::image_view_sampler(
+                    2,
+                    shadow.depth_view.clone(),
+                    shadow.sampler.clone(),
+                ),
             ],
             [],
         )
@@ -957,6 +1096,7 @@ fn record_puddle_mask(
     world_chunks: &[WorldChunk],
     framebuffer: Arc<Framebuffer>,
     viewport: &Viewport,
+    shadows: bool,
 ) {
     builder
         .begin_render_pass(
@@ -985,6 +1125,7 @@ fn record_puddle_mask(
             &frame.uniforms,
             &frame.headlights,
             [0.0, 0.0, 0.0, -1.0],
+            shadows,
         );
         let set_layout = puddle_mask.pipeline.layout().set_layouts()[0].clone();
         let set = DescriptorSet::new(

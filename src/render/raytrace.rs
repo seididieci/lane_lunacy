@@ -1110,7 +1110,7 @@ impl RayTraceResources {
             rt,
         )
         .expect("rt uniforms buffer");
-        let mvp = scene.mvp_buffer(Mat4::IDENTITY, &frame.uniforms, &frame.headlights, [0.0, 0.0, 0.0, -1.0]);
+        let mvp = scene.mvp_buffer(Mat4::IDENTITY, &frame.uniforms, &frame.headlights, [0.0, 0.0, 0.0, -1.0], false);
 
         let set_layout_0 = self.layout.set_layouts()[0].clone();
         let set_0 = DescriptorSet::new(

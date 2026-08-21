@@ -756,13 +756,15 @@ impl SceneResources {
     /// Uploads the per-draw uniform block for the mesh shader (also used by
     /// the particle pipeline via the same UBO layout). `clip_plane` is the
     /// world-space `(n, d)` clip plane; the ordinary scene passes pass the
-    /// disabled sentinel `(0,0,0,-1)`.
+    /// disabled sentinel `(0,0,0,-1)`. `shadows` gates the mesh shader's
+    /// shadow-map sampling (`shadow_state.x`); particle/RT consumers ignore it.
     pub fn mvp_buffer(
         &self,
         model: Mat4,
         uniforms: &FrameUniforms,
         headlights: &Headlights,
         clip_plane: [f32; 4],
+        shadows: bool,
     ) -> Subbuffer<MVP> {
         let FrameUniforms {
             view,
@@ -771,6 +773,7 @@ impl SceneResources {
             wet_fac,
             fog_color,
             eye,
+            light_view_proj,
         } = *uniforms;
         let Headlights {
             pos: headlight_pos,
@@ -810,6 +813,8 @@ impl SceneResources {
                 0.0,
             ],
             clip_plane,
+            shadow_view_proj: light_view_proj.to_cols_array_2d(),
+            shadow_state: [if shadows { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
         };
         Buffer::from_data(
             self.memory_allocator.clone(),
@@ -827,7 +832,8 @@ impl SceneResources {
     }
 
     /// Binds the particle pipeline and draws camera-facing billboard quads.
-    /// Shared by rain and the night taillights.
+    /// Shared by rain and the night taillights. `shadows` feeds the shared MVP
+    /// block (the particle shaders never read it).
     pub fn draw_particles(
         &self,
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
@@ -835,12 +841,13 @@ impl SceneResources {
         verts: &[ParticleVertex],
         uniforms: &FrameUniforms,
         headlights: &Headlights,
+        shadows: bool,
     ) {
         if verts.is_empty() {
             return;
         }
         let particle_count = verts.len() as u32;
-        let mvp = self.mvp_buffer(Mat4::IDENTITY, uniforms, headlights, [0.0, 0.0, 0.0, -1.0]);
+        let mvp = self.mvp_buffer(Mat4::IDENTITY, uniforms, headlights, [0.0, 0.0, 0.0, -1.0], shadows);
         let set_layout = pipeline.layout().set_layouts()[0].clone();
         let set = DescriptorSet::new(
             self.descriptor_set_allocator.clone(),
@@ -892,7 +899,8 @@ impl SceneResources {
     /// [`Self::draw_particles`] but binds a third descriptor (binding 2) with
     /// the raygen's linear-depth image so `rt_particle.frag.glsl` can discard
     /// fragments hidden behind geometry. `depth_sampler` must be a NEAREST
-    /// sampler (exact texel depth reads, like the post composite's).
+    /// sampler (exact texel depth reads, like the post composite's). `shadows`
+    /// feeds the shared MVP block (the RT overlay shader never reads it).
     #[allow(clippy::too_many_arguments)]
     pub fn draw_rt_particles(
         &self,
@@ -903,12 +911,13 @@ impl SceneResources {
         headlights: &Headlights,
         depth_view: Arc<ImageView>,
         depth_sampler: Arc<Sampler>,
+        shadows: bool,
     ) {
         if verts.is_empty() {
             return;
         }
         let particle_count = verts.len() as u32;
-        let mvp = self.mvp_buffer(Mat4::IDENTITY, uniforms, headlights, [0.0, 0.0, 0.0, -1.0]);
+        let mvp = self.mvp_buffer(Mat4::IDENTITY, uniforms, headlights, [0.0, 0.0, 0.0, -1.0], shadows);
         let set_layout = pipeline.layout().set_layouts()[0].clone();
         let set = DescriptorSet::new(
             self.descriptor_set_allocator.clone(),

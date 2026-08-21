@@ -42,7 +42,13 @@ Fixes (`shaders/raytrace.rgen.glsl`, `shaders/raytrace.rchit.glsl`):
 Design scope (user-confirmed): sun/moon light only, world geometry (terrain,
 walls, rock faces) casts; player/traffic cars are permanently excluded via
 instance cull masks (statics `0xfe`, chunks `0x01`, probe cull mask `0x01`).
-Raster shadow-mapping remains a deferred follow-up.
+The raster path now gets the same sun shadows via a depth shadow map
+(`--shadows` graphics toggle, default on): world chunks are rendered from a
+sun-ortho camera into a 2048² D32 map and the mesh shader samples it with 3×3
+PCF, scaling only the direct-sun term so ambient/headlights stay unshadowed.
+Cars never cast (they aren't drawn into the map) but still receive, matching
+the RT rules; the planar-reflection pass samples the same map. Moonlight does
+not cast in either backend (both gate on the sun elevation).
 
 Verified (vision on deterministic `--seed 420 --weather clear --auto-start`
 captures): sun-facing sides bright, far sides dark with correct direction;

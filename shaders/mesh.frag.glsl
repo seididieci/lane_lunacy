@@ -6,6 +6,7 @@ layout(location = 2) in vec2 v_uv;
 layout(location = 3) in float v_depth;
 layout(location = 4) in float v_material;
 layout(location = 5) in vec3 v_world_pos;
+layout(location = 6) in vec4 v_light_pos;
 layout(location = 0) out vec4 f_color;
 
 layout(set = 0, binding = 0) uniform MVP {
@@ -26,9 +27,50 @@ layout(set = 0, binding = 0) uniform MVP {
     vec4 lamp_state[16];
     vec4 terrain_state;
     vec4 clip_plane;
+    mat4 shadow_view_proj;
+    vec4 shadow_state;
 };
 
 layout(set = 0, binding = 1) uniform sampler2D tex;
+// Sun shadow map written by the depth-only shadow pass. Sampled with a NEAREST
+// sampler; PCF happens here in the shader (3x3 kernel), so the edge softness
+// stays CPU-tunable and does not depend on hardware shadow samplers.
+layout(set = 0, binding = 2) uniform sampler2D shadow_map;
+
+// One shadow-map texel (1/2048, matching SHADOW_MAP_SIZE in shadow_map.rs).
+const float SHADOW_TEXEL = 1.0 / 2048.0;
+// Constant + slope-scaled receiver bias (in the shadow map's [0,1] NDC depth).
+// The slope term grows with grazing incidence so steep rock faces don't acne,
+// while flat ground keeps the tight minimum so shadows stay attached.
+const float SHADOW_BIAS_CONST = 0.0015;
+const float SHADOW_BIAS_SLOPE = 0.004;
+
+// Sun shadow factor at this fragment: 1.0 lit, ~0.0 fully occluded by world
+// geometry (the caster pass renders chunks only; cars never cast, mirroring
+// the ray-traced backend's cull masks). Points outside the map or behind the
+// light read as fully lit.
+float shadow_factor(vec3 n, vec3 L) {
+    if (v_light_pos.w <= 0.0) {
+        return 1.0;
+    }
+    vec3 ndc = v_light_pos.xyz / v_light_pos.w;
+    vec2 uv = ndc.xy * 0.5 + 0.5;
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+        return 1.0;
+    }
+    float bias = SHADOW_BIAS_CONST + SHADOW_BIAS_SLOPE * (1.0 - max(dot(n, L), 0.0));
+    float depth = ndc.z - bias;
+    // 3x3 percentage-closer filter: average the lit/occluded binary tests so
+    // the shadow edge lands on a soft penumbra instead of a hard line.
+    float shadow = 0.0;
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            float sampled = texture(shadow_map, uv + vec2(float(x), float(y)) * SHADOW_TEXEL).r;
+            shadow += (sampled < depth) ? 0.0 : 1.0;
+        }
+    }
+    return shadow / 9.0;
+}
 
 void main() {
     // Planar-reflection clip plane (world space): discard fragments strictly
@@ -84,7 +126,17 @@ void main() {
     if (v_material >= 3.0 && v_material < 90.0) {
         albedo *= terrain_state.xyz;
     }
-    vec3 lit = albedo * (ambient + diff * sun_intensity * 0.85);
+
+    // Sun shadow: the direct sun/moon term only. `sun_base` is scaled by the
+    // shadow map's factor while ambient (and every artificial light added
+    // below) stays untouched, so shadows read as shade rather than black holes
+    // — the exact separation the ray-traced backend uses (rchit `sun_base`).
+    vec3 sun_base = albedo * (diff * sun_intensity * 0.85);
+    float shadow_vis = 1.0;
+    if (sun_intensity > 0.001 && shadow_state.x > 0.5) {
+        shadow_vis = shadow_factor(n, normalize(light_dir.xyz));
+    }
+    vec3 lit = albedo * ambient + sun_base * shadow_vis;
 
     // Wet asphalt: darken + glossy sun/moon sheen (mirrors mesh.frag).
 

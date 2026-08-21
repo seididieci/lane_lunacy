@@ -206,10 +206,17 @@ pub fn graphics_pipeline(
                 ..Default::default()
             }),
             depth_stencil_state: depth_stencil,
-            color_blend_state: Some(ColorBlendState::with_attachment_states(
-                subpass.num_color_attachments(),
-                blend_attachment,
-            )),
+            color_blend_state: if subpass.num_color_attachments() == 0 {
+                // Depth-only passes (shadow maps) must not set a color blend
+                // state at all: with no color attachments Vulkan requires it to
+                // be `None`.
+                None
+            } else {
+                Some(ColorBlendState::with_attachment_states(
+                    subpass.num_color_attachments(),
+                    blend_attachment,
+                ))
+            },
             dynamic_state: [DynamicState::Viewport].into_iter().collect(),
             subpass: Some(subpass.clone().into()),
             ..GraphicsPipelineCreateInfo::layout(layout)

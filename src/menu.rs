@@ -112,6 +112,7 @@ pub enum GraphicsRow {
     ChromaticAberration,
     RainFx,
     Reflect,
+    Shadows,
     Raytrace,
     Apply,
     Back,
@@ -132,7 +133,8 @@ impl GraphicsRow {
             GraphicsRow::ChromaticAberration => GraphicsRow::Saturation,
             GraphicsRow::RainFx => GraphicsRow::ChromaticAberration,
             GraphicsRow::Reflect => GraphicsRow::RainFx,
-            GraphicsRow::Raytrace => GraphicsRow::Reflect,
+            GraphicsRow::Shadows => GraphicsRow::Reflect,
+            GraphicsRow::Raytrace => GraphicsRow::Shadows,
             GraphicsRow::Apply => GraphicsRow::Raytrace,
             GraphicsRow::Back => GraphicsRow::Apply,
         }
@@ -151,7 +153,8 @@ impl GraphicsRow {
             GraphicsRow::Saturation => GraphicsRow::ChromaticAberration,
             GraphicsRow::ChromaticAberration => GraphicsRow::RainFx,
             GraphicsRow::RainFx => GraphicsRow::Reflect,
-            GraphicsRow::Reflect => GraphicsRow::Raytrace,
+            GraphicsRow::Reflect => GraphicsRow::Shadows,
+            GraphicsRow::Shadows => GraphicsRow::Raytrace,
             GraphicsRow::Raytrace => GraphicsRow::Apply,
             GraphicsRow::Apply => GraphicsRow::Back,
             GraphicsRow::Back => GraphicsRow::Back,
@@ -288,6 +291,8 @@ pub struct SettingsState {
     /// Planar puddle reflections on the wet asphalt (high quality by default;
     /// can be lowered or disabled for weaker GPUs).
     pub puddles: PuddleQuality,
+    /// Raster sun shadows (on by default; disabled ignores the shadow map).
+    pub shadows: bool,
     /// Full ray-traced lighting + reflections (only on GPUs with the
     /// ray-tracing extensions).
     pub raytrace: bool,
@@ -311,6 +316,7 @@ impl Default for SettingsState {
             chroma: false,
             rain_fx: true,
             puddles: PuddleQuality::High,
+            shadows: true,
             raytrace: false,
             audio: AudioSettings::default(),
         }
@@ -332,6 +338,7 @@ impl SettingsState {
             && self.chroma == other.chroma
             && self.rain_fx == other.rain_fx
             && self.puddles == other.puddles
+            && self.shadows == other.shadows
             && self.raytrace == other.raytrace
     }
 
@@ -355,6 +362,7 @@ impl SettingsState {
         self.chroma = src.chroma;
         self.rain_fx = src.rain_fx;
         self.puddles = src.puddles;
+        self.shadows = src.shadows;
         self.raytrace = src.raytrace;
     }
 }
@@ -513,6 +521,7 @@ impl MenuState {
             GraphicsRow::Saturation => self.settings.saturation = !self.settings.saturation,
             GraphicsRow::ChromaticAberration => self.settings.chroma = !self.settings.chroma,
             GraphicsRow::RainFx => self.settings.rain_fx = !self.settings.rain_fx,
+            GraphicsRow::Shadows => self.settings.shadows = !self.settings.shadows,
             GraphicsRow::Raytrace => self.settings.raytrace = !self.settings.raytrace,
             _ => {}
         }
@@ -822,18 +831,27 @@ fn build_graphics_tree(
             ),
             Node::new(
                 Button::new(
-                    format!("RAYTRACING  {}", on_off(s.raytrace)),
+                    format!("SHADOWS  {}", on_off(s.shadows)),
                     ROW_EM,
                     ROW_COLOR,
                     21,
                 )
+                .focused(focused(GraphicsRow::Shadows)),
+            ),
+            Node::new(
+                Button::new(
+                    format!("RAYTRACING  {}", on_off(s.raytrace)),
+                    ROW_EM,
+                    ROW_COLOR,
+                    22,
+                )
                 .focused(focused(GraphicsRow::Raytrace)),
             ),
             Node::new(
-                Button::new("APPLY", ROW_EM, apply_color, 22).focused(focused(GraphicsRow::Apply)),
+                Button::new("APPLY", ROW_EM, apply_color, 23).focused(focused(GraphicsRow::Apply)),
             ),
             Node::new(
-                Button::new("BACK", ROW_EM, ROW_COLOR, 23).focused(focused(GraphicsRow::Back)),
+                Button::new("BACK", ROW_EM, ROW_COLOR, 24).focused(focused(GraphicsRow::Back)),
             ),
         ],
         ROW_GAP,
@@ -997,7 +1015,7 @@ mod tests {
         menu.open_graphics();
         let (root, ui) = build(&menu, true, false);
 
-        for id in 10..=23 {
+        for id in 10..=24 {
             assert!(
                 hit_test_id(&root, &ui, id),
                 "graphics row id {id} must be hit-testable"
@@ -1188,6 +1206,12 @@ mod tests {
         assert!(menu.settings.bloom);
         menu.toggle_fx(GraphicsRow::Bloom);
         assert!(!menu.settings.bloom);
+        // Raster shadows default on and toggle off/on like the other FX rows.
+        assert!(menu.settings.shadows);
+        menu.toggle_fx(GraphicsRow::Shadows);
+        assert!(!menu.settings.shadows);
+        menu.toggle_fx(GraphicsRow::Shadows);
+        assert!(menu.settings.shadows);
         // Non-FX rows are no-ops.
         menu.toggle_fx(GraphicsRow::Apply);
         assert!(!menu.settings.fxaa);
